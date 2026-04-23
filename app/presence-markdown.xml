@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<style-scheme id="presence-markdown" name="Presence Markdown" version="1.0">
+  <style name="text"                    foreground="#1a1a2e" background="#ffffff"/>
+  <style name="selection"               background="#4a90d9" foreground="#ffffff"/>
+  <style name="cursor"                  foreground="#1a1a2e"/>
+  <style name="current-line"            background="#f5f5f5"/>
+  <style name="line-numbers"            foreground="#aaaaaa" background="#f8f8f8"/>
+  <style name="current-line-number"     foreground="#555555" background="#f0f0f0"/>
+  <style name="bracket-match"           foreground="#e17000" bold="true"/>
+  <style name="bracket-mismatch"        foreground="#cc0000" bold="true"/>
+  <style name="search-match"            background="#ffdd00" foreground="#000000"/>
+  <style name="right-margin"            foreground="#888888"/>
+  <style name="markdown:horizontal-rule" foreground="#e17000" bold="true"/>
+  <style name="markdown:thematic-break"  foreground="#e17000" bold="true"/>
+  <style name="markdown:header"          bold="true"/>
+  <style name="markdown:atx-header"     bold="true"/>
+  <style name="markdown:setext-header"  bold="true"/>
+  <style name="markdown:code-span"      foreground="#0055aa" background="#eef2ff"/>
+  <style name="markdown:code-block"     foreground="#0055aa" background="#f0f4ff"/>
+  <style name="markdown:fenced-code-block" foreground="#0055aa" background="#f0f4ff"/>
+  <style name="markdown:blockquote-marker" italic="true"/>
+  <style name="markdown:blockquote"     italic="true"/>
+  <style name="markdown:link"           foreground="#1a56db"/>
+  <style name="markdown:link-text"      foreground="#1a56db"/>
+  <style name="markdown:image"          foreground="#888888"/>
+  <style name="markdown:url"            foreground="#888888"/>
+  <style name="markdown:emphasis"       italic="true"/>
+  <style name="markdown:strong-emphasis" bold="true"/>
+  <style name="def:comment"             foreground="#888888" italic="true"/>
+</style-scheme>

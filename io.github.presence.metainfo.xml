@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.presence</id>
+
+  <name>Presence</name>
+  <summary>Convert Markdown to PDF slideshows</summary>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <description>
+    <p>
+      Presence is a Markdown-based presentation editor. Write your slides in
+      plain Markdown, preview them live, and export to PDF with a single click.
+    </p>
+    <p>Features include:</p>
+    <ul>
+      <li>Live preview as you type</li>
+      <li>Multiple built-in themes</li>
+      <li>Presenter mode with speaker notes and timer</li>
+      <li>Image layout editor</li>
+      <li>Export to PDF and HTML</li>
+      <li>Drag-and-drop slide reordering</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">io.github.presence.desktop</launchable>
+
+  <url type="homepage">https://github.com/presence</url>
+  <url type="bugtracker">https://github.com/presence/issues</url>
+
+  <developer id="io.github.presence">
+    <name>Rory</name>
+  </developer>
+
+  <branding>
+    <color type="primary" scheme_preference="light">#E17000</color>
+    <color type="primary" scheme_preference="dark">#1a1a2e</color>
+  </branding>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="1.0.0" date="2026-04-20">
+      <description>
+        <p>Initial release.</p>
+      </description>
+    </release>
+  </releases>
+
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+</component>

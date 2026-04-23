@@ -1,0 +1,225 @@
+{
+    "app-id": "io.github.presence",
+    "runtime": "org.gnome.Platform",
+    "runtime-version": "47",
+    "sdk": "org.gnome.Sdk",
+    "command": "presence",
+    "finish-args": [
+        "--share=ipc",
+        "--socket=fallback-x11",
+        "--socket=wayland",
+        "--filesystem=home",
+        "--device=dri",
+        "--talk-name=org.gtk.vfs.*",
+        "--talk-name=org.gtk.vfs.Daemon"
+    ],
+    "modules": [
+        {
+            "name": "python-cffi",
+            "buildsystem": "simple",
+            "build-commands": [
+                "pip3 install --prefix=/app --no-build-isolation --find-links . cffi"
+            ],
+            "sources": [
+                {
+                    "type": "file",
+                    "url": "https://files.pythonhosted.org/packages/eb/56/b1ba7935a17738ae8453301356628e8147c79dbb825bcbc73dc7401f9846/cffi-2.0.0.tar.gz",
+                    "sha256": "44d1b5909021139fe36001ae048dbdde8214afa20200eda0f64c068cac5d5529"
+                },
+                {
+                    "type": "file",
+                    "url": "https://files.pythonhosted.org/packages/0c/c3/44f3fbbfa403ea2a7c779186dc20772604442dde72947e7d01069cbe98e3/pycparser-3.0-py3-none-any.whl",
+                    "sha256": "b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992"
+                }
+            ]
+        },
+        {
+            "name": "python3-Pillow",
+            "buildsystem": "simple",
+            "build-commands": [
+                "pip3 install --prefix=/app --no-index --find-links=file://${PWD} setuptools",
+                "pip3 install --prefix=/app --no-index --find-links=file://${PWD} packaging",
+                "pip3 install --prefix=/app --no-index --find-links=file://${PWD} flit_core",
+                "pip3 install --prefix=/app --no-index --find-links=file://${PWD} pathspec",
+                "pip3 install --prefix=/app --no-index --find-links=file://${PWD} scikit-build-core",
+                "pip3 install --prefix=/app --no-index --find-links=file://${PWD} pybind11",
+                "pip3 install --prefix=/app --no-index --find-links=file://${PWD} Pillow"
+            ],
+            "sources": [
+                {
+                    "type": "file",
+                    "url": "https://files.pythonhosted.org/packages/99/24/465b027ff26d934c0b9270de4f7f552ad22de4e53f0c975349d024277743/Pillow-12.1.1.tar.gz",
+                    "sha256": "936d35ca619429e6f0d0e059b92470a348d5a32e928e1d02f50e75d285d2705d"
+                },
+                {
+                    "type": "file",
+                    "url": "https://files.pythonhosted.org/packages/88/25/6658bd8c8009972e3b3912d59f6880c328d1d05df2d210e7fdef04470f9e/pybind11-3.0.2.tar.gz",
+                    "sha256": "b27f02d4a6209b01563d80bfa73537579980789579802f9d1d8509208217e88"
+                },
+                {
+                    "type": "file",
+                    "url": "https://files.pythonhosted.org/packages/1e/2a/2d08465a22552d5d35f76835e6b8cb50f2d80f214e377d7f09108a4b59d5/scikit_build_core-0.12.2-py3-none-any.whl",
+                    "sha256": "d68c2862a329e5e6e87e0b7ef7d3e8c77d2e9d52e02e27d0295f65d1a7d43a2e"
+                },
+                {
+                    "type": "file",
+                    "url": "https://files.pythonhosted.org/packages/7e/6a/89a8753d803c8fd047ab792dfd1d0bb4decae8f7e3e6699e14f725c7015f/pathspec-1.0.4.tar.gz",
+                    "sha256": "6c56537e5c8867c85f92659b827e2f64435e5528b1de572c27a354aa5fa86f0e"
+                },
+                {
+                    "type": "file",
+                    "url": "https://files.pythonhosted.org/packages/2a/87/54275f3a58afdd4a0c77d0f2af1e05c1802b2a6a90ab63556a1de7f029f/flit_core-3.12.0-py3-none-any.whl",
+                    "sha256": "222d1f6f55cdb2b53bdf0fb22932eeb56d75ff92e09d334b7556b3f79700b680"
+                },
+                {
+                    "type": "file",
+                    "url": "https://files.pythonhosted.org/packages/bf/63/ca81c7ee787f9e981714f59b682a29e56634a138795d19f11f9de20c5e5f/packaging-26.0-py3-none-any.whl",
+                    "sha256": "5c5690d761a2c9bc3b572e8696f90ddbeb8be47f7bdc7d3d7d2b62eab4e4d346"
+                },
+                {
+                    "type": "file",
+                    "url": "https://files.pythonhosted.org/packages/63/43/425c0122ed9bd84f6acde79183c686926e05573d0d5ef9cf44f7125687d3/setuptools-82.0.1-py3-none-any.whl",
+                    "sha256": "a05b9f6fefe7e400c3b97c911d09fc5e4bcda1e624f7e9f4a10a17b42b5d222b"
+                }
+            ]
+        },
+        {
+            "name": "python-cairo",
+            "buildsystem": "simple",
+            "build-commands": [
+                "pip3 install --prefix=/app --no-build-isolation --find-links . pycairo"
+            ],
+            "sources": [
+                {
+                    "type": "file",
+                    "url": "https://github.com/pygobject/pycairo/releases/download/v1.29.0/pycairo-1.29.0.tar.gz",
+                    "sha256": "3eb382a4141591807073274522f7aecab9e8fa2f14feafd11ac03a13a58141d7"
+                }
+            ]
+        },
+        {
+            "name": "python-deps",
+            "buildsystem": "simple",
+            "build-commands": [
+                "pip3 install --prefix=/app --no-build-isolation --find-links . markdown-it-py pygments pyyaml watchdog",
+                "pip3 install --prefix=/app --no-build-isolation --no-deps --find-links . weasyprint tinycss2 tinyhtml5 cssselect2 pyphen pydyf fonttools webencodings"
+            ],
+            "sources": [
+                {
+                    "type": "file",
+                    "url": "https://files.pythonhosted.org/packages/94/54/e7d793b573f298e1c9013b8c4dade17d481164aa517d1d7148619c2cedbf/markdown_it_py-4.0.0-py3-none-any.whl",
+                    "sha256": "87327c59b172c5011896038353a81343b6754500a08cd7a4973bb48c6d578147"
+                },
+                {
+                    "type": "file",
+                    "url": "https://files.pythonhosted.org/packages/b3/38/89ba8ad64ae25be8de66a6d463314cf1eb366222074cfda9ee839c56a4b4/mdurl-0.1.2-py3-none-any.whl",
+                    "sha256": "84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8"
+                },
+                {
+                    "type": "file",
+                    "url": "https://files.pythonhosted.org/packages/f4/7e/a72dd26f3b0f4f2bf1dd8923c85f7ceb43172af56d63c7383eb62b332364/pygments-2.20.0-py3-none-any.whl",
+                    "sha256": "81a9e26dd42fd28a23a2d169d86d7ac03b46e2f8b59ed4698fb4785f946d0176"
+                },
+                {
+                    "type": "file",
+                    "url": "https://files.pythonhosted.org/packages/05/8e/961c0007c59b8dd7729d542c61a4d537767a59645b82a0b521206e1e25c2/pyyaml-6.0.3.tar.gz",
+                    "sha256": "d76623373421df22fb4cf8817020cbb7ef15c725b9d5e45f17e189bfc384190f"
+                },
+                {
+                    "type": "file",
+                    "url": "https://files.pythonhosted.org/packages/db/7d/7f3d619e951c88ed75c6037b246ddcf2d322812ee8ea189be89511721d54/watchdog-6.0.0.tar.gz",
+                    "sha256": "9ddf7c82fda3ae8e24decda1338ede66e1c99883db93711d8fb941eaa2d8c282"
+                },
+                {
+                    "type": "file",
+                    "url": "https://files.pythonhosted.org/packages/dd/dd/14eb73cea481ad8162d3b18a4850d4a84d6e804a22840cca207648532265/weasyprint-68.1-py3-none-any.whl",
+                    "sha256": "4dc3ba63c68bbbce3e9617cb2226251c372f5ee90a8a484503b1c099da9cf5be"
+                },
+                {
+                    "type": "file",
+                    "url": "https://files.pythonhosted.org/packages/60/45/c7b5c3168458db837e8ceab06dc77824e18202679d0463f0e8f002143a97/tinycss2-1.5.1-py3-none-any.whl",
+                    "sha256": "3415ba0f5839c062696996998176c4a3751d18b7edaaeeb658c9ce21ec150661"
+                },
+                {
+                    "type": "file",
+                    "url": "https://files.pythonhosted.org/packages/52/48/01695a036b695f83fea7aef6955d735db0f517b1c8e25ddb399ac0bdbcbf/tinyhtml5-2.1.0-py3-none-any.whl",
+                    "sha256": "6e11cfff38515834268daf89d5f85bbde0b6dd02e8d9e212d1385c2289b89f0a"
+                },
+                {
+                    "type": "file",
+                    "url": "https://files.pythonhosted.org/packages/21/0e/8459ca4413e1a21a06c97d134bfaf18adfd27cea068813dc0faae06cbf00/cssselect2-0.9.0-py3-none-any.whl",
+                    "sha256": "6a99e5f91f9a016a304dd929b0966ca464bcfda15177b6fb4a118fc0fb5d9563"
+                },
+                {
+                    "type": "file",
+                    "url": "https://files.pythonhosted.org/packages/7b/1f/c2142d2edf833a90728e5cdeb10bdbdc094dde8dbac078cee0cf33f5e11b/pyphen-0.17.2-py3-none-any.whl",
+                    "sha256": "3a07fb017cb2341e1d9ff31b8634efb1ae4dc4b130468c7c39dd3d32e7c3affd"
+                },
+                {
+                    "type": "file",
+                    "url": "https://files.pythonhosted.org/packages/22/11/47efe2f66ba848a107adfd490b508f5c0cedc82127950553dca44d29e6c4/pydyf-0.12.1-py3-none-any.whl",
+                    "sha256": "ea25b4e1fe7911195cb57067560daaa266639184e8335365cc3ee5214e7eaadc"
+                },
+                {
+                    "type": "file",
+                    "url": "https://files.pythonhosted.org/packages/9a/08/7012b00a9a5874311b639c3920270c36ee0c445b69d9989a85e5c92ebcb0/fonttools-4.62.1.tar.gz",
+                    "sha256": "e54c75fd6041f1122476776880f7c3c3295ffa31962dc6ebe2543c00dca58b5d"
+                },
+                {
+                    "type": "file",
+                    "url": "https://files.pythonhosted.org/packages/f4/24/2a3e3df732393fed8b3ebf2ec078f05546de641fe1b667ee316ec1dcf3b7/webencodings-0.5.1-py2.py3-none-any.whl",
+                    "sha256": "a0af1213f3c2226497a97e2b3aa01a7e4bee4f403f95be16fc9acd2947514a78"
+                }
+            ]
+        },
+        {
+            "name": "poppler",
+            "buildsystem": "cmake-ninja",
+            "config-opts": [
+                "-DCMAKE_BUILD_TYPE=Release",
+                "-DENABLE_BOOST=OFF",
+                "-DENABLE_CPP=OFF",
+                "-DENABLE_GLIB=ON",
+                "-DENABLE_GOBJECT_INTROSPECTION=ON",
+                "-DENABLE_GTK_DOC=OFF",
+                "-DENABLE_LIBOPENJPEG=none",
+                "-DENABLE_QT5=OFF",
+                "-DENABLE_QT6=OFF",
+                "-DBUILD_GTK_TESTS=OFF",
+                "-DBUILD_QT5_TESTS=OFF",
+                "-DBUILD_QT6_TESTS=OFF",
+                "-DBUILD_CPP_TESTS=OFF",
+                "-DBUILD_MANUAL_TESTS=OFF"
+            ],
+            "sources": [
+                {
+                    "type": "archive",
+                    "url": "https://poppler.freedesktop.org/poppler-26.03.0.tar.xz",
+                    "sha256": "19187a3fdd05f33e7d604c4799c183de5ca0118b2e2d2f8a1604ae8fce2a6910"
+                }
+            ]
+        },
+        {
+            "name": "presence",
+            "buildsystem": "simple",
+            "build-commands": [
+                "find app md_to_slides -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true",
+                "find app md_to_slides -name '*.pyc' -delete 2>/dev/null || true",
+                "mkdir -p /app/lib/presence",
+                "cp -r app md_to_slides /app/lib/presence/",
+                "mkdir -p /app/share/gtksourceview-5/styles",
+                "cp app/presence-markdown.xml /app/share/gtksourceview-5/styles/",
+                "install -Dm644 app/presence.svg /app/share/icons/hicolor/scalable/apps/io.github.presence.svg",
+                "install -Dm644 io.github.presence.desktop /app/share/applications/io.github.presence.desktop",
+                "install -Dm644 io.github.presence.metainfo.xml /app/share/metainfo/io.github.presence.metainfo.xml",
+                "install -Dm755 presence.sh /app/bin/presence"
+            ],
+            "sources": [
+                {
+                    "type": "dir",
+                    "path": "."
+                }
+            ]
+        }
+    ]
+}
