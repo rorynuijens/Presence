@@ -5,7 +5,7 @@ html.py — Assemble the full HTML document from rendered slide fragments.
 import html as _html
 
 from .slides      import (is_title_slide, extract_speaker_notes,
-                          extract_images, infer_slide_title)
+                          extract_images, infer_slide_title, split_two_columns)
 from .renderer    import render_slide_content
 from .frontmatter import extract_slide_directives
 from .utils       import logo_img_tag, progress_bar_html
@@ -164,7 +164,16 @@ def _render_normal_slide(
     logo_b64:       str | None,
     theme_override: str = "",
 ) -> str:
-    content = render_slide_content(slide_md)
+    cols = split_two_columns(slide_md)
+    if cols:
+        content = (
+            '<div class="two-col">'
+            f'<div class="col">{render_slide_content(cols[0])}</div>'
+            f'<div class="col">{render_slide_content(cols[1])}</div>'
+            '</div>'
+        )
+    else:
+        content = render_slide_content(slide_md)
     t_attr  = _theme_attr(theme_override)
     return (
         f'<div class="slide"{t_attr}>'
