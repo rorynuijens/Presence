@@ -16,6 +16,7 @@ Built-in themes are defined in themes.py.
 
 import dataclasses
 import json
+import re
 import shutil
 import sys
 import threading
@@ -351,6 +352,5 @@ def _build_font_face_css(fonts_dir: Path,
 
 def _slugify(text: str) -> str:
     """Convert a display name to a lowercase filesystem-safe slug."""
-    import re
     return re.sub(r"[^a-z0-9_-]", "-",
                   text.lower().strip()).strip("-") or "theme"
