@@ -13,7 +13,7 @@ from gi.repository import Adw, Gio, GLib
 from .window  import MainWindow
 from .session import load_last_file, save_last_file, recovery_path_for
 
-APP_ID = "io.gitlab.gtk4-apps1.Presence"
+APP_ID = "io.gitlab.gtk4_apps1.Presence"
 
 
 class Application(Adw.Application):
