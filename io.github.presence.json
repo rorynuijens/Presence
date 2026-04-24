@@ -162,7 +162,7 @@
                 },
                 {
                     "type": "file",
-                    "url": "https://files.pythonhosted.org/packages/9a/08/7012b00a9a5874311b639c3920270c36ee0c445b69d9989a85e5c92ebcb0/fonttools-4.62.1.tar.gz",
+                    "url": "https://files.pythonhosted.org/packages/9a/08/7012b00a9a5874311b639c3920270c36ee0c445b69d9989a85e5c92ebcb0/fonttools-4.62.1-py3-none-any.whl",
                     "sha256": "e54c75fd6041f1122476776880f7c3c3295ffa31962dc6ebe2543c00dca58b5d"
                 },
                 {
@@ -203,16 +203,11 @@
             "name": "presence",
             "buildsystem": "simple",
             "build-commands": [
-                "find app md_to_slides -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true",
-                "find app md_to_slides -name '*.pyc' -delete 2>/dev/null || true",
-                "mkdir -p /app/lib/presence",
-                "cp -r app md_to_slides /app/lib/presence/",
-                "mkdir -p /app/share/gtksourceview-5/styles",
-                "cp app/presence-markdown.xml /app/share/gtksourceview-5/styles/",
-                "install -Dm644 app/presence.svg /app/share/icons/hicolor/scalable/apps/io.github.presence.svg",
+                "pip3 install --prefix=/app --no-build-isolation --no-deps --no-index .",
+                "install -Dm644 src/presence/presence-markdown.xml /app/share/gtksourceview-5/styles/presence-markdown.xml",
+                "install -Dm644 io.github.presence.svg /app/share/icons/hicolor/scalable/apps/io.github.presence.svg",
                 "install -Dm644 io.github.presence.desktop /app/share/applications/io.github.presence.desktop",
-                "install -Dm644 io.github.presence.metainfo.xml /app/share/metainfo/io.github.presence.metainfo.xml",
-                "install -Dm755 presence.sh /app/bin/presence"
+                "install -Dm644 data/io.github.presence.metainfo.xml /app/share/metainfo/io.github.presence.metainfo.xml"
             ],
             "sources": [
                 {

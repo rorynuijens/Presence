@@ -1,0 +1,7 @@
+# constraints.txt — used during Flatpak build to block C extensions
+# that are absent in the sandbox.
+#
+# fonttools[woff] requires brotli (a C extension). We exclude the extra here
+# so pip does not attempt to build or download it.  WeasyPrint still works
+# because brotli is an optional compression backend stubbed by _pil_stub.py.
+fonttools>=4.0.0    # install base fonttools without the woff extra

@@ -1,6 +1,6 @@
 [build-system]
-requires      = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+requires      = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name    = "presence"
@@ -11,7 +11,11 @@ license = { text = "GPL-3.0-or-later" }
 requires-python = ">=3.11"
 dependencies = [
     "markdown-it-py>=3.0",
+    # Exclude the [woff] extra — it requires the brotli C extension which is
+    # absent in the Flatpak sandbox.  Brotli is stubbed at runtime by
+    # _pil_stub.py so WeasyPrint loads correctly without it.
     "weasyprint>=60",
+    "fonttools>=4.0.0",          # pulled in by weasyprint; pin without extras
     "pyyaml>=6.0",
     "pygments>=2.15",
 ]

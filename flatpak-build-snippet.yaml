@@ -1,0 +1,15 @@
+# Flatpak build snippet for presence
+# Add this to your io.github.presence.yaml manifest under build-commands.
+#
+# The --no-build-isolation flag reuses the SDK'''s already-installed build tools.
+# The --constraint flag prevents pip from installing fonttools[woff] which
+# requires the brotli C extension, absent in the Flatpak sandbox.
+# Brotli is stubbed at runtime by _pil_stub.py so WeasyPrint works correctly.
+
+build-commands:
+  - pip install
+      --no-build-isolation
+      --no-deps
+      --constraint constraints.txt
+      --prefix=/app
+      .
