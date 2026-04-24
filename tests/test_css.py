@@ -3,12 +3,9 @@ test_css.py — Unit tests for CSS generation.
 
 Run with:  pytest test_css.py
 """
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from md_to_slides.themes import Theme
-from md_to_slides.css import build_css
+from presence.slides.themes import Theme
+from presence.slides.css import build_css
 
 
 def _css(theme=None, width=1280, height=720, logo=None):

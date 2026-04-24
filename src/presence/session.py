@@ -9,6 +9,7 @@ per-process lock so that multiple windows cannot corrupt each other's
 session data (fixes #95 / #96).
 """
 
+import fcntl
 import logging
 
 log = logging.getLogger(__name__)
@@ -228,7 +229,6 @@ def load_presentation_prefs() -> dict:
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
 def _load_raw() -> dict:
-    """Read session JSON under the process lock. Returns {} on any error."""
     with _session_lock:
         return _load_raw_unlocked()
 
@@ -255,21 +255,17 @@ def _update(changes: dict) -> None:
 
 
 def _write_unlocked(data: dict) -> None:
-    """
-    Write *data* to the session file atomically (caller must hold lock).
-
-    Writes to a sibling temp file then calls os.replace() so a crash or
-    power loss never leaves a half-written session file.  Raises OSError
-    on failure so the caller (_update) can log the error.
-    """
-    cfg_dir = _config_dir()
-    cfg_dir.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(data, indent=2).encode("utf-8")
-    sf = _session_file()
-    fd, tmp_path = tempfile.mkstemp(dir=cfg_dir, suffix=".tmp")
+    """Write *data* to the session file atomically (caller must hold lock)."""
     try:
-        os.write(fd, payload)
-    finally:
-        os.close(fd)
-    # os.replace is atomic on POSIX — the session file is never partially written.
-    os.replace(tmp_path, sf)
+        cfg_dir = _config_dir()
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(data, indent=2).encode("utf-8")
+        sf = _session_file()
+        fd, tmp_path = tempfile.mkstemp(dir=cfg_dir, suffix=".tmp")
+        try:
+            os.write(fd, payload)
+        finally:
+            os.close(fd)
+        os.replace(tmp_path, sf)
+    except OSError:
+        pass

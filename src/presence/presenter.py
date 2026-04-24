@@ -16,7 +16,7 @@ from .app_utils import png_bytes_to_texture
 # Imported at module level so _set_notes does not pay import overhead
 # on every slide navigation keystroke.
 try:
-    from md_to_slides.renderer import render_slide_content as _render_slide_content
+    from .slides.renderer import render_slide_content as _render_slide_content
 except ImportError:
     _render_slide_content = None
 

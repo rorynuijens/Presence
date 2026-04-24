@@ -17,7 +17,7 @@ from .themes       import ASPECT_RATIOS
 from .theme_loader import load_all_themes
 from .frontmatter  import parse_frontmatter
 from .css          import build_css
-from .slides       import split_slides, is_title_slide
+from .splitter import split_slides, is_title_slide
 from .html         import md_to_html_slides
 from .thumbnails   import build_thumbnail_index
 from .utils        import encode_logo

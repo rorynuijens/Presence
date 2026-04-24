@@ -3,11 +3,8 @@ test_slides.py — Unit tests for the slide parsing module.
 
 Run with:  pytest test_slides.py
 """
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from md_to_slides.slides import split_slides, is_title_slide, infer_slide_title
+from presence.slides.splitter import split_slides, is_title_slide, infer_slide_title
 
 
 def test_split_basic():

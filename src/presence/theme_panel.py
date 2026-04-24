@@ -163,7 +163,7 @@ class ThemePanel(Gtk.Box):
         slide_box.set_margin_end(12)
         slide_box.set_margin_bottom(10)
 
-        from md_to_slides.themes import ASPECT_RATIOS
+        from .slides.themes import ASPECT_RATIOS
         self._ratios = list(ASPECT_RATIOS.keys())
         self._ratio_row = Adw.ComboRow(title="Screen ratio")
         self._ratio_row.set_model(Gtk.StringList.new(self._ratios))
@@ -368,7 +368,7 @@ class ThemePanel(Gtk.Box):
         """Reload themes, rebuild swatches, sync all controls."""
         if self._converter is None:
             return
-        from md_to_slides.theme_loader import load_all_themes
+        from .slides.theme_loader import load_all_themes
         self._all_themes = load_all_themes()
         self._rebuild_swatches()
         self._refresh_preview(self._converter.theme)

@@ -94,10 +94,10 @@ except (ValueError, ImportError):
 _GTK_VERSION      = (Gtk.get_major_version(), Gtk.get_minor_version())
 _HAS_COLOR_DIALOG = _GTK_VERSION >= (4, 10)
 
-from md_to_slides.themes       import Theme, BUILTIN_THEMES
-from md_to_slides.theme_loader import load_all_themes, install_theme, user_themes_dir
-from md_to_slides.css          import build_css
-from md_to_slides.themes       import ASPECT_RATIOS
+from .slides.themes import Theme, BUILTIN_THEMES
+from .slides.theme_loader import load_all_themes, install_theme, user_themes_dir
+from .slides.css import build_css
+from .slides.themes import ASPECT_RATIOS
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -1207,7 +1207,7 @@ class ThemeEditor(Adw.Window):
                     "</div>"
                 )
             else:
-                from md_to_slides.renderer import render_slide_content
+                from .slides.renderer import render_slide_content
                 rendered = render_slide_content(_PREVIEW_MD)
                 pg_num = (
                     "<div class='slide-number'>1 / 4</div>"
@@ -2159,7 +2159,7 @@ class ThemeEditorAdvanced(Adw.Window):
                     "</div>"
                 )
             else:
-                from md_to_slides.renderer import render_slide_content
+                from .slides.renderer import render_slide_content
                 rendered = render_slide_content(_PREVIEW_MD)
                 pg_num = (
                     "<div class='slide-number'>1 / 4</div>"

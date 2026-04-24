@@ -124,8 +124,8 @@ class Sidebar(Gtk.Box):
             row.set_converting(converting)
 
     def update_from_text(self, markdown_text: str) -> None:
-        from md_to_slides.slides import split_slides, infer_slide_title
-        from md_to_slides.frontmatter import parse_frontmatter
+        from .slides.splitter import split_slides, infer_slide_title
+        from .slides.frontmatter import parse_frontmatter
 
         _, markdown_text = parse_frontmatter(markdown_text)
         slides = split_slides(markdown_text)

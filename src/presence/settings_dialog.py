@@ -20,7 +20,7 @@ from gi.repository import Gtk, Adw, GLib, Gdk, GdkPixbuf, Pango
 from .session import (load_editor_prefs, save_editor_prefs,
                       load_presentation_prefs, save_presentation_prefs)
 from .app_utils import png_bytes_to_texture, make_file_filter, make_filter_store
-from md_to_slides.themes import ASPECT_RATIOS
+from .slides.themes import ASPECT_RATIOS
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -48,8 +48,8 @@ class SettingsDialog(Adw.PreferencesDialog):
         # Flag list used to cancel in-flight ThumbCache renders (#3)
         self._render_cancelled: list[bool] = [False]
 
-        from md_to_slides.theme_loader import load_all_themes
-        from md_to_slides.themes import ASPECT_RATIOS
+        from .slides.theme_loader import load_all_themes
+        from .slides.themes import ASPECT_RATIOS
         from .theme_manager_ui import build_themes_page
 
         all_themes = load_all_themes()
@@ -388,7 +388,7 @@ class SettingsDialog(Adw.PreferencesDialog):
 
     def refresh_theme_grid(self) -> None:
         """Rebuild the theme grid after a theme is installed or uninstalled."""
-        from md_to_slides.theme_loader import load_all_themes
+        from .slides.theme_loader import load_all_themes
         # Cancel any pending thumbnail callbacks before rebuilding
         self._render_cancelled[0] = True
         self._render_cancelled = [False]

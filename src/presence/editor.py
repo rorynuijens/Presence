@@ -948,8 +948,8 @@ class Editor(Gtk.Box):
             self._buffer.handler_unblock_by_func(self._on_buffer_changed)
 
     def scroll_to_slide(self, slide_index: int) -> None:
-        from md_to_slides.slides import split_slides
-        from md_to_slides.frontmatter import parse_frontmatter
+        from .slides.splitter import split_slides
+        from .slides.frontmatter import parse_frontmatter
 
         full_text = self.get_text()
         _meta, body = parse_frontmatter(full_text)

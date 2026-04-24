@@ -31,9 +31,9 @@ from .session    import (save_last_file, load_window_state, save_window_state,
                           load_recent_files, delete_recovery_file,
                           load_presentation_prefs, save_presentation_prefs)
 from .session    import recovery_path_for, recovery_dir
-from md_to_slides.themes import ASPECT_RATIOS
-from md_to_slides.slides import split_slides
-from md_to_slides.frontmatter import parse_frontmatter, raw_frontmatter
+from .slides.themes import ASPECT_RATIOS
+from .slides.splitter import split_slides
+from .slides.frontmatter import parse_frontmatter, raw_frontmatter
 
 UNTITLED = "Untitled"
 
@@ -1297,7 +1297,7 @@ class MainWindow(Adw.ApplicationWindow):
             return
 
         # Use the high-res renderer so exported PNGs are crisp at 1920px wide.
-        from md_to_slides.thumbnails_render import render_slides_hires
+        from .slides.thumbnails_render import render_slides_hires
 
         if self._output_path is None or not self._output_path.exists():
             # Transient one-shot failure: show as toast, not persistent banner.

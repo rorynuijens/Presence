@@ -11,9 +11,9 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GLib, GdkPixbuf, Gdk, Gio
 
-from md_to_slides.theme_loader import (load_all_themes, install_theme,
+from .slides.theme_loader import (load_all_themes, install_theme,
                                         uninstall_theme, user_themes_dir)
-from md_to_slides.themes import BUILTIN_THEMES, Theme
+from .slides.themes import BUILTIN_THEMES, Theme
 
 from .theme_editor import ThemeEditor
 
@@ -73,9 +73,9 @@ class ThumbCache:
     def _render(self, theme: Theme, ratio: str,
                 cache_file: Path, callback) -> None:
         try:
-            from md_to_slides.thumbnails_render import render_thumbnails
-            from md_to_slides.themes import ASPECT_RATIOS
-            from md_to_slides.css import build_css
+            from .slides.thumbnails_render import render_thumbnails
+            from .slides.themes import ASPECT_RATIOS
+            from .slides.css import build_css
             import weasyprint
 
             w, h = ASPECT_RATIOS.get(ratio, (1280, 720))

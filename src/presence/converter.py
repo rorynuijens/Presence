@@ -20,14 +20,14 @@ try:
 except ImportError:
     _weasyprint = None  # type: ignore[assignment]
 
-from md_to_slides.frontmatter       import parse_frontmatter
-from md_to_slides.slides            import split_slides
-from md_to_slides.css               import build_css
-from md_to_slides.html              import md_to_html_slides
-from md_to_slides.themes            import ASPECT_RATIOS
-from md_to_slides.theme_loader      import load_all_themes
-from md_to_slides.utils             import encode_logo
-from md_to_slides.thumbnails_render import render_thumbnails
+from .slides.frontmatter import parse_frontmatter
+from .slides.splitter import split_slides
+from .slides.css import build_css
+from .slides.html import md_to_html_slides
+from .slides.themes import ASPECT_RATIOS
+from .slides.theme_loader import load_all_themes
+from .slides.utils import encode_logo
+from .slides.thumbnails_render import render_thumbnails
 
 log = logging.getLogger(__name__)
 

@@ -7,7 +7,6 @@
   <name>Presence</name>
   <summary>Convert Markdown to slideshows</summary>
 
-  
   <description>
     <p>
       Presence is a Markdown-based presentation editor. Write your slides in
@@ -23,12 +22,12 @@
       <li>Drag-and-drop slide reordering</li>
     </ul>
   </description>
-  
+
   <supports>
     <control>keyboard</control>
     <control>pointing</control>
   </supports>
-  
+
   <requires>
     <display_length compare="ge">768</display_length>
   </requires>
@@ -46,7 +45,7 @@
       <image height="1080" width="1920">https://gitlab.com/gtk4-apps1/Presence/-/raw/main/Screenshots/Presentation.png</image>
       <caption>Presentation view</caption>
     </screenshot>
-     <screenshot type="extra">
+    <screenshot type="extra">
       <image height="1080" width="1920">https://gitlab.com/gtk4-apps1/Presence/-/raw/main/Screenshots/Presenter_view.png</image>
       <caption>Presenter view</caption>
     </screenshot>
