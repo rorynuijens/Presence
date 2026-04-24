@@ -23,6 +23,22 @@ pytest tests/test_slides.py::test_split_basic  # single test
 pip install -e ".[dev]"      # editable install with dev dependencies
 ```
 
+
+## Code Style
+- Follow PEP 8 style guidelines
+- Use type hints for function parameters and return types
+- Use dataclasses for data models
+- Prefer f-strings for string formatting
+- Use pathlib for file paths
+
+## Conventions
+- Use snake_case for variables and functions
+- Use PascalCase for classes
+- Use UPPER_CASE for constants
+- Keep functions small and focused
+- Write docstrings for public functions
+- Strict adherence to GNOME HIG for UI/UX decisions
+
 ## Architecture
 
 The codebase lives entirely under `src/presence/` and splits into two layers:

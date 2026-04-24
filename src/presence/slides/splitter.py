@@ -1,5 +1,5 @@
 """
-slides.py — Markdown-level operations on raw slide text.
+splitter.py — Markdown-level operations on raw slide text.
 
 All functions here work purely on strings; none produce HTML or CSS.
 They form the pre-processing stage before anything is rendered.
