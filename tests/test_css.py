@@ -63,8 +63,9 @@ def test_css_no_xss_in_callout_icon():
     """Callout icon must have single-quotes stripped to prevent CSS injection."""
     t = Theme(callout_icon_tip="'injected'")
     css = build_css(t, 1280, 720, None)
-    # The quotes must be stripped
-    assert "injected" not in css or "'" not in css.split("injected")[0][-5:]
+    # The injected single-quotes must be stripped: content should not contain
+    # the literal sequence that would break out of the CSS string context.
+    assert "''injected'" not in css
 
 
 def test_css_image_layout_present():

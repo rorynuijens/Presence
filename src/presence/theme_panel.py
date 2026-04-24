@@ -142,43 +142,28 @@ class ThemePanel(Gtk.Box):
         self._swatch_flow.set_min_children_per_line(3)
         body.append(self._swatch_flow)
 
-        body.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
-
-        # Slide settings label
-        slide_label = Gtk.Label(label="Slide settings")
-        slide_label.add_css_class("caption")
-        slide_label.add_css_class("dim-label")
-        slide_label.set_xalign(0)
-        slide_label.set_margin_start(12)
-        slide_label.set_margin_end(12)
-        slide_label.set_margin_top(10)
-        slide_label.set_margin_bottom(4)
-        body.append(slide_label)
-
-        # Slide settings boxed-list
-        slide_box = Gtk.ListBox()
-        slide_box.set_selection_mode(Gtk.SelectionMode.NONE)
-        slide_box.add_css_class("boxed-list")
-        slide_box.set_margin_start(12)
-        slide_box.set_margin_end(12)
-        slide_box.set_margin_bottom(10)
+        slide_group = Adw.PreferencesGroup()
+        slide_group.set_title("Slide settings")
+        slide_group.set_margin_start(12)
+        slide_group.set_margin_end(12)
+        slide_group.set_margin_top(8)
+        slide_group.set_margin_bottom(8)
 
         from .slides.themes import ASPECT_RATIOS
         self._ratios = list(ASPECT_RATIOS.keys())
         self._ratio_row = Adw.ComboRow(title="Screen ratio")
         self._ratio_row.set_model(Gtk.StringList.new(self._ratios))
         self._ratio_row.connect("notify::selected", self._on_ratio_changed)
-        slide_box.append(self._ratio_row)
-        body.append(slide_box)
+        slide_group.add(self._ratio_row)
+        body.append(slide_group)
 
         # ── Logo — HIG-compliant boxed-list ActionRow ─────────────────────────
         # GNOME HIG pattern: Adw.ActionRow in a boxed-list with a thumbnail
         # prefix showing the current logo (or a placeholder icon) and
         # Choose / Clear suffix buttons.  Drag-and-drop onto the row is
         # supported as a secondary affordance, not the primary one.
-        # Logo rows — appended to the same slide_box as the ratio row
-        # so they share one boxed-list. No prefix icon: the 300px panel
-        # is too narrow for icon + title + subtitle + two buttons.
+        # Logo rows — added to slide_group alongside the ratio row.
+        # No prefix icon: the 300px panel is too narrow for icon + title + subtitle + two buttons.
         self._logo_row = Adw.ActionRow(title="Select or drop logo")
         self._logo_row.set_subtitle("None")
 
@@ -196,7 +181,7 @@ class ThemePanel(Gtk.Box):
         self._logo_clear_btn.connect("clicked", self._on_clear_logo)
         logo_btn_box.append(self._logo_clear_btn)
         self._logo_row.add_suffix(logo_btn_box)
-        slide_box.append(self._logo_row)
+        slide_group.add(self._logo_row)
 
         # Size slider row — hidden until a logo is chosen
         self._logo_size_row = Adw.ActionRow(title="Logo size")
@@ -223,7 +208,7 @@ class ThemePanel(Gtk.Box):
         size_suffix.append(self._logo_scale)
         size_suffix.append(self._logo_size_val)
         self._logo_size_row.add_suffix(size_suffix)
-        slide_box.append(self._logo_size_row)
+        slide_group.add(self._logo_size_row)
 
         # Drag-and-drop onto the logo row as a secondary affordance.
         logo_drop = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.COPY)
@@ -232,51 +217,43 @@ class ThemePanel(Gtk.Box):
         logo_drop.connect("leave", self._on_logo_drop_leave)
         self._logo_row.add_controller(logo_drop)
 
-        body.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+        pres_group = Adw.PreferencesGroup()
+        pres_group.set_title("Presentation settings")
+        pres_group.set_margin_start(12)
+        pres_group.set_margin_end(12)
+        pres_group.set_margin_bottom(8)
 
-        # Presentation settings label
-        pres_label = Gtk.Label(label="Presentation settings")
-        pres_label.add_css_class("caption")
-        pres_label.add_css_class("dim-label")
-        pres_label.set_xalign(0)
-        pres_label.set_margin_start(12)
-        pres_label.set_margin_end(12)
-        pres_label.set_margin_top(10)
-        pres_label.set_margin_bottom(4)
-        body.append(pres_label)
-
-        pres_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        pres_box.set_margin_start(12)
-        pres_box.set_margin_end(12)
-        pres_box.set_margin_bottom(12)
-
-        # Duration row: label + Scale + value label
-        dur_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        dur_row.set_margin_top(4)
-        dur_lbl = Gtk.Label(label="Duration")
-        dur_lbl.set_xalign(0)
-        dur_row.append(dur_lbl)
+        # Duration as ActionRow with scale suffix
+        dur_row = Adw.ActionRow(title="Duration")
+        scale_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        scale_box.set_valign(Gtk.Align.CENTER)
         self._dur_scale = Gtk.Scale.new_with_range(
             Gtk.Orientation.HORIZONTAL, 0, 120, 5
         )
-        self._dur_scale.set_hexpand(True)
+        self._dur_scale.set_size_request(120, -1)
         self._dur_scale.set_draw_value(False)
         self._dur_scale.set_increments(5, 15)
         self._dur_scale.connect("value-changed", self._on_duration_changed)
-        dur_row.append(self._dur_scale)
-        self._dur_val_label = Gtk.Label(label="0 min")
+        self._dur_val_label = Gtk.Label(label="∞")
         self._dur_val_label.set_width_chars(6)
         self._dur_val_label.set_xalign(1)
         self._dur_val_label.add_css_class("numeric")
         self._dur_val_label.add_css_class("caption")
-        dur_row.append(self._dur_val_label)
-        pres_box.append(dur_row)
+        scale_box.append(self._dur_scale)
+        scale_box.append(self._dur_val_label)
+        dur_row.add_suffix(scale_box)
+        pres_group.add(dur_row)
 
-        # Auto-convert checkbox
-        self._auto_check = Gtk.CheckButton(label="Convert on save")
+        # Auto-convert as ActionRow with CheckButton suffix
+        auto_row = Adw.ActionRow(title="Convert on save")
+        self._auto_check = Gtk.CheckButton()
+        self._auto_check.set_valign(Gtk.Align.CENTER)
         self._auto_check.connect("toggled", self._on_auto_convert_toggled)
-        pres_box.append(self._auto_check)
-        body.append(pres_box)
+        auto_row.add_suffix(self._auto_check)
+        auto_row.set_activatable_widget(self._auto_check)
+        pres_group.add(auto_row)
+
+        body.append(pres_group)
 
         body.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
 
@@ -620,27 +597,12 @@ class ThemePanel(Gtk.Box):
     def _save_editor_prefs(self) -> None:
         if self._converter is None or self._window is None:
             return
-        from .session import save_editor_prefs, load_editor_prefs
-        # Read existing prefs so we only overwrite the fields we own here
-        # (theme, ratio, logo, font_size, line_length).  All other fields
-        # are controlled by SettingsDialog and must be preserved.
-        existing = load_editor_prefs()
+        from .session import save_editor_prefs
         save_editor_prefs({
-            "theme":            self._converter.theme,
-            "ratio":            self._converter.ratio,
-            "logo":             str(self._converter.logo_path or ""),
-            "font_size":        self._window._editor.get_font_size(),
-            # Preserve the line_length set via SettingsDialog; fall back to
-            # the editor's live value if it was never saved.
-            "line_length":      existing.get(
-                                    "line_length",
-                                    self._window._editor.get_line_length()
-                                ),
-            "syntax_highlight": existing.get("syntax_highlight", True),
-            "line_numbers":     existing.get("line_numbers",     True),
-            "highlight_line":   existing.get("highlight_line",   True),
-            "auto_indent":      existing.get("auto_indent",      True),
-            "spaces_tabs":      existing.get("spaces_tabs",      True),
+            "theme":     self._converter.theme,
+            "ratio":     self._converter.ratio,
+            "logo":      str(self._converter.logo_path or ""),
+            "font_size": self._window._editor.get_font_size(),
         })
 
     def _save_presentation_prefs(self) -> None:

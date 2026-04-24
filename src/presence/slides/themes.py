@@ -142,20 +142,8 @@ BUILTIN_THEMES: dict[str, Theme] = {
     ),
 }
 
-# Keep the old name for code that hasn't been updated yet
-THEMES = BUILTIN_THEMES
-
 ASPECT_RATIOS: dict[str, tuple[int, int]] = {
     "16:9":  (1280, 720),
     "4:3":   (1024, 768),
     "16:10": (1280, 800),
-}
-
-# Module-level fallback icon map used by renderer.py for the callout regex.
-# css.py now reads icons from the Theme instance via theme.callout_icons.
-CALLOUT_ICONS: dict[str, str] = {
-    "tip":     "✓",
-    "info":    "i",
-    "warning": "!",
-    "danger":  "✕",
 }

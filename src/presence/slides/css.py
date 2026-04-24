@@ -6,6 +6,7 @@ build_css() is the single public function.  It accepts a Theme object
 string ready to be embedded in the HTML document.
 """
 
+import dataclasses
 import logging
 import re
 from pathlib import Path
@@ -789,7 +790,7 @@ def _resolve(theme) -> Theme:
     to receive a safe value, even if new colour fields are added in future.
     """
     if isinstance(theme, Theme):
-        t = theme
+        t = dataclasses.replace(theme)
     else:
         t = Theme()
         t.bg             = theme.get("bg",            t.bg)

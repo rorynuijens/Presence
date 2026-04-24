@@ -30,11 +30,12 @@ import re
 
 # YAML 1.1 (used by PyYAML's safe_load) treats bare colon-separated integers
 # as sexagesimal numbers.  The formula is: each group × 60^position, summed
-# left-to-right.  So:
-#   16:9   → 16×60 + 9  = 969
-#    4:3   →  4×60 + 3  = 243
-#   16:10  → 16×60 + 10 = 970   (three-part not supported by YAML 1.1,
-#                                 so PyYAML actually keeps "16:10" as a string)
+# left-to-right.  Two-part ratios with a single-digit second segment become
+# integers:
+#   16:9  →  16×60 + 9 = 969
+#    4:3  →   4×60 + 3 = 243
+# PyYAML does not apply sexagesimal parsing to "16:10" and keeps it as the
+# string "16:10"; the integer 970 therefore never occurs and is absent below.
 # We coerce every form — integer and string — to the canonical "W:H" string.
 _RATIO_COERCE: dict = {
     # Integer keys — what yaml.safe_load produces for unquoted two-part ratios
@@ -54,6 +55,24 @@ _DIRECTIVE_RE = re.compile(
 )
 
 
+def _find_frontmatter_block(text: str) -> tuple[str, str] | None:
+    """
+    Locate the YAML frontmatter block in *text*.
+
+    Returns (yaml_block, remaining_markdown) where yaml_block is the raw
+    content between the --- delimiters (not stripped).  Returns None if no
+    valid block is found at the start of *text*.
+    """
+    stripped = text.lstrip()
+    if not stripped.startswith("---"):
+        return None
+    rest = stripped[3:]
+    end  = rest.find("\n---")
+    if end == -1:
+        return None
+    return rest[:end], rest[end + 4:].lstrip("\n")
+
+
 def parse_frontmatter(text: str) -> tuple[dict, str]:
     """
     If *text* starts with a YAML frontmatter block (--- … ---), parse it and
@@ -66,25 +85,17 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
     if not _YAML_AVAILABLE:
         return {}, text
 
-    stripped = text.lstrip()
-    if not stripped.startswith("---"):
+    block = _find_frontmatter_block(text)
+    if block is None:
         return {}, text
 
-    rest = stripped[3:]
-    end  = rest.find("\n---")
-    if end == -1:
-        return {}, text
-
-    yaml_block = rest[:end].strip()
-    remaining  = rest[end + 4:].lstrip("\n")
-
+    yaml_block, remaining = block
     try:
-        meta = yaml.safe_load(yaml_block) or {}
+        meta = yaml.safe_load(yaml_block.strip()) or {}
     except yaml.YAMLError:
         meta = {}
 
-    meta = _normalise(meta)
-    return meta, remaining
+    return _normalise(meta), remaining
 
 
 def extract_slide_directives(slide_md: str) -> dict[str, str]:
@@ -118,11 +129,8 @@ def raw_frontmatter(text: str) -> str:
     Return the raw frontmatter block (including delimiters) from *text*,
     or an empty string if no frontmatter is present.
     """
-    stripped = text.lstrip()
-    if not stripped.startswith("---"):
+    block = _find_frontmatter_block(text)
+    if block is None:
         return ""
-    rest = stripped[3:]
-    end  = rest.find("\n---")
-    if end == -1:
-        return ""
-    return stripped[:end + 7].rstrip()
+    yaml_block, _ = block
+    return ("---" + yaml_block + "\n---").rstrip()

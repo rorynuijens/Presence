@@ -4,7 +4,8 @@ test_slides.py — Unit tests for the slide parsing module.
 Run with:  pytest test_slides.py
 """
 
-from presence.slides.splitter import split_slides, is_title_slide, infer_slide_title
+from presence.slides.splitter import (split_slides, is_title_slide,
+                                       infer_slide_title, extract_speaker_notes)
 
 
 def test_split_basic():
@@ -33,19 +34,19 @@ def test_split_strips_separator():
 
 
 def test_is_title_slide_h1():
-    assert is_title_slide("# Title\n\nSubtitle") is True
+    assert is_title_slide("# Title\n\nSubtitle", slide_index=0) is True
 
 
 def test_is_title_slide_h2_not_title():
-    assert is_title_slide("## Section\n\nContent") is False
+    assert is_title_slide("## Section\n\nContent", slide_index=0) is False
 
 
 def test_infer_title_from_h1():
-    assert infer_slide_title("# My Title\n\nContent") == "My Title"
+    assert infer_slide_title("# My Title\n\nContent", fallback="") == "My Title"
 
 
 def test_infer_title_from_h2():
-    assert infer_slide_title("## Section\n\nContent") == "Section"
+    assert infer_slide_title("## Section\n\nContent", fallback="") == "Section"
 
 
 def test_infer_title_fallback():
@@ -55,11 +56,11 @@ def test_infer_title_fallback():
 
 
 def test_split_notes_separator():
-    """Slides with ^^^ should preserve notes in slide_info."""
+    """^^^ splits a slide into content and speaker notes."""
     md = "# Slide\n\nContent\n\n^^^\n\nSpeaker notes here"
-    slides = split_slides(md)
-    # The slide content should not include the notes
-    assert "Speaker notes" not in slides[0]
+    content, notes = extract_speaker_notes(md)
+    assert "Speaker notes" not in content
+    assert "Speaker notes" in notes
 
 
 def test_multiple_slides_correct_count():

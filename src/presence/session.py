@@ -91,19 +91,25 @@ def load_window_state() -> dict:
 
 # ── Editor preferences ────────────────────────────────────────────────────────
 
+# Callers may pass any subset of these keys; only provided keys are written.
+# This lets ThemePanel and SettingsDialog each own their fields without
+# needing to pre-read the fields they don't control.
+_EDITOR_KEY_MAP: dict[str, str] = {
+    "theme":            "editor_theme",
+    "ratio":            "editor_ratio",
+    "logo":             "editor_logo",
+    "font_size":        "editor_font_size",
+    "syntax_highlight": "editor_syntax_highlight",
+    "line_numbers":     "editor_line_numbers",
+    "highlight_line":   "editor_highlight_line",
+    "auto_indent":      "editor_auto_indent",
+    "spaces_tabs":      "editor_spaces_tabs",
+    "line_length":      "editor_line_length",
+}
+
+
 def save_editor_prefs(prefs: dict) -> None:
-    _update({
-        "editor_theme":            prefs.get("theme",            "light"),
-        "editor_ratio":            prefs.get("ratio",            "16:9"),
-        "editor_logo":             prefs.get("logo",             ""),
-        "editor_font_size":        int(prefs.get("font_size",    13)),
-        "editor_syntax_highlight": bool(prefs.get("syntax_highlight", True)),
-        "editor_line_numbers":     bool(prefs.get("line_numbers",     True)),
-        "editor_highlight_line":   bool(prefs.get("highlight_line",   True)),
-        "editor_auto_indent":      bool(prefs.get("auto_indent",      True)),
-        "editor_spaces_tabs":      bool(prefs.get("spaces_tabs",      True)),
-        "editor_line_length":      int(prefs.get("line_length",       64)),
-    })
+    _update({_EDITOR_KEY_MAP[k]: v for k, v in prefs.items() if k in _EDITOR_KEY_MAP})
 
 
 def load_editor_prefs() -> dict:

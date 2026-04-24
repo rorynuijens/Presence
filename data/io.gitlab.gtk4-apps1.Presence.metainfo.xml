@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>io.github.presence</id>
+  <id>io.gitlab.gtk4-apps1.Presence</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-or-later</project_license>
 
@@ -51,12 +51,12 @@
     </screenshot>
   </screenshots>
 
-  <launchable type="desktop-id">io.github.presence.desktop</launchable>
+  <launchable type="desktop-id">io.gitlab.gtk4-apps1.Presence.desktop</launchable>
 
   <url type="homepage">https://gitlab.com/gtk4-apps1/Presence</url>
   <url type="bugtracker">https://gitlab.com/gtk4-apps1/Presence/-/work_items</url>
 
-  <developer id="io.github.presence">
+  <developer id="io.gitlab.gtk4-apps1">
     <name>Rory</name>
   </developer>
 

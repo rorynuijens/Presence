@@ -2050,21 +2050,12 @@ class Editor(Gtk.Box):
     # ── Style ─────────────────────────────────────────────────────────────────
 
     def _apply_style(self) -> None:
-        """
-        Apply syntax highlighting scheme and separator tag.
-
-        Writes a minimal custom scheme that inherits from Adwaita but sets
-        the right-margin line colour to a clearly visible grey.  Falls back
-        to the plain Adwaita scheme if the custom scheme cannot be written.
-        """
+        """Apply syntax highlighting scheme and separator tag."""
         if not _GTKSOURCE_AVAILABLE:
             return
 
         mgr = GtkSource.StyleSchemeManager.get_default()
-        # Try the bundled scheme first, then the dynamically written one,
-        # then fall back to any available built-in.
-        scheme = (mgr.get_scheme("presence-markdown")
-                  or self._load_presence_scheme(mgr))
+        scheme = mgr.get_scheme("presence-markdown")
         if scheme:
             self._buffer.set_style_scheme(scheme)
         else:
@@ -2076,46 +2067,6 @@ class Editor(Gtk.Box):
 
         self._apply_separator_tag()
         self._apply_image_tag()
-
-    def _load_presence_scheme(self, mgr) -> "GtkSource.StyleScheme | None":
-        """
-        Write a custom scheme with a visible right-margin colour and load it.
-        Returns None on any failure — caller falls back to plain Adwaita.
-
-        Guards against calling append_search_path twice (safe to call once;
-        duplicate calls in some GtkSource versions trigger a rescan loop).
-        """
-        try:
-            from gi.repository import GLib as _GL
-            cache_dir = Path(_GL.get_user_cache_dir()) / "presence" / "schemes"
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            scheme_file = cache_dir / "presence.xml"
-
-            xml = (
-                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-                "<style-scheme id=\"presence\" name=\"Presence\""  
-                " version=\"1.0\">\n"
-                "  <style name=\"text\" foreground=\"#1a1a2e\" background=\"#ffffff\"/>\n"
-                "  <style name=\"selection\" background=\"#4a90d9\" foreground=\"#ffffff\"/>\n"
-                "  <style name=\"cursor\" foreground=\"#1a1a2e\"/>\n"
-                "  <style name=\"current-line\" background=\"#f5f5f5\"/>\n"
-                "  <style name=\"search-match\" background=\"#ffdd00\" foreground=\"#000000\"/>\n"
-                "  <style name=\"right-margin\" foreground=\"#888888\"/>\n"
-                "</style-scheme>\n"
-            )
-            scheme_file.write_text(xml, encoding="utf-8")
-
-            # Only add the search path if not already present
-            search_path = str(cache_dir)
-            existing = list(mgr.get_search_path())
-            if search_path not in existing:
-                mgr.append_search_path(search_path)
-                mgr.force_rescan()
-
-            return mgr.get_scheme("presence")
-        except Exception as exc:
-            log.debug("Custom scheme failed: %s", exc)
-            return None
 
     def _apply_separator_tag(self) -> None:
         """

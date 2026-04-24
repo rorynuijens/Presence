@@ -221,8 +221,6 @@ class MainWindow(Adw.ApplicationWindow):
         self._main_pane.set_shrink_end_child(False)
         root.append(self._main_pane)
 
-        root.append(self._build_statusbar())
-
     def _build_header(self) -> Adw.HeaderBar:
         bar = Adw.HeaderBar()
 
@@ -376,6 +374,19 @@ class MainWindow(Adw.ApplicationWindow):
             return btn
 
         box.append(_row(
+            "document-open-symbolic",
+            "Open PDF",
+            "Open the output in the system viewer",
+            self._on_open_pdf_clicked,
+        ))
+        box.append(_row(
+            "edit-copy-symbolic",
+            "Copy PDF path",
+            "Copy the output path to clipboard",
+            self._on_copy_pdf_path,
+        ))
+        box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+        box.append(_row(
             "document-save-symbolic",
             "Save PDF",
             "Save to the current output location",
@@ -403,47 +414,6 @@ class MainWindow(Adw.ApplicationWindow):
 
         popover.set_child(box)
         return popover
-
-    def _build_statusbar(self) -> Gtk.Box:
-        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        bar.set_margin_start(12)
-        bar.set_margin_end(12)
-        bar.set_margin_top(6)
-        bar.set_margin_bottom(6)
-        bar.add_css_class("toolbar")
-
-        self._status_label = Gtk.Label(label="Ready")
-        self._status_label.add_css_class("dim-label")
-        self._status_label.add_css_class("caption")
-        self._status_label.set_xalign(0)
-        self._status_label.set_hexpand(True)
-        bar.append(self._status_label)
-
-        self._open_btn = Gtk.Button(label="Open PDF")
-        self._open_btn.add_css_class("flat")
-        self._open_btn.add_css_class("caption")
-        self._open_btn.set_visible(False)
-        self._open_btn.connect("clicked", self._on_open_pdf_clicked)
-
-        # Right-click context menu: "Copy path" (#72)
-        pdf_menu_model = Gio.Menu()
-        pdf_menu_model.append("Copy path", "win.copy-pdf-path")
-        pdf_popover = Gtk.PopoverMenu.new_from_model(pdf_menu_model)
-        pdf_popover.set_parent(self._open_btn)
-        self._pdf_popover = pdf_popover
-
-        right_click = Gtk.GestureClick()
-        right_click.set_button(3)   # right mouse button
-        right_click.connect("pressed", lambda g, n, x, y: pdf_popover.popup())
-        self._open_btn.add_controller(right_click)
-
-        bar.append(self._open_btn)
-
-        separator = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
-        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        outer.append(separator)
-        outer.append(bar)
-        return outer
 
     def _build_app_menu(self) -> Gio.Menu:
         menu = Gio.Menu()
@@ -521,8 +491,6 @@ class MainWindow(Adw.ApplicationWindow):
             # Sidebar / preview panel toggles with F9/F10 (#75)
             ("toggle-sidebar",       self._on_toggle_sidebar,       "F9"),
             ("toggle-theme-panel",   self._on_toggle_theme_panel,   "F10"),
-            # Copy PDF path from status-bar right-click menu (#72)
-            ("copy-pdf-path",  self._on_copy_pdf_path,  None),
         ]
         for name, cb, accel in actions:
             action = Gio.SimpleAction.new(name, None)
@@ -732,7 +700,7 @@ class MainWindow(Adw.ApplicationWindow):
 
     # ── Conversion ────────────────────────────────────────────────────────────
 
-    def _trigger_convert(self) -> None:
+    def _trigger_convert(self, *_) -> None:
         if self._file_path is None:
             self._cleanup_temp_files()
             fd, tmp_str = tempfile.mkstemp(suffix=".md")
@@ -935,7 +903,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._spinner.start()
         self._present_btn.set_sensitive(False)
         self._banner.set_revealed(False)
-        self._status_label.set_text("Converting…")
+        self._title_label.set_subtitle("Building…")
         # Show per-thumbnail spinners so users know thumbnails are updating (#71)
         self._sidebar.set_converting(True)
 
@@ -954,11 +922,9 @@ class MainWindow(Adw.ApplicationWindow):
         self._output_path = Path(pdf_path)
 
         slides_word = "slide" if n_slides == 1 else "slides"
-        self._status_label.set_text(
-            f"✓  Built in {duration:.1f}s · {n_slides} {slides_word}"
-            f" · {self._output_path.name}"
+        self._show_toast(
+            f"Built in {duration:.1f}s · {n_slides} {slides_word}", timeout=4
         )
-        self._open_btn.set_visible(True)
         self._slide_info = converter.slide_info
         self._thumbnails = converter.thumbnails
         self._html_uri   = html_uri
@@ -999,7 +965,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._open_presenter_after_convert = False
         # Stop thumbnail spinners on failure too (#71)
         self._sidebar.set_converting(False)
-        self._status_label.set_text("Conversion failed.")
+        self._title_label.set_subtitle("")
         # Show a user-friendly message rather than a raw exception string (#87)
         friendly = _friendly_error(message)
         self._banner.set_title(friendly)
@@ -1135,12 +1101,10 @@ class MainWindow(Adw.ApplicationWindow):
             target_str = f" / {tm:02d}:{ts:02d}"
         else:
             target_str = ""
-        self._status_label.set_text(
-            f"🎤  Presenting  {elapsed_str}{target_str}"
-        )
+        self._title_label.set_subtitle(f"🎤  {elapsed_str}{target_str}")
 
     def _on_presenter_closed(self, win) -> bool:
-        """Restore status bar when presenter window closes."""
+        """Restore subtitle when presenter window closes."""
         self._update_word_count(self._editor.get_text())
         return False   # allow normal close to proceed
 
@@ -1387,7 +1351,7 @@ class MainWindow(Adw.ApplicationWindow):
         time_str = (f"{minutes} min to present" if minutes < 60
                     else f"{minutes // 60}h {minutes % 60}m")
         if not self._spinner.get_visible():
-            self._status_label.set_text(f"{words} words · ~{time_str}")
+            self._title_label.set_subtitle(f"{words} words · ~{time_str}")
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 

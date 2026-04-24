@@ -13,10 +13,7 @@ from gi.repository import Adw, Gio, GLib
 from .window  import MainWindow
 from .session import load_last_file, save_last_file, recovery_path_for
 
-# Activate the PIL stub BEFORE anything imports weasyprint.
-from . import _pil_stub  # noqa: F401
-
-APP_ID = "io.github.presence"
+APP_ID = "io.gitlab.gtk4-apps1.Presence"
 
 
 class Application(Adw.Application):

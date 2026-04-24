@@ -151,7 +151,7 @@ class Sidebar(Gtk.Box):
         notes     = [s.get("notes", "") for s in slide_info]
         has_notes = [bool(n.strip()) for n in notes]
         word_counts = [
-            len(_re.findall(r'\S+', s.get('body', s.get('title', ''))))
+            len(_re.findall(r'\S+', s.get('body', '')))
             for s in slide_info
         ]
         # Flag slides with >120 words as potentially overflowing

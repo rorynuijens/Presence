@@ -13,6 +13,7 @@ get_pygments_css(style_name: str) -> str
 from __future__ import annotations
 
 import html as _html
+import re
 
 from markdown_it import MarkdownIt
 
@@ -91,11 +92,7 @@ def _highlight_code_blocks(html: str) -> str:
     """
     Replace <pre><code class="language-X">...</code></pre> blocks with
     Pygments-highlighted equivalents.
-
-    Uses a simple state-machine parser rather than a regex or HTML parser
-    to avoid adding new dependencies.
     """
-    import re
     # Match <pre><code class="language-LANG">CONTENT</code></pre>
     pattern = re.compile(
         r'<pre><code class="language-([^"]+)">(.*?)</code></pre>',
@@ -120,6 +117,4 @@ def _highlight_code_blocks(html: str) -> str:
             f"</code></pre></div>"
         )
 
-    if _PYGMENTS:
-        return pattern.sub(_replace, html)
-    return html
+    return pattern.sub(_replace, html)

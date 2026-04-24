@@ -1,5 +1,5 @@
 {
-    "app-id": "io.github.presence",
+    "app-id": "io.gitlab.gtk4-apps1.Presence",
     "runtime": "org.gnome.Platform",
     "runtime-version": "47",
     "sdk": "org.gnome.Sdk",
@@ -205,9 +205,9 @@
             "build-commands": [
                 "pip3 install --prefix=/app --no-build-isolation --no-deps --no-index .",
                 "install -Dm644 src/presence/presence-markdown.xml /app/share/gtksourceview-5/styles/presence-markdown.xml",
-                "install -Dm644 io.github.presence.svg /app/share/icons/hicolor/scalable/apps/io.github.presence.svg",
-                "install -Dm644 io.github.presence.desktop /app/share/applications/io.github.presence.desktop",
-                "install -Dm644 data/io.github.presence.metainfo.xml /app/share/metainfo/io.github.presence.metainfo.xml"
+                "install -Dm644 io.gitlab.gtk4-apps1.Presence.svg /app/share/icons/hicolor/scalable/apps/io.gitlab.gtk4-apps1.Presence.svg",
+                "install -Dm644 io.gitlab.gtk4-apps1.Presence.desktop /app/share/applications/io.gitlab.gtk4-apps1.Presence.desktop",
+                "install -Dm644 data/io.gitlab.gtk4-apps1.Presence.metainfo.xml /app/share/metainfo/io.gitlab.gtk4-apps1.Presence.metainfo.xml"
             ],
             "sources": [
                 {

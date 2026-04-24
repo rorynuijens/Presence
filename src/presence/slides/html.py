@@ -41,12 +41,14 @@ def md_to_html_slides(
         slide_info.append({
             "title": infer_slide_title(slide_body, fallback=f"Slide {i + 1}"),
             "notes": notes,
+            "body":  cleaned_md,
         })
+
+        page_num = i if first_is_title else i + 1
 
         if title_slide:
             html_frag = _render_title_slide(cleaned_md, meta, logo_b64)
         elif images:
-            page_num = i if first_is_title else i + 1
             if len(images) >= 2:
                 # Two images: render side-by-side or top/bottom split
                 html_frag = _render_two_image_slide(
@@ -59,7 +61,6 @@ def md_to_html_slides(
                     page_num, total_numbered, logo_b64, theme_override,
                 )
         else:
-            page_num  = i if first_is_title else i + 1
             html_frag = _render_normal_slide(cleaned_md, page_num,
                                              total_numbered, logo_b64,
                                              theme_override)
