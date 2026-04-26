@@ -88,6 +88,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.set_default_size(state.get("width", 1400), state.get("height", 860))
         if state.get("maximized"):
             self.maximize()
+        self._theme_panel_open: bool = state.get("theme_panel_visible", False)
 
         self._file_path:   Path | None = None
         self._output_path: Path | None = None
@@ -132,7 +133,6 @@ class MainWindow(Adw.ApplicationWindow):
         self._open_presenter_after_convert: bool = False
         # Speaking rate in WPM — default 110, persisted to session.json
         self._speaking_rate: int = pres_prefs.get('speaking_rate', 110)
-        self._theme_panel_visible: bool = True
         # Notes font size in presenter mode — default 22px, persisted on
         # the window so PresenterWindow can read and write it.
         self._presenter_notes_font: int = pres_prefs.get(
@@ -144,6 +144,12 @@ class MainWindow(Adw.ApplicationWindow):
         self._setup_recent_actions()
         # Attach ThemePanel now that converter is available (#attach needs it)
         self._theme_panel.attach(self, self._converter)
+
+        # Restore persisted panel visibility — done after _build_ui so the
+        # revealer and button already exist.  Starts hidden by default so the
+        # panel doesn't inflate the window's minimum width at startup.
+        if self._theme_panel_open:
+            self._theme_panel_btn.set_active(True)
 
         # Apply persisted editor preferences (#50 + editor tab)
         self._editor.set_font_size(prefs.get("font_size", 13))
@@ -171,17 +177,20 @@ class MainWindow(Adw.ApplicationWindow):
         self._toast_overlay = Adw.ToastOverlay()
         self.set_content(self._toast_overlay)
 
-        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        # AdwToolbarView is the correct container for headerbar + content —
+        # it lets Libadwaita negotiate minimum widths through the widget tree,
+        # which is required for Adw.Breakpoint to work without layout warnings.
+        root = Adw.ToolbarView()
         self._toast_overlay.set_child(root)
 
-        root.append(self._build_header())
+        root.add_top_bar(self._build_header())
 
         # Use Adw.Banner only for persistent app-level messages (#20)
         self._banner = Adw.Banner(title="")
         self._banner.set_button_label("Close")   # HIG standard label (#23)
         self._banner.set_revealed(False)
         self._banner.connect("button-clicked", lambda *_: self._banner.set_revealed(False))
-        root.append(self._banner)
+        root.add_top_bar(self._banner)
 
         self._sidebar     = Sidebar()
         self._editor      = Editor()
@@ -196,30 +205,49 @@ class MainWindow(Adw.ApplicationWindow):
         self._editor.connect("changed",               self._on_editor_changed)
         self._theme_panel.connect("rebuild-needed",   self._on_theme_panel_rebuild)
 
-        # Layout: [Sidebar 260] | [Editor] | [ThemePanel 280]
-        # _right_pane nests editor and theme panel; _main_pane adds the
-        # left sidebar.  The theme panel is collapsible via F10.
-        self._right_pane = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        self._right_pane.set_vexpand(True)
-        self._right_pane.set_hexpand(True)
-        self._right_pane.set_start_child(self._editor)
-        self._right_pane.set_end_child(self._theme_panel)
-        self._right_pane.set_resize_start_child(True)
-        self._right_pane.set_resize_end_child(False)
-        self._right_pane.set_shrink_start_child(False)
-        self._right_pane.set_shrink_end_child(False)
+        # Right sidebar: theme panel shown inline via a Revealer.
+        # Using a Revealer (not a nested OverlaySplitView) avoids the overlay
+        # clipping issues that arise when OverlaySplitView is used as the
+        # *content* of another OverlaySplitView.
+        self._theme_sep = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
+        self._theme_revealer = Gtk.Revealer()
+        self._theme_revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_LEFT)
+        self._theme_revealer.set_reveal_child(False)
+        # set_visible(False) removes the revealer from layout negotiation entirely,
+        # so the ThemePanel's set_size_request(300) doesn't inflate the window's
+        # minimum width at startup.  set_reveal_child alone only clips rendering.
+        self._theme_revealer.set_visible(False)
+        self._theme_revealer.set_hexpand(False)
+        self._theme_revealer.connect(
+            "notify::child-revealed", self._on_theme_revealer_state_changed
+        )
+        panel_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        panel_box.append(self._theme_sep)
+        panel_box.append(self._theme_panel)
+        self._theme_revealer.set_child(panel_box)
 
-        self._main_pane = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        self._main_pane.set_vexpand(True)
-        self._main_pane.set_hexpand(True)
-        self._main_pane.set_position(260)
-        self._main_pane.set_start_child(self._sidebar)
-        self._main_pane.set_end_child(self._right_pane)
-        self._main_pane.set_resize_start_child(False)
-        self._main_pane.set_resize_end_child(True)
-        self._main_pane.set_shrink_start_child(False)
-        self._main_pane.set_shrink_end_child(False)
-        root.append(self._main_pane)
+        editor_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        editor_row.append(self._editor)
+        editor_row.append(self._theme_revealer)
+
+        # Left sidebar: thumbnail strip, collapses to drawer on narrow windows.
+        self._left_split = Adw.OverlaySplitView()
+        self._left_split.set_sidebar_position(Gtk.PackType.START)
+        self._left_split.set_sidebar(self._sidebar)
+        self._left_split.set_content(editor_row)
+        self._left_split.set_max_sidebar_width(260)
+        self._left_split.set_min_sidebar_width(0)
+        self._left_split.connect(
+            "notify::show-sidebar", self._on_left_split_show_changed
+        )
+        root.set_content(self._left_split)
+
+        # Collapse thumbnail sidebar below 800 px.
+        bp_sidebar = Adw.Breakpoint.new(
+            Adw.BreakpointCondition.parse("max-width: 800px")
+        )
+        bp_sidebar.add_setter(self._left_split, "collapsed", True)
+        self.add_breakpoint(bp_sidebar)
 
     def _build_header(self) -> Adw.HeaderBar:
         bar = Adw.HeaderBar()
@@ -283,7 +311,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._theme_panel_btn.update_property(
             [Gtk.AccessibleProperty.LABEL], ["Show theme panel"]
         )
-        self._theme_panel_btn.set_active(True)
+        self._theme_panel_btn.set_active(False)
         self._theme_panel_btn.add_css_class("flat")
         self._theme_panel_btn.connect("toggled", self._on_theme_panel_toggled)
         bar.pack_end(self._theme_panel_btn)
@@ -975,9 +1003,7 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_sidebar_toggled(self, btn: Gtk.ToggleButton) -> None:
         """Show or hide the slide panel (F9)."""
-        visible = btn.get_active()
-        self._sidebar.set_visible(visible)
-        self._main_pane.set_position(260 if visible else 0)
+        self._left_split.set_show_sidebar(btn.get_active())
 
     def _on_toggle_sidebar(self, *_) -> None:
         self._sidebar_btn.set_active(not self._sidebar_btn.get_active())
@@ -985,16 +1011,32 @@ class MainWindow(Adw.ApplicationWindow):
     def _on_theme_panel_toggled(self, btn: Gtk.ToggleButton) -> None:
         """Show or hide the theme panel right sidebar (F10)."""
         visible = btn.get_active()
-        self._theme_panel_visible = visible
-        self._theme_panel.set_visible(visible)
-        # When hiding, collapse the right pane to give full width to the editor
-        if not visible:
-            # Store position before collapsing so we can restore it
-            self._saved_theme_panel_pos = self._right_pane.get_position()
-        # GTK will adjust the pane automatically when the child is hidden
+        if visible:
+            # Make the revealer part of the layout BEFORE starting the animation
+            # so the slide-in plays from the correct fully-allocated width.
+            self._theme_revealer.set_visible(True)
+            self._theme_revealer.set_reveal_child(True)
+        else:
+            # Start hide animation; _on_theme_revealer_state_changed will call
+            # set_visible(False) once child-revealed reaches False (animation done).
+            self._theme_revealer.set_reveal_child(False)
+        save_window_state({
+            "width":               self.get_width(),
+            "height":              self.get_height(),
+            "maximized":           self.is_maximized(),
+            "theme_panel_visible": visible,
+        })
+
+    def _on_theme_revealer_state_changed(self, revealer, _param) -> None:
+        """After the hide animation completes, remove the panel from layout."""
+        if not revealer.get_child_revealed():
+            revealer.set_visible(False)
 
     def _on_toggle_theme_panel(self, *_) -> None:
         self._theme_panel_btn.set_active(not self._theme_panel_btn.get_active())
+
+    def _on_left_split_show_changed(self, split, _param) -> None:
+        self._sidebar_btn.set_active(split.get_show_sidebar())
 
     def _on_theme_panel_rebuild(self, panel) -> None:
         """ThemePanel emitted rebuild-needed — trigger a conversion."""
@@ -1318,9 +1360,10 @@ class MainWindow(Adw.ApplicationWindow):
     def _flush_window_state(self) -> bool:
         self._size_save_source = None
         save_window_state({
-            "width":     self.get_width(),
-            "height":    self.get_height(),
-            "maximized": self.is_maximized(),
+            "width":              self.get_width(),
+            "height":             self.get_height(),
+            "maximized":          self.is_maximized(),
+            "theme_panel_visible": self._theme_panel_btn.get_active(),
         })
         return GLib.SOURCE_REMOVE
 

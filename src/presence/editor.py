@@ -709,6 +709,29 @@ class _TableInsertPopover(Gtk.Popover):
         self._insert_cb(cols, rows)
 
 
+# Minimum-width strategy
+# ─────────────────────────────────────────────────────────────────────────────
+# PyGObject 3.x does NOT dispatch Python do_measure() overrides via the GTK4
+# GTypeClass vfunc slot.  Defining do_measure in a Python subclass has no
+# effect — GTK's C code never calls it.
+#
+# What actually works in this environment:
+#
+# 1. GtkTextView / GtkSourceView with wrap_mode=WORD_CHAR: the C-level
+#    measure() already reports minimum_width=0 (only natural=longest-line).
+#    GtkScrolledWindow(NEVER) with the text view as direct child allocates
+#    the text view max(0, viewport_width) = viewport_width → text wraps.
+#
+# 2. The editor toolbar (20+ buttons ≈ 1050 px natural) is wrapped in a
+#    GtkScrolledWindow(EXTERNAL, NEVER).  GTK's C code for EXTERNAL policy
+#    reports minimum=0 to the parent while allocating the toolbar its full
+#    natural width internally.  set_overflow(HIDDEN) on the scroll window
+#    clips any buttons that extend beyond the window edge.  This prevents the
+#    toolbar's natural width from propagating as the window's minimum, which
+#    was the root cause of the AdwToastOverlay warnings and the header-bar
+#    right buttons becoming inaccessible at medium window widths.
+
+
 # ── Editor ────────────────────────────────────────────────────────────────────
 
 class Editor(Gtk.Box):
@@ -767,7 +790,6 @@ class Editor(Gtk.Box):
             self._init_plain_view()
 
         self.connect("destroy", self._on_destroy)
-        self.append(self._build_toolbar())
 
         # Find bar inside a Revealer for slide-down animation (#53)
         self._find_revealer = Gtk.Revealer()
@@ -782,14 +804,33 @@ class Editor(Gtk.Box):
 
         # Overlay wraps the scroll window so we can position the image-edit
         # anchor widget anywhere over the editor text area.
+        # GtkScrolledWindow(NEVER) with GtkTextView/GtkSourceView as direct child:
+        # the text view implements GtkScrollable with hscroll-policy=MINIMUM, and
+        # GTK's C measure() reports minimum_width=0 for WORD_CHAR wrap mode.
+        # The scroll window therefore also reports minimum=0 and allocates the
+        # text view exactly viewport_width → text reflows correctly on resize.
         scroll = Gtk.ScrolledWindow()
         scroll.set_hexpand(True)
         scroll.set_vexpand(True)
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         scroll.set_child(self._view)
 
         self._img_edit_overlay = Gtk.Overlay()
         self._img_edit_overlay.set_child(scroll)
+        self._img_edit_overlay.set_vexpand(True)
+
+        # Toolbar: wrap in a ScrolledWindow(EXTERNAL, NEVER) so that GTK's
+        # C-level EXTERNAL-policy measure() reports minimum=0 to the parent.
+        # The toolbar itself still gets its full natural width allocated and is
+        # clipped by set_overflow(HIDDEN).  This prevents the toolbar's ~1050 px
+        # natural width from propagating as the window minimum.
+        toolbar_scroll = Gtk.ScrolledWindow()
+        toolbar_scroll.set_policy(Gtk.PolicyType.EXTERNAL, Gtk.PolicyType.NEVER)
+        toolbar_scroll.set_child(self._build_toolbar())
+        toolbar_scroll.set_overflow(Gtk.Overflow.HIDDEN)
+
         self.append(self._img_edit_overlay)
+        self.append(toolbar_scroll)
 
         # Slide-number badge drawing area — overlaid on the gutter column.
         # Positioned at the far left of the overlay (over the gutter).
@@ -849,7 +890,8 @@ class Editor(Gtk.Box):
         )
         self._search_context.set_highlight(True)
 
-        self._view = GtkSource.View.new_with_buffer(self._buffer)
+        self._view = GtkSource.View()
+        self._view.set_buffer(self._buffer)
         self._view.set_monospace(True)
         self._view.set_show_line_numbers(True)
         self._view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
@@ -861,6 +903,10 @@ class Editor(Gtk.Box):
         self._view.set_right_margin(16)
         self._view.set_top_margin(12)
         self._view.set_bottom_margin(12)
+        # Use GtkSourceView's built-in column guide — this draws a visual line
+        # at the configured column without inflating the widget's minimum size.
+        self._view.set_show_right_margin(True)
+        self._view.set_right_margin_position(self._line_length)
 
         self._css_provider = Gtk.CssProvider()
         self._view.get_style_context().add_provider(
@@ -873,7 +919,8 @@ class Editor(Gtk.Box):
         self._buffer = Gtk.TextBuffer()
         self._buffer.connect("changed", self._on_buffer_changed)
 
-        self._view = Gtk.TextView.new_with_buffer(self._buffer)
+        self._view = Gtk.TextView()
+        self._view.set_buffer(self._buffer)
         self._view.set_monospace(True)
         self._view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
         self._view.set_left_margin(52)
@@ -1012,13 +1059,12 @@ class Editor(Gtk.Box):
             return
         self._font_size = pt
         self._apply_font_css()
-        self._update_wrap_margin()
 
     def get_font_size(self) -> int:
         return self._font_size
 
     def set_line_length(self, cols: int) -> None:
-        """Wrap text at *cols* characters by adjusting the right margin."""
+        """Update the column guide position."""
         self._line_length = cols
         self._update_wrap_margin()
 
@@ -1026,51 +1072,15 @@ class Editor(Gtk.Box):
         return self._line_length
 
     def _update_wrap_margin(self) -> None:
-        """
-        Adjust the view's right margin so that text wraps at _line_length
-        columns, matching the iA Presenter line-length guide behaviour.
-
-        We create a Pango layout on the view's own Pango context so the
-        measurement uses the same font metrics as the actual editor text —
-        no Cairo surface or off-screen rendering required.
-
-        Called on set_line_length() and set_font_size() so the wrap column
-        stays correct when the user changes either setting.
-        """
-        cols = self._line_length
-        if cols <= 0:
-            # 0 means no limit — restore a comfortable default right margin.
-            self._view.set_right_margin(16)
+        """Update the GtkSourceView column guide to _line_length columns."""
+        if not _GTKSOURCE_AVAILABLE:
             return
-
-        try:
-            # Measure one character using the view's own Pango context so
-            # the font metrics exactly match what the editor renders.
-            layout = self._view.create_pango_layout("x")
-            layout.set_font_description(
-                Pango.FontDescription.from_string(
-                    "Monospace " + str(self._font_size)
-                )
-            )
-            char_w, _ = layout.get_pixel_size()
-
-            # right_margin = (available text-area width) − (cols × char_w)
-            # available = allocated_width − gutter_width − left_margin
-            alloc = self._view.get_allocation()
-            gutter_w = 0
-            if _GTKSOURCE_AVAILABLE:
-                try:
-                    g = self._view.get_gutter(Gtk.TextWindowType.LEFT)
-                    if g:
-                        gutter_w = g.get_allocated_width()
-                except Exception:
-                    pass
-            left_m    = self._view.get_left_margin()
-            available = alloc.width - gutter_w - left_m
-            right_m   = max(16, available - cols * char_w)
-            self._view.set_right_margin(int(right_m))
-        except Exception:
-            pass  # fallback: leave the margin unchanged
+        cols = self._line_length
+        if cols > 0:
+            self._view.set_show_right_margin(True)
+            self._view.set_right_margin_position(cols)
+        else:
+            self._view.set_show_right_margin(False)
 
 
     def set_syntax_highlight(self, enabled: bool) -> None:
@@ -1517,10 +1527,12 @@ class Editor(Gtk.Box):
             s.set_margin_end(4)
             return s
 
+        # Group 1: headings
         bar.append(label_btn("H1", "Heading 1", lambda *_: self._heading(1)))
         bar.append(label_btn("H2", "Heading 2", lambda *_: self._heading(2)))
         bar.append(label_btn("H3", "Heading 3", lambda *_: self._heading(3)))
         bar.append(sep())
+        # Group 2: inline formatting
         bar.append(icon_btn("format-text-bold-symbolic",
                              "Bold (Ctrl+B)", lambda *_: self._wrap("**", "**", "bold text")))
         bar.append(icon_btn("format-text-italic-symbolic",
@@ -1528,6 +1540,39 @@ class Editor(Gtk.Box):
         bar.append(icon_btn("format-text-strikethrough-symbolic",
                              "Strikethrough", lambda *_: self._wrap("~~", "~~", "text")))
         bar.append(sep())
+        # Group 3: slide structure — put early so they survive toolbar clipping
+        bar.append(icon_btn("list-add-symbolic",
+                             "New slide (---)", lambda *_: self._new_slide()))
+        bar.append(icon_btn("view-dual-symbolic",
+                             "Two columns (|||)", lambda *_: self._two_columns()))
+        bar.append(icon_btn("document-edit-symbolic",
+                             "Speaker notes (^^^)", lambda *_: self._speaker_notes()))
+        bar.append(sep())
+        # Group 4: find — keyboard shortcuts exist but toolbar access matters
+        bar.append(icon_btn("edit-find-symbolic",
+                             "Find (Ctrl+F)", lambda *_: self.show_find()))
+        bar.append(icon_btn("edit-find-replace-symbolic",
+                             "Find and replace (Ctrl+H)",
+                             lambda *_: self.show_find_replace()))
+        bar.append(sep())
+        # Group 5: insertion
+        bar.append(icon_btn("insert-link-symbolic",
+                             "Insert link (Ctrl+K)", lambda *_: self._link()))
+
+        self._img_toolbar_btn = icon_btn(
+            "insert-image-symbolic", "Insert image",
+            lambda *_: (self._insert_image_cb() if self._insert_image_cb
+                        else self._open_image_layout_popover(self._img_toolbar_btn))
+        )
+        bar.append(self._img_toolbar_btn)
+
+        self._tbl_toolbar_btn = icon_btn(
+            'view-grid-symbolic', 'Insert table',
+            lambda *_: self._open_table_popover(self._tbl_toolbar_btn)
+        )
+        bar.append(self._tbl_toolbar_btn)
+        bar.append(sep())
+        # Group 6: block formatting
         bar.append(icon_btn("format-text-plaintext-symbolic",
                              "Inline code", lambda *_: self._wrap("`", "`", "code")))
         bar.append(label_btn("{ }", "Code block", lambda *_: self._code_block()))
@@ -1539,39 +1584,9 @@ class Editor(Gtk.Box):
         bar.append(icon_btn("view-list-ordered-symbolic",
                              "Numbered list", lambda *_: self._line_prefix("1. ")))
         bar.append(sep())
-        bar.append(icon_btn("go-next-symbolic",
-                             "New slide (---)", lambda *_: self._new_slide()))
-        bar.append(icon_btn("view-dual-symbolic",
-                             "Two columns (|||)", lambda *_: self._two_columns()))
-        bar.append(icon_btn("document-edit-symbolic",
-                             "Speaker notes (^^^)", lambda *_: self._speaker_notes()))
-        bar.append(sep())
-        bar.append(icon_btn("insert-link-symbolic",
-                             "Insert link (Ctrl+K)", lambda *_: self._link()))
-
-        self._img_toolbar_btn = icon_btn(
-            "insert-image-symbolic", "Insert image",
-            lambda *_: (self._insert_image_cb() if self._insert_image_cb
-                        else self._open_image_layout_popover(self._img_toolbar_btn))
-        )
-        bar.append(self._img_toolbar_btn)
-
-        # Table insertion
-        self._tbl_toolbar_btn = icon_btn(
-            'view-grid-symbolic', 'Insert table',
-            lambda *_: self._open_table_popover(self._tbl_toolbar_btn)
-        )
-        bar.append(self._tbl_toolbar_btn)
-        bar.append(sep())
         bar.append(icon_btn("chat-message-new-symbolic",
                              "Insert slide comment",
                              lambda *_: self.insert_comment()))
-        bar.append(sep())
-        bar.append(icon_btn("edit-find-symbolic",
-                             "Find (Ctrl+F)", lambda *_: self.show_find()))
-        bar.append(icon_btn("edit-find-replace-symbolic",
-                             "Find and replace (Ctrl+H)",
-                             lambda *_: self.show_find_replace()))
         return bar
 
     # ── Formatting actions ────────────────────────────────────────────────────

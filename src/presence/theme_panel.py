@@ -688,6 +688,7 @@ class _SwatchCard(Gtk.ToggleButton):
         lbl = Gtk.Label(label=name)
         lbl.add_css_class("caption")
         lbl.set_ellipsize(Pango.EllipsizeMode.END)
+        lbl.set_max_width_chars(8)
         lbl.set_margin_top(3)
         lbl.set_margin_bottom(4)
         lbl.set_margin_start(3)
