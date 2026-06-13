@@ -1,0 +1,33 @@
+<svg viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
+  <!-- Document body (dog-ear fold, rounded bottom) -->
+  <path d="M 18 6 L 86 6 L 86 26 L 106 26 L 106 121 Q 106 124 103 124 L 21 124 Q 18 124 18 121 Z"
+        fill="#ffffff" stroke="#c8c8c8" stroke-width="1.5"/>
+  <!-- Dog-ear fold triangle -->
+  <path d="M 86 6 L 106 26 L 86 26 Z" fill="#dcdcdc" stroke="#c0c0c0" stroke-width="1"/>
+
+  <!-- Slide preview (landscape, 16:9-ish) -->
+  <rect x="26" y="36" width="74" height="48" rx="3" fill="#1c2b4a"/>
+
+  <!-- Slide header bar -->
+  <rect x="26" y="36" width="74" height="14" rx="3" fill="#3d8ef8"/>
+  <rect x="26" y="44" width="74" height="6" fill="#3d8ef8"/>
+
+  <!-- Slide title line -->
+  <rect x="32" y="58" width="42" height="4" rx="2" fill="#c8d6f0"/>
+
+  <!-- Slide body lines (left column) -->
+  <rect x="32" y="66" width="28" height="3" rx="1.5" fill="#5ba3ff" opacity="0.55"/>
+  <rect x="32" y="72" width="34" height="3" rx="1.5" fill="#5ba3ff" opacity="0.55"/>
+  <rect x="32" y="78" width="22" height="3" rx="1.5" fill="#5ba3ff" opacity="0.35"/>
+
+  <!-- Slide image placeholder (right side) -->
+  <rect x="72" y="58" width="22" height="24" rx="2" fill="#2563c0"/>
+  <rect x="75" y="61" width="16" height="5" rx="1.5" fill="#ffffff" opacity="0.5"/>
+  <rect x="75" y="69" width="12" height="3" rx="1.5" fill="#ffffff" opacity="0.35"/>
+  <rect x="75" y="75" width="14" height="3" rx="1.5" fill="#ffffff" opacity="0.35"/>
+
+  <!-- Slide indicator dots -->
+  <circle cx="48" cy="106" r="4.5" fill="#3d8ef8"/>
+  <circle cx="61" cy="106" r="4.5" fill="#3d8ef8" opacity="0.45"/>
+  <circle cx="74" cy="106" r="4.5" fill="#3d8ef8" opacity="0.2"/>
+</svg>

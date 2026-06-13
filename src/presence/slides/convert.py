@@ -20,30 +20,8 @@ from .css          import build_css
 from .splitter import split_slides, is_title_slide
 from .html         import md_to_html_slides
 from .thumbnails   import build_thumbnail_index
-from .utils        import encode_logo
+from .utils        import encode_logo, safe_subpath
 
-
-def _safe_subpath(base: Path, untrusted: str) -> Path | None:
-    """
-    Resolve *untrusted* relative to *base* and return the result only if it
-    stays within *base*.  Returns None if the resolved path escapes *base*,
-    preventing path-traversal attacks via frontmatter values such as
-    ``custom_css: ../../../etc/passwd``.
-
-    Absolute paths supplied in *untrusted* are always rejected — frontmatter
-    values must be relative to the document directory.
-    """
-    try:
-        candidate = (base / untrusted).resolve()
-        base_resolved = base.resolve()
-        # str comparison with trailing sep avoids matching /foo/barfile when
-        # base is /foo/bar.
-        if str(candidate).startswith(str(base_resolved) + "/") or candidate == base_resolved:
-            return candidate
-    except Exception:
-        pass
-    log.warning("Frontmatter path '%s' escapes the document directory — ignored", untrusted)
-    return None
 
 
 def convert(
@@ -74,7 +52,7 @@ def convert(
     # Absolute paths are rejected to prevent exfiltrating arbitrary files
     # (e.g. ~/.ssh/id_rsa) into the generated PDF.
     if meta.get("logo") and not logo_path:
-        safe = _safe_subpath(input_path.parent, meta["logo"])
+        safe = safe_subpath(input_path.parent, meta["logo"])
         if safe:
             logo_path = safe
 
@@ -105,7 +83,7 @@ def convert(
     tmp_css_path: str | None = None
     try:
         if meta.get("custom_css"):
-            extra_css_path = _safe_subpath(input_path.parent, meta["custom_css"])
+            extra_css_path = safe_subpath(input_path.parent, meta["custom_css"])
             if extra_css_path and extra_css_path.exists():
                 if theme.custom_css_path:
                     combined = (
@@ -143,7 +121,11 @@ def convert(
         if slides and is_title_slide(slides[0], 0):
             log.info("Slide 1 detected as title slide")
 
-        html, slide_info = md_to_html_slides(slides, css, logo_b64, meta)
+        html, slide_info = md_to_html_slides(
+            slides, css, logo_b64, meta,
+            width=width, height=height, theme_bg=theme.bg,
+            base_url=str(input_path.parent),
+        )
 
         # ── 7. Write HTML ──────────────────────────────────────────────────────
         html_path = output_path.with_suffix(".html")

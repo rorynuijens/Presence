@@ -561,9 +561,17 @@ class ThemePanel(Gtk.Box):
             gfile = dialog.open_finish(result)
         except GLib.Error:
             return
-        path = Path(gfile.get_path())
+        path_str = gfile.get_path()
+        if not path_str:
+            return
+        path = Path(path_str)
         if not path.is_file():
             return
+        try:
+            from .session import persist_logo
+            path = persist_logo(path)
+        except OSError:
+            pass
         self._converter.logo_path = path
         self._update_logo_ui(path)
         self._save_editor_prefs()

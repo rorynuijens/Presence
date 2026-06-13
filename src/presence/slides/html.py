@@ -2,7 +2,92 @@
 html.py — Assemble the full HTML document from rendered slide fragments.
 """
 
+import base64 as _base64
 import html as _html
+import re as _re
+from io import BytesIO as _BytesIO
+from pathlib import Path as _Path
+from urllib.parse import quote as _urlquote, urlparse as _urlparse
+
+_CSS_COLOUR_RE = _re.compile(
+    r'^#[0-9a-fA-F]{3,8}$'
+    r'|^rgb\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\)$'
+    r'|^rgba\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*(?:0|1|0?\.\d+)\s*\)$'
+    r'|^[a-zA-Z]{2,30}$'
+)
+
+# Schemes that must never appear in an <img src> attribute.
+_UNSAFE_IMG_SCHEMES = frozenset(("javascript", "vbscript"))
+
+
+def _safe_bg(colour: str) -> str:
+    """Return colour if it is a safe CSS colour literal, else white."""
+    return colour if _CSS_COLOUR_RE.match(colour) else "#ffffff"
+
+
+def _apply_img_effects(
+    src: str,
+    base_url: "str | None",
+    grayscale: int,
+    blur: int,
+) -> str:
+    """
+    Apply grayscale and/or blur to an image with Pillow and return a data URI.
+
+    Falls back to the original *src* string if Pillow is not installed, the
+    file cannot be resolved/opened, or *src* is already a data URI or remote URL.
+    This ensures WeasyPrint (which ignores CSS filter) also shows the effects.
+    """
+    if not (grayscale > 0 or blur > 0):
+        return src
+    if src.startswith("data:"):
+        return src
+
+    parsed = _urlparse(src)
+    if parsed.scheme in ("http", "https"):
+        return src
+
+    try:
+        from PIL import Image, ImageEnhance, ImageFilter  # type: ignore[import]
+    except ImportError:
+        return src
+
+    try:
+        if parsed.scheme == "file":
+            img_path = _Path(parsed.path)
+        elif _Path(src).is_absolute():
+            img_path = _Path(src)
+        elif base_url:
+            img_path = (_Path(base_url) / src).resolve()
+        else:
+            img_path = _Path(src)
+
+        if not img_path.exists():
+            return src
+
+        img = Image.open(img_path)
+
+        # Preserve transparency channel when present
+        has_alpha = img.mode in ("RGBA", "LA", "PA")
+        img = img.convert("RGBA" if has_alpha else "RGB")
+
+        if grayscale > 0:
+            img = ImageEnhance.Color(img).enhance(1.0 - grayscale / 100.0)
+
+        if blur > 0:
+            img = img.filter(ImageFilter.GaussianBlur(radius=blur))
+
+        buf = _BytesIO()
+        fmt = "PNG" if has_alpha else "JPEG"
+        save_kw = {} if fmt == "PNG" else {"quality": 85, "optimize": True}
+        img.save(buf, format=fmt, **save_kw)
+        b64 = _base64.b64encode(buf.getvalue()).decode()
+        mime = "image/png" if fmt == "PNG" else "image/jpeg"
+        return f"data:{mime};base64,{b64}"
+
+    except Exception:
+        return src
+
 
 from .splitter import (is_title_slide, extract_speaker_notes,
                           extract_images, infer_slide_title, split_two_columns)
@@ -16,6 +101,11 @@ def md_to_html_slides(
     css:      str,
     logo_b64: str | None,
     meta:     dict,
+    *,
+    width:    int = 1280,
+    height:   int = 720,
+    theme_bg: str = "#ffffff",
+    base_url: "str | None" = None,
 ) -> tuple[str, list[dict]]:
     """
     Render all slides to a complete HTML string.
@@ -28,6 +118,8 @@ def md_to_html_slides(
 
     first_is_title = bool(slides) and is_title_slide(slides[0], 0)
     total_numbered = len(slides) - (1 if first_is_title else 0)
+
+    bg = _safe_bg(theme_bg)
 
     for i, slide_md in enumerate(slides):
         slide_body, notes = extract_speaker_notes(slide_md)
@@ -54,11 +146,13 @@ def md_to_html_slides(
                 html_frag = _render_two_image_slide(
                     cleaned_md, images[0], images[1],
                     page_num, total_numbered, logo_b64, theme_override,
+                    height=height, theme_bg=bg, base_url=base_url,
                 )
             else:
                 html_frag = _render_image_slide(
                     cleaned_md, images[0]["src"], images[0]["layout"],
                     page_num, total_numbered, logo_b64, theme_override,
+                    height=height, base_url=base_url,
                 )
         else:
             html_frag = _render_normal_slide(cleaned_md, page_num,
@@ -67,10 +161,13 @@ def md_to_html_slides(
 
         slide_htmls.append(html_frag)
 
+    lang = _html.escape(str(meta.get("lang", "en")) or "en")
     document = f"""<!DOCTYPE html>
-<html lang="en">
+<html lang="{lang}">
 <head>
 <meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'self' data:; style-src 'unsafe-inline'; script-src 'none';">
 <style>{css}</style>
 </head>
 <body>
@@ -79,6 +176,39 @@ def md_to_html_slides(
 </html>"""
 
     return document, slide_info
+
+
+# ── Geometry helpers ─────────────────────────────────────────────────────────
+
+def _image_geometry(pos: str, size: int, height: int) -> tuple[str, str, str]:
+    """
+    Return (img_style, grad_style, text_pad_style) inline CSS strings for a
+    single-image slide panel.  All size-dependent layout is expressed as
+    inline styles so any integer size 1-100 works without fixed CSS rules.
+    """
+    if pos == "background" or size >= 100:
+        img_style  = "top:0;left:0;right:0;bottom:0;width:100%;height:100%;"
+        grad_style = "top:0;left:0;right:0;bottom:0;width:100%;height:100%;"
+        text_pad   = ""
+    elif pos == "right":
+        img_style  = f"top:0;right:0;bottom:0;width:{size}%;height:100%;"
+        grad_style = f"top:0;right:0;bottom:0;width:{size}%;"
+        text_pad   = f"padding-right:{size}%;"
+    elif pos == "left":
+        img_style  = f"top:0;left:0;bottom:0;width:{size}%;height:100%;"
+        grad_style = f"top:0;left:0;bottom:0;width:{size}%;"
+        text_pad   = f"padding-left:{size}%;"
+    elif pos == "top":
+        img_style  = f"top:0;left:0;right:0;width:100%;height:{size}%;"
+        grad_style = f"top:0;left:0;right:0;height:{size}%;"
+        text_pad   = f"padding-top:{int(height * size / 100)}px;"
+    elif pos == "bottom":
+        img_style  = f"bottom:0;left:0;right:0;width:100%;height:{size}%;"
+        grad_style = f"bottom:0;left:0;right:0;height:{size}%;"
+        text_pad   = f"padding-bottom:{int(height * size / 100)}px;"
+    else:
+        img_style = grad_style = text_pad = ""
+    return img_style, grad_style, text_pad
 
 
 # ── Slide type renderers ──────────────────────────────────────────────────────
@@ -120,6 +250,9 @@ def _render_image_slide(
     total:          int,
     logo_b64:       str | None,
     theme_override: str = "",
+    *,
+    height:         int = 720,
+    base_url:       "str | None" = None,
 ) -> str:
     """
     Render a slide that contains an image with flexible layout.
@@ -129,26 +262,110 @@ def _render_image_slide(
     background-image gradients on regular elements (stored as PDF Patterns)
     but NOT on ::after pseudo-elements, so we use a real div here.
 
-    data-img-pos  : left | right | top | bottom  (drives CSS positioning)
-    data-img-size : 30 | 50 | 70                 (drives CSS sizing)
+    Geometry (position/size) is expressed via inline styles so any integer
+    size 1-100 works.  data-img-pos and data-img-fade still drive gradient
+    direction in CSS; data-img-fit and data-img-focal drive object-fit/position.
     """
-    content     = render_slide_content(slide_md)
-    escaped_src = _html.escape(img_src)
-    t_attr      = _theme_attr(theme_override)
+    content   = render_slide_content(slide_md)
+    t_attr    = _theme_attr(theme_override)
 
-    pos      = _html.escape(layout.get("position", "right"))
-    size     = _html.escape(layout.get("size",     "50"))
-    # Gradient div: a real element so WeasyPrint renders it as a PDF Pattern.
-    # The CSS class slide-image-gradient handles direction per data-img-pos.
-    grad_div = '<div class="slide-image-gradient" aria-hidden="true"></div>' \
-               if layout.get("gradient", True) else ""
+    pos       = layout.get("position", "right")
+    size      = int(layout.get("size", "50"))
+    opacity   = layout.get("opacity", 75)
+    fade      = layout.get("fade")
+    fit       = layout.get("fit", "cover")
+    focal     = layout.get("focal", "focal-center")
+    grayscale = layout.get("grayscale", 0)
+    blur      = layout.get("blur", 0)
+
+    # Reject javascript: / vbscript: URIs unconditionally before any processing.
+    if _urlparse(img_src).scheme.lower() in _UNSAFE_IMG_SCHEMES:
+        img_src = ""
+
+    # Bake grayscale/blur into the image with PIL so WeasyPrint (which does
+    # not support CSS filter) shows the effect in the PDF and thumbnails.
+    # Falls back to the original path if PIL is unavailable or src is remote.
+    effective_src = _apply_img_effects(img_src, base_url, grayscale, blur)
+    # Only emit CSS filter for effects that weren't successfully pre-processed
+    # (i.e. PIL fallback path — still works in the WebKit live preview).
+    css_grayscale = 0 if effective_src != img_src else grayscale
+    css_blur      = 0 if effective_src != img_src else blur
+    escaped_src   = _html.escape(_urlquote(effective_src, safe="+/=:;,"))
+    tint      = layout.get("tint")
+    flip_h    = layout.get("flip_h", False)
+    flip_v    = layout.get("flip_v", False)
+    zoom      = layout.get("zoom", 100)
+
+    fade_attr  = f' data-img-fade="{_html.escape(fade)}"' if fade else ""
+    fit_attr   = f' data-img-fit="{_html.escape(fit)}"' if fit != "cover" else ""
+    focal_attr = (f' data-img-focal="{_html.escape(focal)}"'
+                  if focal != "focal-center" and fit == "cover" else "")
+
+    img_style, grad_style, text_pad = _image_geometry(pos, size, height)
+
+    # Build img inline style (opacity + transforms only — filter handled below)
+    img_css_parts = [f"opacity:{opacity / 100:.2f}"]
+    transforms = []
+    if zoom != 100:
+        transforms.append(f"scale({zoom / 100:.2f})")
+    if flip_h:
+        transforms.append("scaleX(-1)")
+    if flip_v:
+        transforms.append("scaleY(-1)")
+    if transforms:
+        focal_origin = {
+            "focal-top":    "center top",
+            "focal-bottom": "center bottom",
+        }.get(focal, "center center")
+        img_css_parts.append(f"transform:{' '.join(transforms)}")
+        img_css_parts.append(f"transform-origin:{focal_origin}")
+    img_inline = ";".join(img_css_parts)
+
+    # CSS filter fallback (PIL unavailable / remote src): blur needs a
+    # negative-inset wrapper so overflow:hidden on .slide-image doesn't clip
+    # blurred edges. Grayscale-only goes directly on the img.
+    if css_blur > 0:
+        wrap_filters = []
+        if css_grayscale > 0:
+            wrap_filters.append(f"grayscale({css_grayscale}%)")
+        wrap_filters.append(f"blur({css_blur}px)")
+        n = css_blur
+        wrap_style = (
+            f"position:absolute;top:-{n}px;left:-{n}px;"
+            f"right:-{n}px;bottom:-{n}px;"
+            f"filter:{' '.join(wrap_filters)}"
+        )
+        img_el = (
+            f'<div style="{wrap_style}">'
+            f'<img src="{escaped_src}" style="{img_inline}" alt="">'
+            f'</div>'
+        )
+    else:
+        if css_grayscale > 0:
+            img_inline += f";filter:grayscale({css_grayscale}%)"
+        img_el = f'<img src="{escaped_src}" style="{img_inline}" alt="">'
+
+    tint_div = ""
+    if tint:
+        tint_div = (f'<div class="slide-image-tint"'
+                    f' style="background:{_html.escape(tint)};"'
+                    f' aria-hidden="true"></div>')
+
+    grad_div = (f'<div class="slide-image-gradient" style="{grad_style}"'
+                f' aria-hidden="true"></div>'
+                if layout.get("gradient", True) else "")
+
+    text_style = f' style="{text_pad}"' if text_pad else ""
 
     return (
         f'<div class="slide has-image"'
-        f' data-img-pos="{pos}" data-img-size="{size}"{t_attr}>'
-        f'  <div class="slide-image"><img src="{escaped_src}" alt=""></div>'
+        f' data-img-pos="{_html.escape(pos)}"{fade_attr}{fit_attr}{focal_attr}{t_attr}>'
+        f'  <div class="slide-image" style="{img_style}">'
+        f'    {img_el}'
+        f'    {tint_div}'
+        f'  </div>'
         f'  {grad_div}'
-        f'  <div class="slide-text">'
+        f'  <div class="slide-text"{text_style}>'
         f'    {content}'
         f'    <div class="slide-number">{page_num} / {total}</div>'
         f'  </div>'
@@ -194,6 +411,10 @@ def _render_two_image_slide(
     total:          int,
     logo_b64:       str | None,
     theme_override: str = "",
+    *,
+    height:         int = 720,
+    theme_bg:       str = "#ffffff",
+    base_url:       "str | None" = None,
 ) -> str:
     """
     Render a slide with two images.
@@ -212,14 +433,33 @@ def _render_two_image_slide(
 
     layout_a = img_a.get("layout", {})
     layout_b = img_b.get("layout", {})
-    pos_a  = layout_a.get("position", "left")
-    pos_b  = layout_b.get("position", "right")
-    size_a = _html.escape(layout_a.get("size", "30"))
-    size_b = _html.escape(layout_b.get("size", "30"))
-    grad_a = "1" if layout_a.get("gradient", True) else "0"
-    grad_b = "1" if layout_b.get("gradient", True) else "0"
-    src_a  = _html.escape(img_a.get("src", ""))
-    src_b  = _html.escape(img_b.get("src", ""))
+    pos_a     = layout_a.get("position", "left")
+    pos_b     = layout_b.get("position", "right")
+    size_a    = int(layout_a.get("size", "30"))
+    size_b    = int(layout_b.get("size", "30"))
+    grad_a    = layout_a.get("gradient", True)
+    grad_b    = layout_b.get("gradient", True)
+    opacity_a = layout_a.get("opacity", 75)
+    opacity_b = layout_b.get("opacity", 75)
+    grayscale_a = layout_a.get("grayscale", 0)
+    blur_a      = layout_a.get("blur", 0)
+    grayscale_b = layout_b.get("grayscale", 0)
+    blur_b      = layout_b.get("blur", 0)
+    raw_src_a   = img_a.get("src", "")
+    raw_src_b   = img_b.get("src", "")
+    # Reject javascript: / vbscript: URIs unconditionally.
+    if _urlparse(raw_src_a).scheme.lower() in _UNSAFE_IMG_SCHEMES:
+        raw_src_a = ""
+    if _urlparse(raw_src_b).scheme.lower() in _UNSAFE_IMG_SCHEMES:
+        raw_src_b = ""
+    eff_src_a   = _apply_img_effects(raw_src_a, base_url, grayscale_a, blur_a)
+    eff_src_b   = _apply_img_effects(raw_src_b, base_url, grayscale_b, blur_b)
+    css_gs_a    = 0 if eff_src_a != raw_src_a else grayscale_a
+    css_blur_a  = 0 if eff_src_a != raw_src_a else blur_a
+    css_gs_b    = 0 if eff_src_b != raw_src_b else grayscale_b
+    css_blur_b  = 0 if eff_src_b != raw_src_b else blur_b
+    src_a  = _html.escape(_urlquote(eff_src_a, safe="+/=:;,"))
+    src_b  = _html.escape(_urlquote(eff_src_b, safe="+/=:;,"))
 
     horizontal = {pos_a, pos_b} == {"left", "right"}
     vertical   = {pos_a, pos_b} == {"top",  "bottom"}
@@ -229,26 +469,66 @@ def _render_two_image_slide(
         return _render_image_slide(
             slide_md, img_a["src"], layout_a,
             page_num, total, logo_b64, theme_override,
+            height=height, base_url=base_url,
         )
 
     axis = "h" if horizontal else "v"
 
-    # Gradient divs — real elements so WeasyPrint renders them correctly
-    grad_a_div = ('<div class="slide-image-a-gradient" aria-hidden="true"></div>'
-                  if grad_a == '1' else '')
-    grad_b_div = ('<div class="slide-image-b-gradient" aria-hidden="true"></div>'
-                  if grad_b == '1' else '')
+    # Build inline geometry styles; gradient background-image stays in CSS
+    # (direction is always inward, independent of size).
+    if horizontal:
+        img_a_style  = f"top:0;left:0;bottom:0;width:{size_a}%;height:100%;"
+        img_b_style  = f"top:0;right:0;bottom:0;width:{size_b}%;height:100%;"
+        grad_a_style = f"top:0;left:0;bottom:0;width:{size_a}%;"
+        grad_b_style = f"top:0;right:0;bottom:0;width:{size_b}%;"
+        text_style   = f"padding-left:{size_a}%;padding-right:{size_b}%;"
+    else:
+        img_a_style  = f"top:0;left:0;right:0;width:100%;height:{size_a}%;"
+        img_b_style  = f"bottom:0;left:0;right:0;width:100%;height:{size_b}%;"
+        grad_a_style = f"top:0;left:0;right:0;height:{size_a}%;"
+        grad_b_style = f"bottom:0;left:0;right:0;height:{size_b}%;"
+        pad_top      = int(height * size_a / 100)
+        pad_bot      = int(height * size_b / 100)
+        text_style   = f"padding-top:{pad_top}px;padding-bottom:{pad_bot}px;"
+
+    # Gradient divs — real elements so WeasyPrint renders them correctly.
+    grad_a_div = (f'<div class="slide-image-a-gradient" style="{grad_a_style}"'
+                  f' aria-hidden="true"></div>'
+                  if grad_a else "")
+    grad_b_div = (f'<div class="slide-image-b-gradient" style="{grad_b_style}"'
+                  f' aria-hidden="true"></div>'
+                  if grad_b else "")
+
+    # CSS filter fallback for two-image slides (PIL unavailable / remote src)
+    def _two_img_el(src: str, opacity: float, css_gs: int, css_bl: int) -> str:
+        style = f"opacity:{opacity:.2f}"
+        if css_bl > 0:
+            fparts = []
+            if css_gs > 0:
+                fparts.append(f"grayscale({css_gs}%)")
+            fparts.append(f"blur({css_bl}px)")
+            n = css_bl
+            wrap = (
+                f'<div style="position:absolute;top:-{n}px;left:-{n}px;'
+                f'right:-{n}px;bottom:-{n}px;filter:{" ".join(fparts)}">'
+                f'<img src="{src}" style="{style}" alt=""></div>'
+            )
+            return wrap
+        if css_gs > 0:
+            style += f";filter:grayscale({css_gs}%)"
+        return f'<img src="{src}" style="{style}" alt="">'
 
     return (
-        f'<div class="slide has-two-images" data-split="{axis}"'
-        f' data-size-a="{size_a}" data-size-b="{size_b}"'
-        f' data-grad-a="{grad_a}" data-grad-b="{grad_b}"'
-        f'{t_attr}>'
-        f'  <div class="slide-image-a"><img src="{src_a}" alt=""></div>'
+        f'<div class="slide has-two-images" data-split="{axis}"{t_attr}>'
+        f'  <div class="slide-image-a" style="{img_a_style}">'
+        f'    {_two_img_el(src_a, opacity_a / 100, css_gs_a, css_blur_a)}'
+        f'  </div>'
         f'  {grad_a_div}'
-        f'  <div class="slide-image-b"><img src="{src_b}" alt=""></div>'
+        f'  <div class="slide-image-b" style="{img_b_style}">'
+        f'    {_two_img_el(src_b, opacity_b / 100, css_gs_b, css_blur_b)}'
+        f'  </div>'
         f'  {grad_b_div}'
-        f'  <div class="slide-text">'
+        f'  <div class="slide-text" style="{text_style}">'
         f'    {content}'
         f'    <div class="slide-number">{page_num} / {total}</div>'
         f'  </div>'

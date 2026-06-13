@@ -26,28 +26,11 @@ from .slides.css import build_css
 from .slides.html import md_to_html_slides
 from .slides.themes import ASPECT_RATIOS
 from .slides.theme_loader import load_all_themes
-from .slides.utils import encode_logo
+from .slides.utils import encode_logo, safe_subpath
 from .slides.thumbnails_render import render_thumbnails
 
 log = logging.getLogger(__name__)
 
-
-def _safe_subpath(base: Path, untrusted: str) -> "Path | None":
-    """
-    Resolve *untrusted* relative to *base* and return the Path only if it
-    stays within *base*.  Returns None if the resolved path escapes *base*,
-    preventing path-traversal via frontmatter (e.g. logo: ../../../etc/passwd).
-    Absolute paths in *untrusted* are always rejected.
-    """
-    try:
-        candidate     = (base / untrusted).resolve()
-        base_resolved = base.resolve()
-        if str(candidate).startswith(str(base_resolved) + "/") or candidate == base_resolved:
-            return candidate
-    except Exception:
-        pass
-    log.warning("Frontmatter path '%s' escapes document directory — ignored", untrusted)
-    return None
 
 
 class Converter(GObject.Object):
@@ -148,7 +131,7 @@ class Converter(GObject.Object):
             # prevent an untrusted .md file from exfiltrating arbitrary files.
             logo_path  = self.logo_path
             if not logo_path and meta.get("logo"):
-                safe = _safe_subpath(input_path.parent, meta["logo"])
+                safe = safe_subpath(input_path.parent, meta["logo"])
                 if safe:
                     logo_path = safe
 
@@ -168,7 +151,7 @@ class Converter(GObject.Object):
             # Per-presentation custom CSS — copy theme before mutating to
             # avoid corrupting the cached Theme object (fixes #31).
             if meta.get("custom_css"):
-                extra_css = _safe_subpath(input_path.parent, meta["custom_css"])
+                extra_css = safe_subpath(input_path.parent, meta["custom_css"])
                 if extra_css and extra_css.exists():
                     if theme.custom_css_path:
                         combined = (
@@ -194,7 +177,11 @@ class Converter(GObject.Object):
             if not slides:
                 raise ValueError("No slides found — separate slides with ---")
 
-            html, slide_info = md_to_html_slides(slides, css, logo_b64, meta)
+            html, slide_info = md_to_html_slides(
+                slides, css, logo_b64, meta,
+                width=width, height=height, theme_bg=theme.bg,
+                base_url=str(input_path.parent),
+            )
 
             html_path = output_path.with_suffix(".html")
             html_path.write_text(html, encoding="utf-8")

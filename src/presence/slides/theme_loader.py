@@ -16,12 +16,14 @@ Built-in themes are defined in themes.py.
 
 import dataclasses
 import json
+import logging
 import re
 import shutil
-import sys
 import threading
 import zipfile
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 from gi.repository import GLib
 
@@ -35,6 +37,22 @@ def user_themes_dir() -> Path:
     d = Path(GLib.get_user_data_dir()) / "presence" / "themes"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def _flatpak_host_themes_dir() -> Path | None:
+    """Return the host-side themes dir when running inside a Flatpak sandbox.
+
+    Inside Flatpak, GLib.get_user_data_dir() returns ~/.var/app/<id>/data/,
+    not ~/.local/share/.  The manifest grants --filesystem=xdg-data/presence:create
+    so the host's ~/.local/share/presence/ is accessible at that same path, but
+    GLib never points there.  This helper returns that directory when it exists
+    so that themes installed by the non-Flatpak version are also discovered.
+    """
+    app_data = Path(GLib.get_user_data_dir())
+    if ".var/app/" not in str(app_data):
+        return None
+    host_themes = Path.home() / ".local" / "share" / "presence" / "themes"
+    return host_themes if host_themes.is_dir() else None
 
 
 # ── Theme cache (#39) ─────────────────────────────────────────────────────────
@@ -111,8 +129,20 @@ def load_all_themes(extra_dir: Path | None = None) -> dict[str, Theme]:
                 t = load_theme_from_dir(theme_dir)
                 result[t.slug] = t
             except Exception as exc:
-                print(f"Theme loader: skipping '{theme_dir.name}': {exc}",
-                      file=sys.stderr)
+                log.warning("Theme loader: skipping '%s': %s", theme_dir.name, exc)
+
+    host_themes = _flatpak_host_themes_dir()
+    if host_themes:
+        for theme_dir in host_themes.iterdir():
+            if theme_dir.is_dir() and theme_dir.name not in {
+                d.name for d in user_themes_dir().iterdir() if d.is_dir()
+            }:
+                try:
+                    t = load_theme_from_dir(theme_dir)
+                    if t.slug not in result:
+                        result[t.slug] = t
+                except Exception as exc:
+                    log.warning("Theme loader: skipping host theme '%s': %s", theme_dir.name, exc)
 
     if extra_dir and extra_dir.is_dir():
         for theme_dir in extra_dir.iterdir():
@@ -121,8 +151,7 @@ def load_all_themes(extra_dir: Path | None = None) -> dict[str, Theme]:
                     t = load_theme_from_dir(theme_dir)
                     result[t.slug] = t
                 except Exception as exc:
-                    print(f"Theme loader: skipping '{theme_dir.name}': {exc}",
-                          file=sys.stderr)
+                    log.warning("Theme loader: skipping '%s': %s", theme_dir.name, exc)
 
     # ── Commit to cache only if no newer result was written while we scanned ──
     with _cache_lock:
@@ -266,9 +295,28 @@ def _install_from_dir(source: Path, themes_dir: Path) -> Theme:
 
 def _install_from_zip(source: Path, themes_dir: Path) -> Theme:
     with zipfile.ZipFile(source, "r") as zf:
-        names = zf.namelist()
-        if not names:
+        infos = zf.infolist()
+        if not infos:
             raise ValueError("Empty zip file")
+        themes_dir_resolved = themes_dir.resolve()
+        for info in infos:
+            # Reject symlink entries — on Linux zipfile creates real symlinks
+            # which could point outside the themes directory, bypassing the
+            # path-traversal check below.
+            if info.external_attr >> 16 & 0o170000 == 0o120000:
+                raise ValueError(
+                    f"Theme zip contains a symlink entry '{info.filename}' — "
+                    "rejected for security"
+                )
+            # Validate every entry against the themes directory to prevent
+            # zip-slip path traversal (e.g. "../../.bashrc").
+            dest_path = (themes_dir / info.filename).resolve()
+            if dest_path != themes_dir_resolved and \
+                    not dest_path.is_relative_to(themes_dir_resolved):
+                raise ValueError(
+                    f"Malicious zip entry '{info.filename}' would escape the themes directory"
+                )
+        names = [i.filename for i in infos]
         top = Path(names[0]).parts[0]
         dest = themes_dir / top
         if dest.exists():

@@ -71,6 +71,8 @@ def render_slide_content(markdown_text: str) -> str:
 
     Supports GFM-style pipe tables and all standard CommonMark Markdown.
     Fenced code blocks are syntax-highlighted by Pygments when available.
+    GitHub-style callout blockquotes (> [!info], > [!tip], etc.) are
+    transformed into <div class="callout-KIND"> elements.
 
     Returns an empty string for empty/whitespace-only input.
     Falls back to a <pre> block on any error so slides never go blank.
@@ -79,13 +81,48 @@ def render_slide_content(markdown_text: str) -> str:
         return ""
     try:
         html = _md.render(markdown_text)
-        # Apply Pygments highlighting to fenced code blocks when available.
-        # markdown-it emits <code class="language-X"> inside <pre> — rewrite.
         if _PYGMENTS:
             html = _highlight_code_blocks(html)
+        html = _transform_callouts(html)
         return html
     except Exception:
         return f"<pre>{_html.escape(markdown_text)}</pre>"
+
+
+_CALLOUT_KINDS = {
+    "note": "info", "info": "info", "tip": "tip",
+    "warning": "warning", "caution": "danger", "danger": "danger",
+}
+
+_CALLOUT_RE = re.compile(
+    r"<blockquote>\s*<p>\[!([a-zA-Z]+)\](.*?)</blockquote>",
+    re.DOTALL,
+)
+
+
+def _transform_callouts(html: str) -> str:
+    """
+    Convert GitHub-style callout blockquotes to <div class="callout-KIND"> elements.
+
+    Handles both same-paragraph (> [!info]\n> text) and split-paragraph forms.
+    """
+    def _replace(m: "re.Match[str]") -> str:
+        kind = _CALLOUT_KINDS.get(m.group(1).lower())
+        if kind is None:
+            return m.group(0)
+        after = m.group(2)
+        if after.startswith("</p>"):
+            # Separate paragraphs: [!type]</p>\n<p>content</p>\n
+            inner = after[4:].strip()
+        else:
+            # Same paragraph: [!type]\ncontent</p>\n (or " content</p>")
+            end = after.find("</p>")
+            text = after[:end].strip() if end != -1 else after.strip()
+            rest = after[end + 4:].strip() if end != -1 else ""
+            inner = f"<p>{text}</p>{rest}" if text else rest
+        return f'<div class="callout-{kind}">{inner}</div>'
+
+    return _CALLOUT_RE.sub(_replace, html)
 
 
 def _highlight_code_blocks(html: str) -> str:

@@ -1340,7 +1340,10 @@ class ThemeEditor(Adw.Window):
             gfile = dialog.save_finish(result)
         except GLib.Error:
             return
-        zip_path = Path(gfile.get_path())
+        path_str = gfile.get_path()
+        if not path_str:
+            return
+        zip_path = Path(path_str)
         slug     = self._theme.slug.strip() or "theme"
 
         def _do():
@@ -1984,7 +1987,10 @@ class ThemeEditorAdvanced(Adw.Window):
             gfile = dialog.open_finish(result)
         except GLib.Error:
             return
-        self._add_font_row(Path(gfile.get_path()))
+        path_str = gfile.get_path()
+        if not path_str:
+            return
+        self._add_font_row(Path(path_str))
 
     def _add_font_row(self, path: Path) -> None:
         if path in self._font_files:
@@ -2276,7 +2282,10 @@ class ThemeEditorAdvanced(Adw.Window):
             gfile = dialog.save_finish(result)
         except GLib.Error:
             return
-        zip_path = Path(gfile.get_path())
+        path_str = gfile.get_path()
+        if not path_str:
+            return
+        zip_path = Path(path_str)
         slug     = self._theme.slug.strip() or "theme"
 
         def _do():

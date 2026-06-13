@@ -320,7 +320,10 @@ def _on_install_response(dialog, result, page, converter) -> None:
     except GLib.Error:
         return
 
-    source = Path(gfile.get_path())
+    path_str = gfile.get_path()
+    if not path_str:
+        return
+    source = Path(path_str)
 
     def _do_install():
         try:

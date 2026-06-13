@@ -133,16 +133,6 @@ body {{
     page-break-after: auto;
 }}
 
-.slide::before {{
-    content: '';
-    position: absolute;
-    left: 0;
-    top: 0;
-    bottom: 0;
-    width: {int(width * 0.007)}px;
-    background: var(--p-accent);
-}}
-
 /* ── Progress bar ──────────────────────────────────────────────────────── */
 
 .progress-bar-track {{
@@ -172,28 +162,6 @@ body {{
     justify-content: center;
     text-align: center;
     padding: {int(height * 0.1)}px {int(width * 0.12)}px;
-}}
-
-.slide.title-slide::before {{
-    left: 0;
-    right: 0;
-    top: auto;
-    bottom: 0;
-    width: 100%;
-    height: {int(height * 0.012)}px;
-    background: var(--p-title-accent);
-}}
-
-.slide.title-slide::after {{
-    content: '';
-    position: absolute;
-    left: 0;
-    right: 0;
-    top: 0;
-    width: 100%;
-    height: {int(height * 0.006)}px;
-    background: var(--p-title-accent);
-    opacity: 0.4;
 }}
 
 .slide.title-slide h1 {{
@@ -234,10 +202,6 @@ body {{
     color: {t.title_fg};
 }}
 
-.slide[data-p-theme="dark"]::before {{
-    background: var(--p-accent);
-}}
-
 .slide[data-p-theme="light"] {{
     background: {t.bg};
     color: {t.fg};
@@ -251,7 +215,7 @@ h1 {{
     color: var(--p-heading);
     margin-bottom: {int(height * 0.03)}px;
     line-height: 1.1;
-    font-weight: 700;
+    font-weight: 900;
     letter-spacing: -0.02em;
 }}
 
@@ -261,7 +225,7 @@ h2 {{
     color: var(--p-heading);
     margin-bottom: {int(height * 0.025)}px;
     line-height: 1.2;
-    font-weight: 600;
+    font-weight: 900;
 }}
 
 h3 {{
@@ -269,6 +233,7 @@ h3 {{
     font-size: {int(height * 0.042)}px;
     color: var(--p-heading);
     margin-bottom: {int(height * 0.02)}px;
+    font-weight: 800;
 }}
 
 p {{
@@ -321,7 +286,6 @@ pre {{
     border-radius: 6px;
     overflow: hidden;
     margin: {int(height * 0.015)}px 0;
-    border-left: {int(width * 0.005)}px solid var(--p-accent);
 }}
 
 pre code {{
@@ -338,7 +302,6 @@ pre code {{
     border-radius: 6px;
     overflow: hidden;
     margin: {int(height * 0.015)}px 0;
-    border-left: {int(width * 0.005)}px solid var(--p-accent);
 }}
 
 .highlight pre {{
@@ -368,7 +331,6 @@ pre code {{
 /* ── Misc ──────────────────────────────────────────────────────────────── */
 
 blockquote {{
-    border-left: {int(width * 0.006)}px solid var(--p-accent);
     padding-left: {int(width * 0.03)}px;
     font-style: italic;
     opacity: 0.85;
@@ -391,11 +353,6 @@ th {{
 
 td {{
     padding: {int(height * 0.01)}px {int(width * 0.02)}px;
-    border-bottom: 1px solid {t.accent}44;
-}}
-
-tr:nth-child(even) td {{
-    background: var(--p-code-bg);
 }}
 
 strong {{
@@ -406,7 +363,6 @@ strong {{
 a {{
     color: var(--p-accent);
     text-decoration: none;
-    border-bottom: 1px dashed var(--p-accent);
 }}
 
 .slide-number {{
@@ -420,8 +376,13 @@ a {{
 /* ── Image slide layout ────────────────────────────────────────────────── */
 /*
  * Layout is driven by data attributes on .slide.has-image:
- *   data-img-pos  : left | right | top | bottom
- *   data-img-size : 30 | 50 | 70  (percent of slide width or height)
+ *   data-img-pos   : left | right | top | bottom | background
+ *   data-img-fade  : left | right | top | bottom  (gradient direction override)
+ *   data-img-fit   : contain  (omitted = cover, the default)
+ *   data-img-focal : focal-top | focal-center | focal-bottom
+ *
+ * Geometry (panel size/position) is expressed as inline styles on each element
+ * in html.py so any integer size 1-100 works without per-size CSS rules here.
  *
  * The gradient is a real <div class="slide-image-gradient"> — NOT a ::after
  * pseudo-element — because WeasyPrint supports background-image gradients
@@ -437,6 +398,7 @@ a {{
     position: absolute;
     overflow: hidden;
     z-index: 0;
+    transform: translateZ(0);
 }}
 
 .slide.has-image .slide-image img {{
@@ -446,8 +408,29 @@ a {{
     object-fit: cover;
     object-position: center;
     display: block;
-    opacity: 0.75;
 }}
+
+/* ── Image tint overlay — sits above img inside .slide-image ── */
+/* background-color set via inline style; opacity is hardcoded 0.4. */
+
+.slide-image-tint {{
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    opacity: 0.4;
+    pointer-events: none;
+}}
+
+/* ── Fit mode: contain — image letterboxes instead of cropping ── */
+
+.slide.has-image[data-img-fit="contain"] .slide-image img {{
+    object-fit: contain;
+}}
+
+/* ── Focal point — shifts object-position for cover mode ── */
+
+.slide.has-image[data-img-focal="focal-top"]    .slide-image img {{ object-position: top; }}
+.slide.has-image[data-img-focal="focal-bottom"] .slide-image img {{ object-position: bottom; }}
 
 /* ── Gradient overlay div ── */
 
@@ -457,62 +440,22 @@ a {{
     pointer-events: none;
 }}
 
-/* ── RIGHT ── */
+/* ── Default gradient direction per image position ── */
+/* background-image only; geometry is set as inline styles by html.py.        */
+/* The explicit fade-direction rules below have the SAME specificity and are   */
+/* placed AFTER — cascade order lets them override when data-img-fade is set.  */
+.slide.has-image[data-img-pos="right"]  .slide-image-gradient {{ background-image: linear-gradient(to right,  {t.bg} 0%, transparent 60%); }}
+.slide.has-image[data-img-pos="left"]   .slide-image-gradient {{ background-image: linear-gradient(to left,   {t.bg} 0%, transparent 60%); }}
+.slide.has-image[data-img-pos="top"]    .slide-image-gradient {{ background-image: linear-gradient(to top,    {t.bg} 0%, transparent 60%); }}
+.slide.has-image[data-img-pos="bottom"] .slide-image-gradient {{ background-image: linear-gradient(to bottom, {t.bg} 0%, transparent 60%); }}
 
-.slide.has-image[data-img-pos="right"][data-img-size="30"] .slide-image {{ top:0; right:0; bottom:0; width:30%; height:100%; }}
-.slide.has-image[data-img-pos="right"][data-img-size="50"] .slide-image {{ top:0; right:0; bottom:0; width:50%; height:100%; }}
-.slide.has-image[data-img-pos="right"][data-img-size="70"] .slide-image {{ top:0; right:0; bottom:0; width:70%; height:100%; }}
-
-.slide.has-image[data-img-pos="right"][data-img-size="30"] .slide-text {{ padding-right: 30%; }}
-.slide.has-image[data-img-pos="right"][data-img-size="50"] .slide-text {{ padding-right: 50%; }}
-.slide.has-image[data-img-pos="right"][data-img-size="70"] .slide-text {{ padding-right: 70%; }}
-
-/* Gradient covers the full image panel and fades from bg (left) → transparent (right) */
-.slide.has-image[data-img-pos="right"][data-img-size="30"] .slide-image-gradient {{ top:0; right:0; bottom:0; width:30%; background-image: linear-gradient(to right, {t.bg} 0%, transparent 60%); }}
-.slide.has-image[data-img-pos="right"][data-img-size="50"] .slide-image-gradient {{ top:0; right:0; bottom:0; width:50%; background-image: linear-gradient(to right, {t.bg} 0%, transparent 60%); }}
-.slide.has-image[data-img-pos="right"][data-img-size="70"] .slide-image-gradient {{ top:0; right:0; bottom:0; width:70%; background-image: linear-gradient(to right, {t.bg} 0%, transparent 60%); }}
-
-/* ── LEFT ── */
-
-.slide.has-image[data-img-pos="left"][data-img-size="30"] .slide-image {{ top:0; left:0; bottom:0; width:30%; height:100%; }}
-.slide.has-image[data-img-pos="left"][data-img-size="50"] .slide-image {{ top:0; left:0; bottom:0; width:50%; height:100%; }}
-.slide.has-image[data-img-pos="left"][data-img-size="70"] .slide-image {{ top:0; left:0; bottom:0; width:70%; height:100%; }}
-
-.slide.has-image[data-img-pos="left"][data-img-size="30"] .slide-text {{ padding-left: 30%; }}
-.slide.has-image[data-img-pos="left"][data-img-size="50"] .slide-text {{ padding-left: 50%; }}
-.slide.has-image[data-img-pos="left"][data-img-size="70"] .slide-text {{ padding-left: 70%; }}
-
-.slide.has-image[data-img-pos="left"][data-img-size="30"] .slide-image-gradient {{ top:0; left:0; bottom:0; width:30%; background-image: linear-gradient(to left, {t.bg} 0%, transparent 60%); }}
-.slide.has-image[data-img-pos="left"][data-img-size="50"] .slide-image-gradient {{ top:0; left:0; bottom:0; width:50%; background-image: linear-gradient(to left, {t.bg} 0%, transparent 60%); }}
-.slide.has-image[data-img-pos="left"][data-img-size="70"] .slide-image-gradient {{ top:0; left:0; bottom:0; width:70%; background-image: linear-gradient(to left, {t.bg} 0%, transparent 60%); }}
-
-/* ── TOP ── */
-
-.slide.has-image[data-img-pos="top"][data-img-size="30"] .slide-image {{ top:0; left:0; right:0; width:100%; height:30%; }}
-.slide.has-image[data-img-pos="top"][data-img-size="50"] .slide-image {{ top:0; left:0; right:0; width:100%; height:50%; }}
-.slide.has-image[data-img-pos="top"][data-img-size="70"] .slide-image {{ top:0; left:0; right:0; width:100%; height:70%; }}
-
-.slide.has-image[data-img-pos="top"][data-img-size="30"] .slide-text {{ padding-top: 30%; }}
-.slide.has-image[data-img-pos="top"][data-img-size="50"] .slide-text {{ padding-top: 50%; }}
-.slide.has-image[data-img-pos="top"][data-img-size="70"] .slide-text {{ padding-top: 70%; }}
-
-.slide.has-image[data-img-pos="top"][data-img-size="30"] .slide-image-gradient {{ top:0; left:0; right:0; height:30%; background-image: linear-gradient(to top, {t.bg} 0%, transparent 60%); }}
-.slide.has-image[data-img-pos="top"][data-img-size="50"] .slide-image-gradient {{ top:0; left:0; right:0; height:50%; background-image: linear-gradient(to top, {t.bg} 0%, transparent 60%); }}
-.slide.has-image[data-img-pos="top"][data-img-size="70"] .slide-image-gradient {{ top:0; left:0; right:0; height:70%; background-image: linear-gradient(to top, {t.bg} 0%, transparent 60%); }}
-
-/* ── BOTTOM ── */
-
-.slide.has-image[data-img-pos="bottom"][data-img-size="30"] .slide-image {{ bottom:0; left:0; right:0; width:100%; height:30%; }}
-.slide.has-image[data-img-pos="bottom"][data-img-size="50"] .slide-image {{ bottom:0; left:0; right:0; width:100%; height:50%; }}
-.slide.has-image[data-img-pos="bottom"][data-img-size="70"] .slide-image {{ bottom:0; left:0; right:0; width:100%; height:70%; }}
-
-.slide.has-image[data-img-pos="bottom"][data-img-size="30"] .slide-text {{ padding-bottom: 30%; }}
-.slide.has-image[data-img-pos="bottom"][data-img-size="50"] .slide-text {{ padding-bottom: 50%; }}
-.slide.has-image[data-img-pos="bottom"][data-img-size="70"] .slide-text {{ padding-bottom: 70%; }}
-
-.slide.has-image[data-img-pos="bottom"][data-img-size="30"] .slide-image-gradient {{ bottom:0; left:0; right:0; height:30%; background-image: linear-gradient(to bottom, {t.bg} 0%, transparent 60%); }}
-.slide.has-image[data-img-pos="bottom"][data-img-size="50"] .slide-image-gradient {{ bottom:0; left:0; right:0; height:50%; background-image: linear-gradient(to bottom, {t.bg} 0%, transparent 60%); }}
-.slide.has-image[data-img-pos="bottom"][data-img-size="70"] .slide-image-gradient {{ bottom:0; left:0; right:0; height:70%; background-image: linear-gradient(to bottom, {t.bg} 0%, transparent 60%); }}
+/* ── Explicit gradient direction override (data-img-fade attribute) ── */
+/* fade-X: background colour is strongest on side X.                          */
+/* Placed AFTER position defaults — same specificity wins via cascade order.  */
+.slide.has-image[data-img-fade="left"]   .slide-image-gradient {{ background-image: linear-gradient(to right,  {t.bg} 0%, transparent 60%); }}
+.slide.has-image[data-img-fade="right"]  .slide-image-gradient {{ background-image: linear-gradient(to left,   {t.bg} 0%, transparent 60%); }}
+.slide.has-image[data-img-fade="top"]    .slide-image-gradient {{ background-image: linear-gradient(to bottom, {t.bg} 0%, transparent 60%); }}
+.slide.has-image[data-img-fade="bottom"] .slide-image-gradient {{ background-image: linear-gradient(to top,    {t.bg} 0%, transparent 60%); }}
 
 /* ── Text container ── */
 
@@ -583,10 +526,10 @@ a {{
     text-align: left;
 }}
 
-/* ── TOP image: text anchors to the top of its zone, centred horizontally ── */
+/* ── TOP image: text centred in the bottom half ── */
 
 .slide.has-image[data-img-pos="top"] .slide-text {{
-    justify-content: flex-start;
+    justify-content: center;
     align-items: center;
     text-align: center;
 }}
@@ -601,10 +544,10 @@ a {{
     text-align: center;
 }}
 
-/* ── BOTTOM image: text anchors to the bottom of its zone, centred ── */
+/* ── BOTTOM image: text centred in the top half ── */
 
 .slide.has-image[data-img-pos="bottom"] .slide-text {{
-    justify-content: flex-end;
+    justify-content: center;
     align-items: center;
     text-align: center;
 }}
@@ -678,7 +621,6 @@ a {{
     object-fit: cover;
     object-position: center;
     display: block;
-    opacity: 0.75;
 }}
 
 .slide.has-two-images .slide-text {{
@@ -691,45 +633,8 @@ a {{
     height: 100%;
 }}
 
-/* ── HORIZONTAL split (data-split="h"): left image | text | right image ── */
-
-/* Image A on the left */
-.slide.has-two-images[data-split="h"][data-size-a="30"] .slide-image-a {{ top:0; left:0;  bottom:0; width:30%; height:100%; }}
-.slide.has-two-images[data-split="h"][data-size-a="50"] .slide-image-a {{ top:0; left:0;  bottom:0; width:50%; height:100%; }}
-.slide.has-two-images[data-split="h"][data-size-a="70"] .slide-image-a {{ top:0; left:0;  bottom:0; width:70%; height:100%; }}
-
-/* Image B on the right */
-.slide.has-two-images[data-split="h"][data-size-b="30"] .slide-image-b {{ top:0; right:0; bottom:0; width:30%; height:100%; }}
-.slide.has-two-images[data-split="h"][data-size-b="50"] .slide-image-b {{ top:0; right:0; bottom:0; width:50%; height:100%; }}
-.slide.has-two-images[data-split="h"][data-size-b="70"] .slide-image-b {{ top:0; right:0; bottom:0; width:70%; height:100%; }}
-
-/* Text occupies the middle strip — padded away from both image panels */
-.slide.has-two-images[data-split="h"][data-size-a="30"][data-size-b="30"] .slide-text {{ padding-left:30%; padding-right:30%; }}
-.slide.has-two-images[data-split="h"][data-size-a="30"][data-size-b="50"] .slide-text {{ padding-left:30%; padding-right:50%; }}
-.slide.has-two-images[data-split="h"][data-size-a="50"][data-size-b="30"] .slide-text {{ padding-left:50%; padding-right:30%; }}
-.slide.has-two-images[data-split="h"][data-size-a="30"][data-size-b="70"] .slide-text {{ padding-left:30%; padding-right:70%; }}
-.slide.has-two-images[data-split="h"][data-size-a="70"][data-size-b="30"] .slide-text {{ padding-left:70%; padding-right:30%; }}
-.slide.has-two-images[data-split="h"][data-size-a="50"][data-size-b="50"] .slide-text {{ padding-left:50%; padding-right:50%; }}
-
-/* ── VERTICAL split (data-split="v"): top image / text / bottom image ── */
-
-/* Image A on the top */
-.slide.has-two-images[data-split="v"][data-size-a="30"] .slide-image-a {{ top:0; left:0; right:0; width:100%; height:30%; }}
-.slide.has-two-images[data-split="v"][data-size-a="50"] .slide-image-a {{ top:0; left:0; right:0; width:100%; height:50%; }}
-.slide.has-two-images[data-split="v"][data-size-a="70"] .slide-image-a {{ top:0; left:0; right:0; width:100%; height:70%; }}
-
-/* Image B on the bottom */
-.slide.has-two-images[data-split="v"][data-size-b="30"] .slide-image-b {{ bottom:0; left:0; right:0; width:100%; height:30%; }}
-.slide.has-two-images[data-split="v"][data-size-b="50"] .slide-image-b {{ bottom:0; left:0; right:0; width:100%; height:50%; }}
-.slide.has-two-images[data-split="v"][data-size-b="70"] .slide-image-b {{ bottom:0; left:0; right:0; width:100%; height:70%; }}
-
-/* Text in the middle strip */
-.slide.has-two-images[data-split="v"][data-size-a="30"][data-size-b="30"] .slide-text {{ padding-top:30%; padding-bottom:30%; }}
-.slide.has-two-images[data-split="v"][data-size-a="30"][data-size-b="50"] .slide-text {{ padding-top:30%; padding-bottom:50%; }}
-.slide.has-two-images[data-split="v"][data-size-a="50"][data-size-b="30"] .slide-text {{ padding-top:50%; padding-bottom:30%; }}
-.slide.has-two-images[data-split="v"][data-size-a="30"][data-size-b="70"] .slide-text {{ padding-top:30%; padding-bottom:70%; }}
-.slide.has-two-images[data-split="v"][data-size-a="70"][data-size-b="30"] .slide-text {{ padding-top:70%; padding-bottom:30%; }}
-.slide.has-two-images[data-split="v"][data-size-a="50"][data-size-b="50"] .slide-text {{ padding-top:50%; padding-bottom:50%; }}
+/* ── Two-image slide: geometry is set as inline styles by html.py ── */
+/* Only gradient background-image direction is needed here.         */
 
 /* ── Gradient overlay divs — emitted as real elements by html.py ── */
 /* The gradient div for image-a fades inward (toward the text centre). */
@@ -741,25 +646,25 @@ a {{
     pointer-events: none;
 }}
 
-/* Horizontal: image-a is left, gradient fades right toward text */
-.slide.has-two-images[data-split="h"][data-size-a="30"] .slide-image-a-gradient {{ top:0; left:0;  bottom:0; width:30%; background-image: linear-gradient(to left,  {t.bg} 0%, transparent 60%); }}
-.slide.has-two-images[data-split="h"][data-size-a="50"] .slide-image-a-gradient {{ top:0; left:0;  bottom:0; width:50%; background-image: linear-gradient(to left,  {t.bg} 0%, transparent 60%); }}
-.slide.has-two-images[data-split="h"][data-size-a="70"] .slide-image-a-gradient {{ top:0; left:0;  bottom:0; width:70%; background-image: linear-gradient(to left,  {t.bg} 0%, transparent 60%); }}
+/* Horizontal: image-a is left → gradient fades right (to left = bg on left edge) */
+.slide.has-two-images[data-split="h"] .slide-image-a-gradient {{
+    background-image: linear-gradient(to left, {t.bg} 0%, transparent 60%);
+}}
 
-/* Horizontal: image-b is right, gradient fades left toward text */
-.slide.has-two-images[data-split="h"][data-size-b="30"] .slide-image-b-gradient {{ top:0; right:0; bottom:0; width:30%; background-image: linear-gradient(to right, {t.bg} 0%, transparent 60%); }}
-.slide.has-two-images[data-split="h"][data-size-b="50"] .slide-image-b-gradient {{ top:0; right:0; bottom:0; width:50%; background-image: linear-gradient(to right, {t.bg} 0%, transparent 60%); }}
-.slide.has-two-images[data-split="h"][data-size-b="70"] .slide-image-b-gradient {{ top:0; right:0; bottom:0; width:70%; background-image: linear-gradient(to right, {t.bg} 0%, transparent 60%); }}
+/* Horizontal: image-b is right → gradient fades left */
+.slide.has-two-images[data-split="h"] .slide-image-b-gradient {{
+    background-image: linear-gradient(to right, {t.bg} 0%, transparent 60%);
+}}
 
-/* Vertical: image-a is top, gradient fades downward toward text */
-.slide.has-two-images[data-split="v"][data-size-a="30"] .slide-image-a-gradient {{ top:0; left:0; right:0; height:30%; background-image: linear-gradient(to top,    {t.bg} 0%, transparent 60%); }}
-.slide.has-two-images[data-split="v"][data-size-a="50"] .slide-image-a-gradient {{ top:0; left:0; right:0; height:50%; background-image: linear-gradient(to top,    {t.bg} 0%, transparent 60%); }}
-.slide.has-two-images[data-split="v"][data-size-a="70"] .slide-image-a-gradient {{ top:0; left:0; right:0; height:70%; background-image: linear-gradient(to top,    {t.bg} 0%, transparent 60%); }}
+/* Vertical: image-a is top → gradient fades downward */
+.slide.has-two-images[data-split="v"] .slide-image-a-gradient {{
+    background-image: linear-gradient(to top, {t.bg} 0%, transparent 60%);
+}}
 
-/* Vertical: image-b is bottom, gradient fades upward toward text */
-.slide.has-two-images[data-split="v"][data-size-b="30"] .slide-image-b-gradient {{ bottom:0; left:0; right:0; height:30%; background-image: linear-gradient(to bottom, {t.bg} 0%, transparent 60%); }}
-.slide.has-two-images[data-split="v"][data-size-b="50"] .slide-image-b-gradient {{ bottom:0; left:0; right:0; height:50%; background-image: linear-gradient(to bottom, {t.bg} 0%, transparent 60%); }}
-.slide.has-two-images[data-split="v"][data-size-b="70"] .slide-image-b-gradient {{ bottom:0; left:0; right:0; height:70%; background-image: linear-gradient(to bottom, {t.bg} 0%, transparent 60%); }}
+/* Vertical: image-b is bottom → gradient fades upward */
+.slide.has-two-images[data-split="v"] .slide-image-b-gradient {{
+    background-image: linear-gradient(to bottom, {t.bg} 0%, transparent 60%);
+}}
 """
 
     if t.custom_css_path:
@@ -767,6 +672,10 @@ a {{
         if path.exists():
             try:
                 custom = path.read_text(encoding="utf-8")
+                # Strip @import rules to prevent network requests from
+                # untrusted theme CSS (e.g. exfiltration via @import url(...)).
+                custom = re.sub(r'@import\s[^;]*;?', '', custom,
+                                flags=re.IGNORECASE)
                 css += (
                     "\n\n/* ── Theme custom CSS ──────────────────── */\n"
                     + custom
@@ -774,6 +683,28 @@ a {{
             except OSError as e:
                 log.warning("Cannot read custom CSS '%s': %s",
                             t.custom_css_path, e)
+
+    # Applied last so it overrides any border/stripe rules in theme custom CSS.
+    css += """
+/* ── No-lines override ──────────────────────────────────────────────────── */
+.slide::before, .slide::after { display: none; }
+.slide h1, .slide h2, .slide h3, .slide h4,
+.slide.title-slide h1, .slide.title-slide h2, .slide.title-slide h3 {
+    border: none;
+    padding-top: 0;
+    padding-bottom: 0;
+    padding-left: 0;
+}
+.slide a                    { border-bottom: none; }
+.slide pre, .slide .highlight { border: none; }
+.slide code                 { border: none; }
+.slide blockquote           { border-left: none; }
+.slide table                { border: none; }
+.slide th, .slide td        { border: none; }
+.slide tr:nth-child(even) td,
+.slide tr:nth-child(odd)  td { background: transparent; }
+.two-col > .col             { border: none; }
+"""
 
     return css
 
@@ -811,7 +742,7 @@ def _resolve(theme) -> Theme:
     t.bg            = _safe_colour(t.bg,            "#ffffff")
     t.fg            = _safe_colour(t.fg,            "#1a1a2e")
     t.accent        = _safe_colour(t.accent,        "#E17000")
-    t.accent2       = _safe_colour(t.accent2,       t.accent) if t.accent2 else t.accent
+    t.accent2       = _safe_colour(t.accent2 or t.accent, t.accent)
     t.heading_color = _safe_colour(t.heading_color, t.accent) if t.heading_color else ""
     t.code_bg       = _safe_colour(t.code_bg,       "#f0f4f8")
     t.title_bg      = _safe_colour(t.title_bg,      "#1a1a2e")
@@ -845,8 +776,9 @@ def _logo_css(height: int, width: int) -> str:
 def _callout_css(kind: str, t: Theme, width: int, height: int, icon: str) -> str:
     bg, fg, border = getattr(t, f"callout_{kind}")
     badge_size     = int(width * 0.024)
-    # Sanitise the icon: strip single-quotes to prevent CSS content injection
-    safe_icon = icon.replace("'", "")
+    # Sanitise the icon: strip all characters that could break out of the CSS
+    # content: '...' string literal or affect the surrounding CSS structure.
+    safe_icon = re.sub(r"[\x00-\x1f\"'\\{};<>]", "", icon)
     return f"""
     .callout-{kind} {{
         background: {bg};

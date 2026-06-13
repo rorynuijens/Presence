@@ -7,8 +7,10 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 import threading
+import zipfile
 from pathlib import Path
 
 import gi
@@ -21,6 +23,7 @@ from .sidebar    import Sidebar
 from .theme_panel    import ThemePanel
 from .settings_dialog import SettingsDialog
 from .app_utils        import png_bytes_to_texture, make_file_filter, make_filter_store
+from .ai_import_dialog import AIImportDialog, generate_missing_images
 
 log = logging.getLogger(__name__)
 from .converter  import Converter
@@ -90,8 +93,10 @@ class MainWindow(Adw.ApplicationWindow):
             self.maximize()
         self._theme_panel_open: bool = state.get("theme_panel_visible", False)
 
-        self._file_path:   Path | None = None
-        self._output_path: Path | None = None
+        self._file_path:     Path | None = None
+        self._output_path:   Path | None = None
+        self._pres_path:     Path | None = None   # .pres bundle path (user-visible)
+        self._pres_temp_dir: Path | None = None   # temp dir for extracted .pres content
         self._modified:    bool        = False
         self._slide_info: list = []
         self._thumbnails: list = []
@@ -169,19 +174,17 @@ class MainWindow(Adw.ApplicationWindow):
         self.connect("notify::default-height", self._on_size_changed)
         self.connect("notify::maximized",      self._on_size_changed)
         self.connect("close-request",          self._on_close_request)
+        self.connect("destroy",                self._on_destroy)
 
     # ── UI construction ───────────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
-        # Wrap in Adw.ToastOverlay so theme-install toasts work (#2)
-        self._toast_overlay = Adw.ToastOverlay()
-        self.set_content(self._toast_overlay)
-
-        # AdwToolbarView is the correct container for headerbar + content —
-        # it lets Libadwaita negotiate minimum widths through the widget tree,
-        # which is required for Adw.Breakpoint to work without layout warnings.
+        # AdwToolbarView must be the direct content of AdwApplicationWindow so
+        # that libadwaita can integrate header bars with the window chrome.
+        # Nesting it inside AdwToastOverlay breaks this integration and causes
+        # a gtk_box_append critical from libadwaita's internal layout code.
         root = Adw.ToolbarView()
-        self._toast_overlay.set_child(root)
+        self.set_content(root)
 
         root.add_top_bar(self._build_header())
 
@@ -234,13 +237,20 @@ class MainWindow(Adw.ApplicationWindow):
         self._left_split = Adw.OverlaySplitView()
         self._left_split.set_sidebar_position(Gtk.PackType.START)
         self._left_split.set_sidebar(self._sidebar)
-        self._left_split.set_content(editor_row)
         self._left_split.set_max_sidebar_width(260)
         self._left_split.set_min_sidebar_width(0)
         self._left_split.connect(
             "notify::show-sidebar", self._on_left_split_show_changed
         )
-        root.set_content(self._left_split)
+
+        self._left_split.set_content(editor_row)
+
+        # Wrap main content in ToastOverlay so theme-install toasts work (#2).
+        # Placed inside ToolbarView's content area (not wrapping the ToolbarView)
+        # so toasts appear over the content but not over header bars.
+        self._toast_overlay = Adw.ToastOverlay()
+        self._toast_overlay.set_child(self._left_split)
+        root.set_content(self._toast_overlay)
 
         # Collapse thumbnail sidebar below 800 px.
         bp_sidebar = Adw.Breakpoint.new(
@@ -445,6 +455,11 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _build_app_menu(self) -> Gio.Menu:
         menu = Gio.Menu()
+        s0 = Gio.Menu()
+        s0.append("Import & Convert…",       "win.ai-import")
+        s0.append("Generate missing images", "win.ai-missing-images")
+        menu.append_section(None, s0)
+
         s1 = Gio.Menu()
         s1.append("Save As…",        "win.save-as")
         s1.append("Export PDF…",     "win.export")
@@ -519,6 +534,8 @@ class MainWindow(Adw.ApplicationWindow):
             # Sidebar / preview panel toggles with F9/F10 (#75)
             ("toggle-sidebar",       self._on_toggle_sidebar,       "F9"),
             ("toggle-theme-panel",   self._on_toggle_theme_panel,   "F10"),
+            ("ai-import",            self._on_ai_import,            None),
+            ("ai-missing-images",    self._on_ai_missing_images,    None),
         ]
         for name, cb, accel in actions:
             action = Gio.SimpleAction.new(name, None)
@@ -579,7 +596,8 @@ class MainWindow(Adw.ApplicationWindow):
         self._show_unsaved_dialog(on_save=action, on_discard=action)
 
     def _show_unsaved_dialog(self, on_save, on_discard) -> None:
-        name = self._file_path.name if self._file_path else "Untitled"
+        display = self._pres_path or self._file_path
+        name = display.name if display else "Untitled"
         dialog = Adw.AlertDialog(
             heading=f'Save changes to "{name}"?',
             body="Your changes will be lost if you don't save them.",
@@ -613,11 +631,16 @@ class MainWindow(Adw.ApplicationWindow):
             self._show_error(f"Cannot open file: {e}")
             return
 
+        is_pres = path.suffix.lower() == ".pres"
+
         # Warn if this file is already open in another window (#88)
         for win in self.get_application().get_windows():
-            if (win is not self
-                    and isinstance(win, MainWindow)
-                    and win._file_path == path):
+            if win is self or not isinstance(win, MainWindow):
+                continue
+            already_open = (
+                win._pres_path == path if is_pres else win._file_path == path
+            )
+            if already_open:
                 dialog = Adw.AlertDialog(
                     heading="File already open",
                     body=(f"'{path.name}' is already open in another window. "
@@ -628,14 +651,20 @@ class MainWindow(Adw.ApplicationWindow):
                 dialog.set_default_response("cancel")
                 dialog.set_close_response("cancel")
 
-                def _on_response(dlg, response, p=path):
+                def _on_response(dlg, response, p=path, pres=is_pres):
                     if response == "open":
-                        self._do_open_file(p)
+                        if pres:
+                            self._open_pres_file(p)
+                        else:
+                            self._do_open_file(p)
                 dialog.connect("response", _on_response)
                 dialog.present(self)
                 return
 
-        self._do_open_file(path)
+        if is_pres:
+            self._open_pres_file(path)
+        else:
+            self._do_open_file(path)
 
     def _do_open_file(self, path: Path) -> None:
         """Internal: load file into editor (called after duplicate check)."""
@@ -650,10 +679,11 @@ class MainWindow(Adw.ApplicationWindow):
         self._editor.set_base_path(path)
         self._editor.set_text(text)
         self._sidebar.update_from_text(text)
-        self._set_title(path.name)
+        display = self._pres_path or path
+        self._set_title(display.name)
         self._modified = False
-        save_last_file(path)
-        save_recent_file(path)
+        save_last_file(display)
+        save_recent_file(display)
         self._refresh_recent_actions()
 
         # Defer the initial conversion by one idle cycle so the window is
@@ -670,7 +700,8 @@ class MainWindow(Adw.ApplicationWindow):
     def restore_autosave(self, text: str) -> None:
         self._editor.set_text(text)
         self._modified = True
-        base = self._file_path.name if self._file_path else UNTITLED
+        display = self._pres_path or self._file_path
+        base = display.name if display else UNTITLED
         self._set_title(base + " •")
         self._trigger_convert()
 
@@ -681,11 +712,14 @@ class MainWindow(Adw.ApplicationWindow):
             self._file_path.write_text(
                 self._editor.get_text(), encoding="utf-8"
             )
+            if self._pres_path:
+                self._pack_pres()
             self._modified = False
-            self._set_title(self._file_path.name)
-            save_last_file(self._file_path)
+            display = self._pres_path or self._file_path
+            self._set_title(display.name)
+            save_last_file(display)
             # Delete any orphaned recovery file (fixes #59)
-            delete_recovery_file(self._file_path)
+            delete_recovery_file(display)
             # Trigger conversion: always when not in watch mode (existing
             # behaviour), or immediately on every save if auto-convert is on.
             # watching is always False in GUI mode (watch is CLI-only);
@@ -702,8 +736,11 @@ class MainWindow(Adw.ApplicationWindow):
         dialog = Gtk.FileDialog()
         dialog.set_title("Save As")
         dialog.set_filters(make_filter_store(
-            make_file_filter("Markdown files", "*.md")
+            make_file_filter("Presence bundle", "*.pres"),
+            make_file_filter("Markdown files", "*.md"),
         ))
+        if self._pres_path:
+            dialog.set_initial_file(Gio.File.new_for_path(str(self._pres_path)))
         self._active_file_dialog = dialog
         dialog.save(self, None, self._on_save_as_response)
         return True
@@ -714,17 +751,36 @@ class MainWindow(Adw.ApplicationWindow):
             gfile = dialog.save_finish(result)
         except GLib.Error:
             return
-        path = Path(gfile.get_path())
+        path_str = gfile.get_path()
+        if not path_str:
+            return
+        path = Path(path_str)
         if not path.suffix:
-            path = path.with_suffix(".md")
-        # Verify the directory is writable before committing (#67)
+            path = path.with_suffix(".pres")
         if not os.access(path.parent, os.W_OK):
             self._show_error(f"Cannot write to '{path.parent}' — permission denied.")
             return
-        self._file_path   = path
-        self._output_path = path.with_suffix(".pdf")
-        self._editor.set_base_path(path)
-        self._save()
+        if path.suffix.lower() == ".pres":
+            self._setup_pres_save(path)
+        else:
+            # Saving as plain .md: copy assets out of any pres temp dir first
+            if self._pres_path and self._file_path:
+                old_assets = self._file_path.parent / "assets"
+                if old_assets.is_dir():
+                    try:
+                        shutil.copytree(old_assets, path.parent / "assets",
+                                        dirs_exist_ok=True)
+                    except OSError as e:
+                        log.warning("Could not copy assets: %s", e)
+            old_pres_temp = self._pres_temp_dir
+            self._pres_path = None
+            self._pres_temp_dir = None
+            self._file_path   = path
+            self._output_path = path.with_suffix(".pdf")
+            self._editor.set_base_path(path)
+            self._save()
+            if old_pres_temp and old_pres_temp.exists():
+                shutil.rmtree(old_pres_temp, ignore_errors=True)
 
     # ── Conversion ────────────────────────────────────────────────────────────
 
@@ -760,19 +816,109 @@ class MainWindow(Adw.ApplicationWindow):
                     pass
                 setattr(self, attr, None)
 
+    # ── .pres bundle support ──────────────────────────────────────────────────
+
+    def _on_destroy(self, *_) -> None:
+        if self._pres_temp_dir and self._pres_temp_dir.exists():
+            shutil.rmtree(self._pres_temp_dir, ignore_errors=True)
+        self._pres_temp_dir = None
+
+    def _open_pres_file(self, pres_path: Path) -> None:
+        """Extract a .pres ZIP bundle to a temp dir and load slides.md from it."""
+        self._cleanup_pres_temp()
+        try:
+            # Use shared /tmp in Flatpak so the generated PDF is accessible to
+            # external viewers via the OpenURI portal (Flatpak's $TMPDIR is private).
+            tmp_base = "/tmp" if os.environ.get("FLATPAK_ID") else None
+            tmp_dir = Path(tempfile.mkdtemp(prefix="presence-", dir=tmp_base))
+        except OSError as e:
+            self._show_error(f"Could not create temp directory: {e}")
+            return
+        self._pres_temp_dir = tmp_dir
+        try:
+            with zipfile.ZipFile(pres_path, "r") as zf:
+                zf.extractall(tmp_dir)
+        except (zipfile.BadZipFile, OSError) as e:
+            self._show_error(f"Could not open '{pres_path.name}': {e}")
+            self._cleanup_pres_temp()
+            return
+        md_path = tmp_dir / "slides.md"
+        if not md_path.exists():
+            self._show_error(f"Invalid .pres file: 'slides.md' not found inside.")
+            self._cleanup_pres_temp()
+            return
+        self._pres_path = pres_path
+        self._do_open_file(md_path)
+
+    def _pack_pres(self) -> None:
+        """Re-pack the temp dir into the .pres ZIP bundle atomically."""
+        if not self._pres_path or not self._file_path:
+            return
+        tmp = self._pres_path.with_suffix(".pres~")
+        try:
+            with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                zf.write(self._file_path, "slides.md")
+                for name in ("slides.pdf", "slides.html"):
+                    p = self._file_path.parent / name
+                    if p.exists():
+                        zf.write(p, name)
+                assets_dir = self._file_path.parent / "assets"
+                if assets_dir.is_dir():
+                    for asset in sorted(assets_dir.iterdir()):
+                        if asset.is_file():
+                            zf.write(asset, f"assets/{asset.name}")
+            tmp.replace(self._pres_path)
+        except OSError as e:
+            log.warning("Could not write .pres bundle: %s", e)
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _cleanup_pres_temp(self) -> None:
+        """Remove the pres temp dir and clear pres state."""
+        if self._pres_temp_dir and self._pres_temp_dir.exists():
+            shutil.rmtree(self._pres_temp_dir, ignore_errors=True)
+        self._pres_temp_dir = None
+        self._pres_path = None
+
+    def _setup_pres_save(self, pres_path: Path) -> None:
+        """Switch to .pres bundle mode, creating a temp dir for the working copy."""
+        old_file_path = self._file_path
+        old_pres_temp = self._pres_temp_dir
+        try:
+            tmp_base = "/tmp" if os.environ.get("FLATPAK_ID") else None
+            tmp_dir = Path(tempfile.mkdtemp(prefix="presence-", dir=tmp_base))
+        except OSError as e:
+            self._show_error(f"Could not create temp directory: {e}")
+            return
+        if old_file_path:
+            old_assets = old_file_path.parent / "assets"
+            if old_assets.is_dir():
+                try:
+                    shutil.copytree(old_assets, tmp_dir / "assets")
+                except OSError as e:
+                    log.warning("Could not copy assets to bundle: %s", e)
+        self._pres_temp_dir = tmp_dir
+        self._pres_path = pres_path
+        md_path = tmp_dir / "slides.md"
+        self._file_path = md_path
+        self._output_path = tmp_dir / "slides.pdf"
+        self._editor.set_base_path(md_path)
+        self._save()
+        if old_pres_temp and old_pres_temp != tmp_dir and old_pres_temp.exists():
+            shutil.rmtree(old_pres_temp, ignore_errors=True)
+
     # ── Signal handlers ───────────────────────────────────────────────────────
 
     def _on_editor_changed(self, editor: Editor, text: str) -> None:
         self._modified = True
-        base = self._file_path.name if self._file_path else UNTITLED
+        display = self._pres_path or self._file_path
+        base = display.name if display else UNTITLED
         self._set_title(base + " •")
         # Debounce the sidebar parse: run 200 ms after the last keystroke so
         # we do not parse the full document on every character (#37).
-        if self._sidebar_update_source is not None:
-            GLib.source_remove(self._sidebar_update_source)
-        self._sidebar_update_source = GLib.timeout_add(
-            200, self._flush_sidebar_update, text
-        )
+        self._debounce("_sidebar_update_source", 200, self._flush_sidebar_update, text)
         self._update_word_count(text)
 
     def _flush_sidebar_update(self, text: str) -> bool:
@@ -792,25 +938,14 @@ class MainWindow(Adw.ApplicationWindow):
         if not self._slide_info:
             return GLib.SOURCE_CONTINUE
         try:
-            text = self._editor.get_text()
-            buf    = self._editor._buffer
-            cursor = buf.get_iter_at_mark(buf.get_insert())
-            offset = cursor.get_offset()
+            from .slides.utils import compute_slide_offsets
+            text   = self._editor.get_text()
+            offset = self._editor.get_cursor_offset()
 
             # Re-parse only when text changed since last poll
             if (self._cursor_sync_cache is None
                     or self._cursor_sync_cache[0] != text):
-                _meta, body = parse_frontmatter(text)
-                fm_len = len(text) - len(body.lstrip("\n")) if body else 0
-                slides = split_slides(body)
-                slide_offsets: list[int] = []
-                search_pos = 0
-                for slide_text in slides:
-                    idx = body.find(slide_text.rstrip(), search_pos)
-                    if idx == -1:
-                        idx = search_pos
-                    slide_offsets.append(fm_len + idx)
-                    search_pos = idx + len(slide_text)
+                slide_offsets = compute_slide_offsets(text)
                 self._cursor_sync_cache = (text, slide_offsets)
             else:
                 slide_offsets = self._cursor_sync_cache[1]
@@ -825,14 +960,14 @@ class MainWindow(Adw.ApplicationWindow):
 
             self._sidebar.scroll_to_index(current)
         except Exception:
-            pass   # never crash the main loop
+            log.debug("Cursor sync error", exc_info=True)
 
         # Check whether the cursor is on an image tag and open/update
         # the contextual image-edit popover accordingly.
         try:
             self._editor.check_cursor_for_image()
         except Exception:
-            pass
+            log.debug("Image cursor check error", exc_info=True)
         return GLib.SOURCE_CONTINUE
 
     def _on_undo_state_changed(self, can_undo: bool, can_redo: bool) -> None:
@@ -865,7 +1000,8 @@ class MainWindow(Adw.ApplicationWindow):
 
         self._editor.set_text_as_user_action(new_text)
         self._modified = True
-        base = self._file_path.name if self._file_path else UNTITLED
+        display = self._pres_path or self._file_path
+        base = display.name if display else UNTITLED
         self._set_title(base + " •")
         self._sidebar.update_from_text(new_text)
         # Scroll editor to the newly inserted slide
@@ -890,7 +1026,8 @@ class MainWindow(Adw.ApplicationWindow):
         # Use set_text_as_user_action so the reorder is one undo step (#56)
         self._editor.set_text_as_user_action(new_text)
         self._modified = True
-        base = self._file_path.name if self._file_path else UNTITLED
+        display = self._pres_path or self._file_path
+        base = display.name if display else UNTITLED
         self._set_title(base + " •")
         self._sidebar.update_from_text(new_text)
 
@@ -910,11 +1047,65 @@ class MainWindow(Adw.ApplicationWindow):
             self._on_presenter()
 
     def _on_open_pdf_clicked(self, *_) -> None:
-        if self._output_path and self._output_path.exists():
-            launcher = Gtk.FileLauncher.new(
-                Gio.File.new_for_path(str(self._output_path))
+        if not (self._output_path and self._output_path.exists()):
+            return
+        pdf_path = self._output_path
+        if os.environ.get("FLATPAK_ID"):
+            # /tmp inside the Flatpak sandbox is a private tmpfs — the host
+            # sees a different /tmp.  Use the XDG cache dir instead: its path
+            # (~/.var/app/<id>/cache/) is identical inside the sandbox and on
+            # the host, so flatpak-spawn --host xdg-open can reach the file.
+            cache_dir = Path(GLib.get_user_cache_dir())
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            host_pdf = cache_dir / "presentation-preview.pdf"
+            try:
+                shutil.copy2(pdf_path, host_pdf)
+                os.chmod(host_pdf, 0o644)
+                pdf_path = host_pdf
+            except OSError:
+                pass
+            # Run xdg-open on the HOST via flatpak-spawn, bypassing the portal.
+            # The OpenURI portal (used by Gtk.FileLauncher) is unreliable on
+            # some GNOME installations and returns "application launch failed".
+            try:
+                subprocess.Popen(
+                    ["flatpak-spawn", "--host", "xdg-open", str(pdf_path)]
+                )
+                return
+            except OSError:
+                pass
+            # flatpak-spawn unavailable — copy to Documents as last resort.
+            self._copy_pdf_to_documents(pdf_path)
+            return
+        launcher = Gtk.FileLauncher.new(Gio.File.new_for_path(str(pdf_path)))
+        launcher.launch(self, None, self._on_pdf_launch_finish)
+
+    def _copy_pdf_to_documents(self, src: Path) -> None:
+        docs = Path(GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_DOCUMENTS))
+        dest = docs / "presentation.pdf"
+        try:
+            shutil.copy2(src, dest)
+            self._show_toast(
+                "PDF viewer unavailable — PDF saved to Documents/presentation.pdf",
+                timeout=8,
             )
-            launcher.launch(self, None, None)
+        except OSError:
+            self._show_error(
+                f"Could not open a PDF viewer.\n\nThe PDF is at:\n{self._output_path}"
+            )
+
+    def _on_pdf_launch_finish(self, launcher, result) -> None:
+        try:
+            launcher.launch_finish(result)
+        except GLib.Error as e:
+            log.warning("PDF launch via portal failed (%s): %s", e.domain, e.message)
+            launcher.open_containing_folder(self, None, self._on_pdf_folder_finish)
+
+    def _on_pdf_folder_finish(self, launcher, result) -> None:
+        try:
+            launcher.open_containing_folder_finish(result)
+        except GLib.Error as e:
+            self._show_error(f"Could not open PDF: {e.message}")
 
     def _on_copy_pdf_path(self, *_) -> None:
         """Copy the output PDF path to the clipboard (#72)."""
@@ -985,6 +1176,9 @@ class MainWindow(Adw.ApplicationWindow):
 
         if self._file_path is not None:
             self._cleanup_temp_files()
+
+        if self._pres_path:
+            self._pack_pres()
 
     def _on_conversion_failed(self, converter: Converter, message: str) -> None:
         self._spinner.stop()
@@ -1074,9 +1268,11 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _show_open_dialog(self) -> None:
         dialog = Gtk.FileDialog()
-        dialog.set_title("Open Markdown File")
+        dialog.set_title("Open File")
         dialog.set_filters(make_filter_store(
-            make_file_filter("Markdown files", "*.md")
+            make_file_filter("Presence files", "*.pres", "*.md"),
+            make_file_filter("Presence bundle", "*.pres"),
+            make_file_filter("Markdown files", "*.md"),
         ))
         self._active_file_dialog = dialog
         dialog.open(self, None, self._on_open_response)
@@ -1087,13 +1283,23 @@ class MainWindow(Adw.ApplicationWindow):
             gfile = dialog.open_finish(result)
         except GLib.Error:
             return
-        self.open_file(Path(gfile.get_path()))
+        path_str = gfile.get_path()
+        if not path_str:
+            return
+        self.open_file(Path(path_str))
 
     def _on_save(self, *_) -> None:
         self._save()
 
     def _on_save_as(self, *_) -> None:
         self._save_as_dialog()
+
+    def _on_ai_import(self, *_) -> None:
+        dlg = AIImportDialog(self)
+        dlg.present(self)
+
+    def _on_ai_missing_images(self, *_) -> None:
+        generate_missing_images(self)
 
     def _on_settings(self, *_) -> None:
         dlg = SettingsDialog(self)
@@ -1143,7 +1349,7 @@ class MainWindow(Adw.ApplicationWindow):
             target_str = f" / {tm:02d}:{ts:02d}"
         else:
             target_str = ""
-        self._title_label.set_subtitle(f"🎤  {elapsed_str}{target_str}")
+        self._title_label.set_subtitle(f"Speaking: {elapsed_str}{target_str}")
 
     def _on_presenter_closed(self, win) -> bool:
         """Restore subtitle when presenter window closes."""
@@ -1187,7 +1393,10 @@ class MainWindow(Adw.ApplicationWindow):
             gfile = dialog.open_finish(result)
         except GLib.Error:
             return
-        src_path = Path(gfile.get_path())
+        path_str = gfile.get_path()
+        if not path_str:
+            return
+        src_path = Path(path_str)
         if not src_path.is_file():
             return
 
@@ -1213,7 +1422,10 @@ class MainWindow(Adw.ApplicationWindow):
     def _on_export(self, *_) -> None:
         dialog = Gtk.FileDialog()
         dialog.set_title("Export PDF")
-        if self._output_path:
+        if self._pres_path:
+            dialog.set_initial_folder(Gio.File.new_for_path(str(self._pres_path.parent)))
+            dialog.set_initial_name(self._pres_path.stem + ".pdf")
+        elif self._output_path:
             dialog.set_initial_file(
                 Gio.File.new_for_path(str(self._output_path))
             )
@@ -1229,7 +1441,10 @@ class MainWindow(Adw.ApplicationWindow):
             gfile = dialog.save_finish(result)
         except GLib.Error:
             return
-        path = Path(gfile.get_path())
+        path_str = gfile.get_path()
+        if not path_str:
+            return
+        path = Path(path_str)
         if not path.suffix:
             path = path.with_suffix(".pdf")
         # Verify the directory is writable before starting conversion (#67)
@@ -1246,7 +1461,10 @@ class MainWindow(Adw.ApplicationWindow):
             return
         dialog = Gtk.FileDialog()
         dialog.set_title("Export HTML")
-        if self._output_path:
+        if self._pres_path:
+            dialog.set_initial_folder(Gio.File.new_for_path(str(self._pres_path.parent)))
+            dialog.set_initial_name(self._pres_path.stem + ".html")
+        elif self._output_path:
             dialog.set_initial_file(
                 Gio.File.new_for_path(str(self._output_path.with_suffix(".html")))
             )
@@ -1262,7 +1480,10 @@ class MainWindow(Adw.ApplicationWindow):
             gfile = dialog.save_finish(result)
         except GLib.Error:
             return
-        dest = Path(gfile.get_path())
+        path_str = gfile.get_path()
+        if not path_str:
+            return
+        dest = Path(path_str)
         if not dest.suffix:
             dest = dest.with_suffix(".html")
         if not os.access(dest.parent, os.W_OK):
@@ -1298,7 +1519,10 @@ class MainWindow(Adw.ApplicationWindow):
             gfile = dialog.select_folder_finish(result)
         except GLib.Error:
             return
-        folder = Path(gfile.get_path())
+        path_str = gfile.get_path()
+        if not path_str:
+            return
+        folder = Path(path_str)
         if not folder.is_dir():
             return
 
@@ -1323,7 +1547,8 @@ class MainWindow(Adw.ApplicationWindow):
 
         def _on_done(slides: list) -> bool:
             saved = 0
-            stem  = (self._file_path.stem if self._file_path else "slide")
+            display = self._pres_path or self._file_path
+            stem = display.stem if display else "slide"
             for i, png in enumerate(slides):
                 if png:
                     try:
@@ -1340,7 +1565,9 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_show_in_file_manager(self, *_) -> None:
         """Open the output folder in the system file manager."""
-        if self._output_path and self._output_path.parent.exists():
+        if self._pres_path:
+            folder = Gio.File.new_for_path(str(self._pres_path.parent))
+        elif self._output_path and self._output_path.parent.exists():
             folder = Gio.File.new_for_path(str(self._output_path.parent))
         elif self._file_path:
             folder = Gio.File.new_for_path(str(self._file_path.parent))
@@ -1353,9 +1580,7 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_size_changed(self, *_) -> None:
         # Debounce: only write session after 500 ms of no resize events (#96)
-        if self._size_save_source is not None:
-            GLib.source_remove(self._size_save_source)
-        self._size_save_source = GLib.timeout_add(500, self._flush_window_state)
+        self._debounce("_size_save_source", 500, self._flush_window_state)
 
     def _flush_window_state(self) -> bool:
         self._size_save_source = None
@@ -1374,8 +1599,9 @@ class MainWindow(Adw.ApplicationWindow):
             try:
                 rd = recovery_dir()
                 rd.mkdir(parents=True, exist_ok=True)
-                if self._file_path:
-                    rp = recovery_path_for(self._file_path)
+                display = self._pres_path or self._file_path
+                if display:
+                    rp = recovery_path_for(display)
                 else:
                     rp = rd / "untitled.md"
                 rp.write_text(self._editor.get_text(), encoding="utf-8")
@@ -1397,6 +1623,16 @@ class MainWindow(Adw.ApplicationWindow):
             self._title_label.set_subtitle(f"{words} words · ~{time_str}")
 
     # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _debounce(self, attr: str, delay_ms: int, cb, *args) -> None:
+        src = getattr(self, attr, None)
+        if src is not None:
+            GLib.source_remove(src)
+        def _fire():
+            setattr(self, attr, None)
+            cb(*args)
+            return GLib.SOURCE_REMOVE
+        setattr(self, attr, GLib.timeout_add(delay_ms, _fire))
 
     def _set_title(self, name: str) -> None:
         self.set_title(f"{name} — Presence")

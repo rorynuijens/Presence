@@ -51,29 +51,78 @@ _IMAGE_RE = re.compile(
 )
 
 _IMAGE_POSITIONS = frozenset(("left", "right", "top", "bottom", "background"))
-_IMAGE_SIZES     = frozenset(("30", "50", "70"))
+_IMAGE_FIT       = frozenset(("cover", "contain"))
+_IMAGE_FOCAL     = frozenset(("focal-top", "focal-center", "focal-bottom"))
+
+_OPACITY_TOKEN_RE   = re.compile(r'^opacity(\d{1,3})$')
+_FADE_TOKEN_RE      = re.compile(r'^fade-(?:left|right|top|bottom)$')
+_SIZE_TOKEN_RE      = re.compile(r'^(\d{1,3})$')
+_GRAYSCALE_TOKEN_RE = re.compile(r'^grayscale(\d{1,3})$')
+_BLUR_TOKEN_RE      = re.compile(r'^blur(\d{1,2})$')
+_TINT_TOKEN_RE      = re.compile(r'^tint-(#[0-9a-f]{3,8}|[a-z]{2,30})$')
+_ZOOM_TOKEN_RE      = re.compile(r'^zoom(\d{1,3})$')
+
+
+# Default fade direction when position changes — the gradient always points
+# inward (from the text side toward the image).
+_POSITION_DEFAULT_FADE: dict[str, str] = {
+    "left":       "right",
+    "right":      "left",
+    "top":        "bottom",
+    "bottom":     "top",
+    "background": "left",
+}
 
 
 def _parse_alt(alt: str) -> tuple[str, dict]:
     """
     Split an alt string into (description, layout_dict).
 
-    Format: "Human description|position|size|gradient"
+    Format: "Human description|position|size|gradient|opacityN|fade-dir|fit|focal"
     Tokens are order-insensitive and separated by |.
-    Returns the first unrecognised token as the human description.
     """
-    layout: dict = {"position": "right", "size": "50", "gradient": True}
+    layout: dict = {
+        "position": "right", "size": "50", "gradient": True,
+        "opacity": 75, "fade": None,
+        "fit": "cover", "focal": "focal-center",
+        "grayscale": 0, "blur": 0, "tint": None,
+        "flip_h": False, "flip_v": False, "zoom": 100,
+    }
     desc_parts: list[str] = []
     for token in (t.strip() for t in alt.split("|")):
         tl = token.lower()
         if tl in _IMAGE_POSITIONS:
             layout["position"] = tl
-        elif tl in _IMAGE_SIZES:
-            layout["size"] = tl
+        elif m2 := _SIZE_TOKEN_RE.match(tl):
+            size_val = int(m2.group(1))
+            if 1 <= size_val <= 100:
+                layout["size"] = tl
         elif tl == "gradient":
             layout["gradient"] = True
         elif tl == "nogradient":
             layout["gradient"] = False
+        elif m := _OPACITY_TOKEN_RE.match(tl):
+            layout["opacity"] = max(0, min(100, int(m.group(1))))
+        elif tl.startswith("fade-") and tl[5:] in ("left", "right", "top", "bottom"):
+            layout["fade"] = tl[5:]
+        elif tl in _IMAGE_FIT:
+            layout["fit"] = tl
+        elif tl in _IMAGE_FOCAL:
+            layout["focal"] = tl
+        elif m := _GRAYSCALE_TOKEN_RE.match(tl):
+            layout["grayscale"] = max(0, min(100, int(m.group(1))))
+        elif m := _BLUR_TOKEN_RE.match(tl):
+            layout["blur"] = max(0, min(20, int(m.group(1))))
+        elif m := _TINT_TOKEN_RE.match(tl):
+            layout["tint"] = m.group(1)
+        elif tl == "flip-h":
+            layout["flip_h"] = True
+        elif tl == "flip-v":
+            layout["flip_v"] = True
+        elif m := _ZOOM_TOKEN_RE.match(tl):
+            zoom_val = int(m.group(1))
+            if 100 <= zoom_val <= 300:
+                layout["zoom"] = zoom_val
         elif token:
             desc_parts.append(token)
     return " ".join(desc_parts), layout
@@ -87,6 +136,33 @@ def _build_alt(desc: str, layout: dict) -> str:
     tokens.append(layout.get("position", "right"))
     tokens.append(layout.get("size", "50"))
     tokens.append("gradient" if layout.get("gradient", True) else "nogradient")
+    opacity = layout.get("opacity", 75)
+    tokens.append(f"opacity{opacity}")
+    fade = layout.get("fade")
+    if fade:
+        tokens.append(f"fade-{fade}")
+    fit = layout.get("fit", "cover")
+    if fit != "cover":
+        tokens.append(fit)
+    focal = layout.get("focal", "focal-center")
+    if focal != "focal-center" and fit == "cover":
+        tokens.append(focal)
+    grayscale = layout.get("grayscale", 0)
+    if grayscale > 0:
+        tokens.append(f"grayscale{grayscale}")
+    blur = layout.get("blur", 0)
+    if blur > 0:
+        tokens.append(f"blur{blur}")
+    tint = layout.get("tint")
+    if tint:
+        tokens.append(f"tint-{tint}")
+    if layout.get("flip_h", False):
+        tokens.append("flip-h")
+    if layout.get("flip_v", False):
+        tokens.append("flip-v")
+    zoom = layout.get("zoom", 100)
+    if zoom != 100:
+        tokens.append(f"zoom{zoom}")
     return "|".join(tokens)
 
 
@@ -181,8 +257,18 @@ class ImageLayoutPopover(Gtk.Popover):
         self._insert_cb  = insert_cb
         self._edit_cb: Callable[[dict, str], None] | None = None
         self._edit_mode  = False
-        self._active_pos  = "right"
-        self._active_size = "50"
+        self._active_pos       = "right"
+        self._active_size      = "50"
+        self._active_opacity   = 75
+        self._active_fade      = "left"   # default for "right" position
+        self._active_fit       = "cover"
+        self._active_focal     = "focal-center"
+        self._active_grayscale = 0
+        self._active_blur      = 0
+        self._active_tint: str | None = None
+        self._active_flip_h    = False
+        self._active_flip_v    = False
+        self._active_zoom      = 100
         self._writeback_source: int | None = None
         # Holds a reference to the active Gtk.FileDialog so it is not garbage-
         # collected before the user selects a file (cleared in _on_file_chosen).
@@ -201,16 +287,34 @@ class ImageLayoutPopover(Gtk.Popover):
 
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         root.add_css_class("img-layout-popover")
-        root.set_size_request(276, -1)
+        root.set_size_request(300, -1)
+
+        def _inline_slider(lbl_text: str, scale: Gtk.Scale) -> Gtk.Box:
+            """Return a compact hbox: fixed-width label + expanding scale."""
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            row.set_margin_start(10)
+            row.set_margin_end(10)
+            row.set_margin_bottom(6)
+            lbl = Gtk.Label(label=lbl_text)
+            lbl.set_xalign(0.0)
+            lbl.set_width_chars(9)
+            lbl.add_css_class("caption")
+            lbl.add_css_class("dim-label")
+            scale.set_hexpand(True)
+            scale.set_draw_value(True)
+            scale.set_value_pos(Gtk.PositionType.RIGHT)
+            row.append(lbl)
+            row.append(scale)
+            return row
 
         # ── Header ────────────────────────────────────────────────────────────
         header = Gtk.Label(label="Image layout")
         header.set_xalign(0.0)
         header.add_css_class("ilp-header")
-        header.set_margin_top(12)
-        header.set_margin_bottom(12)
-        header.set_margin_start(14)
-        header.set_margin_end(14)
+        header.set_margin_top(10)
+        header.set_margin_bottom(10)
+        header.set_margin_start(10)
+        header.set_margin_end(10)
         root.append(header)
         root.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
 
@@ -218,18 +322,18 @@ class ImageLayoutPopover(Gtk.Popover):
         pos_lbl = Gtk.Label(label="Position")
         pos_lbl.set_xalign(0.0)
         pos_lbl.add_css_class("ilp-section-label")
-        pos_lbl.set_margin_top(10)
-        pos_lbl.set_margin_bottom(6)
-        pos_lbl.set_margin_start(14)
-        pos_lbl.set_margin_end(14)
+        pos_lbl.set_margin_top(6)
+        pos_lbl.set_margin_bottom(4)
+        pos_lbl.set_margin_start(10)
+        pos_lbl.set_margin_end(10)
         root.append(pos_lbl)
 
         # 2×2 grid for left/right/top/bottom + full-width background button
         self._pos_buttons: dict[str, Gtk.Button] = {}
-        pos_grid = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        pos_grid.set_margin_start(14)
-        pos_grid.set_margin_end(14)
-        pos_grid.set_margin_bottom(10)
+        pos_grid = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        pos_grid.set_margin_start(10)
+        pos_grid.set_margin_end(10)
+        pos_grid.set_margin_bottom(6)
 
         top_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         bot_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -251,39 +355,50 @@ class ImageLayoutPopover(Gtk.Popover):
         root.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
 
         # ── Size section ──────────────────────────────────────────────────────
-        size_lbl = Gtk.Label(label="Size")
-        size_lbl.set_xalign(0.0)
-        size_lbl.add_css_class("ilp-section-label")
-        size_lbl.set_margin_top(10)
-        size_lbl.set_margin_bottom(6)
-        size_lbl.set_margin_start(14)
-        size_lbl.set_margin_end(14)
-        root.append(size_lbl)
+        self._size_scale = Gtk.Scale.new_with_range(
+            Gtk.Orientation.HORIZONTAL, 1, 100, 1
+        )
+        for _v, _lbl in ((30, "30%"), (50, "50%"), (70, "70%"), (100, "Full")):
+            self._size_scale.add_mark(_v, Gtk.PositionType.BOTTOM, _lbl)
+        self._size_scale.set_value(50)
+        self._size_scale.connect("value-changed", self._on_size_changed)
+        root.append(_inline_slider("Size", self._size_scale))
+        root.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
 
-        size_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        size_row.set_margin_start(14)
-        size_row.set_margin_end(14)
-        size_row.set_margin_bottom(10)
-        self._size_buttons: dict[str, Gtk.Button] = {}
+        # ── Opacity section ───────────────────────────────────────────────────
+        opacity_lbl = Gtk.Label(label="Opacity")
+        opacity_lbl.set_xalign(0.0)
+        opacity_lbl.add_css_class("ilp-section-label")
+        opacity_lbl.set_margin_top(6)
+        opacity_lbl.set_margin_bottom(4)
+        opacity_lbl.set_margin_start(10)
+        opacity_lbl.set_margin_end(10)
+        root.append(opacity_lbl)
 
-        for label, token in (("30%", "30"), ("50%", "50"), ("70%", "70")):
-            btn = Gtk.Button(label=label)
-            btn.set_hexpand(True)
-            btn.add_css_class("ilp-btn")
-            btn.set_tooltip_text(f"{token}% of the slide dimension")
-            btn.connect("clicked", self._on_size_clicked, token)
-            self._size_buttons[token] = btn
-            size_row.append(btn)
+        opacity_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        opacity_row.set_margin_start(10)
+        opacity_row.set_margin_end(10)
+        opacity_row.set_margin_bottom(6)
+        self._opacity_buttons: dict[str, Gtk.Button] = {}
 
-        root.append(size_row)
+        for _lbl, _tok in (("25%", "25"), ("50%", "50"), ("75%", "75"), ("Full", "100")):
+            _btn = Gtk.Button(label=_lbl)
+            _btn.set_hexpand(True)
+            _btn.add_css_class("ilp-btn")
+            _btn.set_tooltip_text(f"{_tok}% image opacity")
+            _btn.connect("clicked", self._on_opacity_clicked, _tok)
+            self._opacity_buttons[_tok] = _btn
+            opacity_row.append(_btn)
+
+        root.append(opacity_row)
         root.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
 
         # ── Gradient row ──────────────────────────────────────────────────────
         grad_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        grad_row.set_margin_top(10)
-        grad_row.set_margin_bottom(10)
-        grad_row.set_margin_start(14)
-        grad_row.set_margin_end(14)
+        grad_row.set_margin_top(6)
+        grad_row.set_margin_bottom(6)
+        grad_row.set_margin_start(10)
+        grad_row.set_margin_end(10)
 
         grad_text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
         grad_text.set_hexpand(True)
@@ -307,14 +422,226 @@ class ImageLayoutPopover(Gtk.Popover):
         grad_row.append(grad_text)
         grad_row.append(self._grad_switch)
         root.append(grad_row)
+
+        # ── Fade direction section (visible only when gradient is ON) ─────────
+        # Includes its own top separator so hiding the box also hides the divider.
+        self._fade_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self._fade_box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+
+        fade_lbl = Gtk.Label(label="Gradient direction")
+        fade_lbl.set_xalign(0.0)
+        fade_lbl.add_css_class("ilp-section-label")
+        fade_lbl.set_margin_top(6)
+        fade_lbl.set_margin_bottom(4)
+        fade_lbl.set_margin_start(10)
+        fade_lbl.set_margin_end(10)
+        self._fade_box.append(fade_lbl)
+
+        fade_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        fade_row.set_margin_start(10)
+        fade_row.set_margin_end(10)
+        fade_row.set_margin_bottom(6)
+        self._fade_buttons: dict[str, Gtk.Button] = {}
+
+        for _lbl, _tok, _tip in (
+            ("←", "left",   "Gradient from the left"),
+            ("→", "right",  "Gradient from the right"),
+            ("↑", "top",    "Gradient from the top"),
+            ("↓", "bottom", "Gradient from the bottom"),
+        ):
+            _btn = Gtk.Button(label=_lbl)
+            _btn.set_hexpand(True)
+            _btn.add_css_class("ilp-btn")
+            _btn.set_tooltip_text(_tip)
+            _btn.connect("clicked", self._on_fade_clicked, _tok)
+            self._fade_buttons[_tok] = _btn
+            fade_row.append(_btn)
+
+        self._fade_box.append(fade_row)
+        root.append(self._fade_box)
+
+        root.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+
+        # ── Fit section ───────────────────────────────────────────────────────
+        fit_lbl = Gtk.Label(label="Fit")
+        fit_lbl.set_xalign(0.0)
+        fit_lbl.add_css_class("ilp-section-label")
+        fit_lbl.set_margin_top(6)
+        fit_lbl.set_margin_bottom(4)
+        fit_lbl.set_margin_start(10)
+        fit_lbl.set_margin_end(10)
+        root.append(fit_lbl)
+
+        fit_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        fit_row.set_margin_start(10)
+        fit_row.set_margin_end(10)
+        fit_row.set_margin_bottom(6)
+        self._fit_buttons: dict[str, Gtk.Button] = {}
+
+        for _lbl, _tok, _tip in (
+            ("Cover",   "cover",   "Crop image to fill the panel"),
+            ("Contain", "contain", "Letterbox image inside the panel"),
+        ):
+            _btn = Gtk.Button(label=_lbl)
+            _btn.set_hexpand(True)
+            _btn.add_css_class("ilp-btn")
+            _btn.set_tooltip_text(_tip)
+            _btn.connect("clicked", self._on_fit_clicked, _tok)
+            self._fit_buttons[_tok] = _btn
+            fit_row.append(_btn)
+
+        root.append(fit_row)
+
+        # ── Focal point section (visible only when fit=cover, pos≠background) ─
+        self._focal_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self._focal_box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+
+        focal_lbl = Gtk.Label(label="Focal point")
+        focal_lbl.set_xalign(0.0)
+        focal_lbl.add_css_class("ilp-section-label")
+        focal_lbl.set_margin_top(6)
+        focal_lbl.set_margin_bottom(4)
+        focal_lbl.set_margin_start(10)
+        focal_lbl.set_margin_end(10)
+        self._focal_box.append(focal_lbl)
+
+        focal_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        focal_row.set_margin_start(10)
+        focal_row.set_margin_end(10)
+        focal_row.set_margin_bottom(6)
+        self._focal_buttons: dict[str, Gtk.Button] = {}
+
+        for _lbl, _tok, _tip in (
+            ("Top",    "focal-top",    "Frame the top of the image"),
+            ("Center", "focal-center", "Frame the center of the image"),
+            ("Bottom", "focal-bottom", "Frame the bottom of the image"),
+        ):
+            _btn = Gtk.Button(label=_lbl)
+            _btn.set_hexpand(True)
+            _btn.add_css_class("ilp-btn")
+            _btn.set_tooltip_text(_tip)
+            _btn.connect("clicked", self._on_focal_clicked, _tok)
+            self._focal_buttons[_tok] = _btn
+            focal_row.append(_btn)
+
+        self._focal_box.append(focal_row)
+        root.append(self._focal_box)
+
+        root.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+
+        # ── Filters section: Grayscale + Blur ─────────────────────────────────
+        filt_lbl = Gtk.Label(label="Filters")
+        filt_lbl.set_xalign(0.0)
+        filt_lbl.add_css_class("ilp-section-label")
+        filt_lbl.set_margin_top(6)
+        filt_lbl.set_margin_bottom(4)
+        filt_lbl.set_margin_start(10)
+        filt_lbl.set_margin_end(10)
+        root.append(filt_lbl)
+
+        for _attr, _label, _lo, _hi, _handler in (
+            ("_grayscale_scale", "Grayscale", 0, 100, "_on_grayscale_changed"),
+            ("_blur_scale",      "Blur px",   0,  20, "_on_blur_changed"),
+        ):
+            _sc = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, _lo, _hi, 1)
+            _sc.set_value(_lo)
+            _sc.connect("value-changed", getattr(self, _handler))
+            setattr(self, _attr, _sc)
+            root.append(_inline_slider(_label, _sc))
+
+        root.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+
+        # ── Tint section ──────────────────────────────────────────────────────
+        tint_lbl = Gtk.Label(label="Tint")
+        tint_lbl.set_xalign(0.0)
+        tint_lbl.add_css_class("ilp-section-label")
+        tint_lbl.set_margin_top(6)
+        tint_lbl.set_margin_bottom(4)
+        tint_lbl.set_margin_start(10)
+        tint_lbl.set_margin_end(10)
+        root.append(tint_lbl)
+
+        tint_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        tint_row.set_margin_start(10)
+        tint_row.set_margin_end(10)
+        tint_row.set_margin_bottom(6)
+
+        self._tint_none_btn = Gtk.Button(label="None")
+        self._tint_none_btn.set_hexpand(True)
+        self._tint_none_btn.add_css_class("ilp-btn")
+        self._tint_none_btn.set_tooltip_text("No colour overlay")
+        self._tint_none_btn.connect("clicked", self._on_tint_none_clicked)
+        tint_row.append(self._tint_none_btn)
+
+        self._tint_color_btn = Gtk.ColorButton()
+        self._tint_color_btn.set_hexpand(True)
+        self._tint_color_btn.set_use_alpha(False)
+        self._tint_color_btn.set_tooltip_text("Pick a tint colour")
+        self._tint_color_btn.connect("color-set", self._on_tint_color_set)
+        tint_row.append(self._tint_color_btn)
+
+        root.append(tint_row)
+        root.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+
+        # ── Flip section ──────────────────────────────────────────────────────
+        flip_lbl = Gtk.Label(label="Flip")
+        flip_lbl.set_xalign(0.0)
+        flip_lbl.add_css_class("ilp-section-label")
+        flip_lbl.set_margin_top(6)
+        flip_lbl.set_margin_bottom(4)
+        flip_lbl.set_margin_start(10)
+        flip_lbl.set_margin_end(10)
+        root.append(flip_lbl)
+
+        flip_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        flip_row.set_margin_start(10)
+        flip_row.set_margin_end(10)
+        flip_row.set_margin_bottom(6)
+
+        self._flip_h_btn = Gtk.Button(label="Horizontal")
+        self._flip_h_btn.set_hexpand(True)
+        self._flip_h_btn.add_css_class("ilp-btn")
+        self._flip_h_btn.set_tooltip_text("Mirror left↔right")
+        self._flip_h_btn.connect("clicked", self._on_flip_h_clicked)
+        flip_row.append(self._flip_h_btn)
+
+        self._flip_v_btn = Gtk.Button(label="Vertical")
+        self._flip_v_btn.set_hexpand(True)
+        self._flip_v_btn.add_css_class("ilp-btn")
+        self._flip_v_btn.set_tooltip_text("Mirror top↔bottom")
+        self._flip_v_btn.connect("clicked", self._on_flip_v_clicked)
+        flip_row.append(self._flip_v_btn)
+
+        root.append(flip_row)
+        root.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+
+        # ── Zoom section ──────────────────────────────────────────────────────
+        zoom_sep_lbl = Gtk.Label(label="Zoom")
+        zoom_sep_lbl.set_xalign(0.0)
+        zoom_sep_lbl.add_css_class("ilp-section-label")
+        zoom_sep_lbl.set_margin_top(6)
+        zoom_sep_lbl.set_margin_bottom(4)
+        zoom_sep_lbl.set_margin_start(10)
+        zoom_sep_lbl.set_margin_end(10)
+        root.append(zoom_sep_lbl)
+
+        self._zoom_scale = Gtk.Scale.new_with_range(
+            Gtk.Orientation.HORIZONTAL, 100, 300, 5
+        )
+        for _v, _l in ((100, "1×"), (200, "2×"), (300, "3×")):
+            self._zoom_scale.add_mark(_v, Gtk.PositionType.BOTTOM, _l)
+        self._zoom_scale.set_value(100)
+        self._zoom_scale.connect("value-changed", self._on_zoom_changed)
+        root.append(_inline_slider("Zoom %", self._zoom_scale))
+
         root.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
 
         # ── Alt text ──────────────────────────────────────────────────────────
         alt_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        alt_box.set_margin_top(10)
-        alt_box.set_margin_bottom(10)
-        alt_box.set_margin_start(14)
-        alt_box.set_margin_end(14)
+        alt_box.set_margin_top(6)
+        alt_box.set_margin_bottom(6)
+        alt_box.set_margin_start(10)
+        alt_box.set_margin_end(10)
 
         self._alt_entry = Gtk.Entry()
         self._alt_entry.set_placeholder_text("Alt text / description…")
@@ -325,17 +652,41 @@ class ImageLayoutPopover(Gtk.Popover):
         # ── Primary action (insert mode only) ─────────────────────────────────
         self._insert_btn = Gtk.Button(label="Choose image…")
         self._insert_btn.add_css_class("suggested-action")
-        self._insert_btn.set_margin_start(14)
-        self._insert_btn.set_margin_end(14)
-        self._insert_btn.set_margin_bottom(14)
+        self._insert_btn.set_margin_start(10)
+        self._insert_btn.set_margin_end(10)
+        self._insert_btn.set_margin_bottom(6)
         self._insert_btn.connect("clicked", self._on_insert_clicked)
         root.append(self._insert_btn)
 
-        self.set_child(root)
+        self._ai_btn = Gtk.Button(label="Generate with AI…")
+        self._ai_btn.set_margin_start(10)
+        self._ai_btn.set_margin_end(10)
+        self._ai_btn.set_margin_bottom(6)
+        self._ai_btn.connect("clicked", self._on_generate_ai_clicked)
+        self._ai_btn.set_visible(False)
+        root.append(self._ai_btn)
+
+        self._infographic_btn = Gtk.Button(label="Generate Infographic…")
+        self._infographic_btn.set_margin_start(10)
+        self._infographic_btn.set_margin_end(10)
+        self._infographic_btn.set_margin_bottom(10)
+        self._infographic_btn.connect("clicked", self._on_infographic_clicked)
+        self._infographic_btn.set_visible(False)
+        root.append(self._infographic_btn)
+
+        # Wrap in a ScrolledWindow so the popover never exceeds screen height.
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_max_content_height(560)
+        scroll.set_propagate_natural_height(True)
+        scroll.set_child(root)
+        self.set_child(scroll)
 
         # Initialise visual state
         self._refresh_pos_buttons()
-        self._refresh_size_buttons()
+        self._refresh_size_scale()
+        self._refresh_fit_buttons()
+        self._refresh_focal_buttons()
 
     # ── CSS ───────────────────────────────────────────────────────────────────
 
@@ -439,26 +790,116 @@ class ImageLayoutPopover(Gtk.Popover):
             else:
                 btn.remove_css_class("ilp-selected")
         # Disable size/gradient when background is chosen — not applicable
-        for btn in self._size_buttons.values():
-            btn.set_sensitive(not is_bg)
+        self._size_scale.set_sensitive(not is_bg)
         self._grad_switch.set_sensitive(not is_bg)
+        # Fade section: only visible when gradient is ON and not background
+        if hasattr(self, "_fade_box"):
+            grad_on = self._grad_switch.get_active()
+            self._fade_box.set_visible(not is_bg and grad_on)
+        # Focal section: visible only when fit=cover and not background
+        if hasattr(self, "_focal_box"):
+            self._focal_box.set_visible(
+                not is_bg and self._active_fit == "cover"
+            )
 
-    def _refresh_size_buttons(self) -> None:
-        """Update selected/unselected styling on all size buttons."""
-        for token, btn in self._size_buttons.items():
-            if token == self._active_size:
+    def _refresh_size_scale(self) -> None:
+        """Sync the size scale to _active_size without triggering writeback."""
+        self._size_scale.handler_block_by_func(self._on_size_changed)
+        try:
+            self._size_scale.set_value(int(self._active_size))
+        finally:
+            self._size_scale.handler_unblock_by_func(self._on_size_changed)
+
+    def _refresh_opacity_buttons(self) -> None:
+        """Update selected/unselected styling on all opacity buttons."""
+        for token, btn in self._opacity_buttons.items():
+            if int(token) == self._active_opacity:
                 btn.add_css_class("ilp-selected")
             else:
                 btn.remove_css_class("ilp-selected")
+
+    def _refresh_fade_buttons(self) -> None:
+        """Update selected/unselected styling on all fade-direction buttons."""
+        for token, btn in self._fade_buttons.items():
+            if token == self._active_fade:
+                btn.add_css_class("ilp-selected")
+            else:
+                btn.remove_css_class("ilp-selected")
+
+    def _refresh_fit_buttons(self) -> None:
+        for token, btn in self._fit_buttons.items():
+            if token == self._active_fit:
+                btn.add_css_class("ilp-selected")
+            else:
+                btn.remove_css_class("ilp-selected")
+
+    def _refresh_focal_buttons(self) -> None:
+        for token, btn in self._focal_buttons.items():
+            if token == self._active_focal:
+                btn.add_css_class("ilp-selected")
+            else:
+                btn.remove_css_class("ilp-selected")
+
+    def _refresh_grayscale_scale(self) -> None:
+        self._grayscale_scale.handler_block_by_func(self._on_grayscale_changed)
+        try:
+            self._grayscale_scale.set_value(self._active_grayscale)
+        finally:
+            self._grayscale_scale.handler_unblock_by_func(self._on_grayscale_changed)
+
+    def _refresh_blur_scale(self) -> None:
+        self._blur_scale.handler_block_by_func(self._on_blur_changed)
+        try:
+            self._blur_scale.set_value(self._active_blur)
+        finally:
+            self._blur_scale.handler_unblock_by_func(self._on_blur_changed)
+
+    def _refresh_tint_ui(self) -> None:
+        if self._active_tint is None:
+            self._tint_none_btn.add_css_class("ilp-selected")
+            self._tint_color_btn.remove_css_class("ilp-selected")
+        else:
+            self._tint_none_btn.remove_css_class("ilp-selected")
+            self._tint_color_btn.add_css_class("ilp-selected")
+            rgba = Gdk.RGBA()
+            if rgba.parse(self._active_tint):
+                self._tint_color_btn.set_rgba(rgba)
+
+    def _refresh_flip_buttons(self) -> None:
+        if self._active_flip_h:
+            self._flip_h_btn.add_css_class("ilp-selected")
+        else:
+            self._flip_h_btn.remove_css_class("ilp-selected")
+        if self._active_flip_v:
+            self._flip_v_btn.add_css_class("ilp-selected")
+        else:
+            self._flip_v_btn.remove_css_class("ilp-selected")
+
+    def _refresh_zoom_scale(self) -> None:
+        self._zoom_scale.handler_block_by_func(self._on_zoom_changed)
+        try:
+            self._zoom_scale.set_value(self._active_zoom)
+        finally:
+            self._zoom_scale.handler_unblock_by_func(self._on_zoom_changed)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
     def open_insert_mode(self) -> None:
         """Reset to defaults and open for inserting a new image."""
-        self._edit_mode  = False
-        self._edit_cb    = None
-        self._active_pos  = "right"
-        self._active_size = "50"
+        self._edit_mode        = False
+        self._edit_cb          = None
+        self._active_pos       = "right"
+        self._active_size      = "50"
+        self._active_opacity   = 75
+        self._active_fade      = _POSITION_DEFAULT_FADE["right"]
+        self._active_fit       = "cover"
+        self._active_focal     = "focal-center"
+        self._active_grayscale = 0
+        self._active_blur      = 0
+        self._active_tint      = None
+        self._active_flip_h    = False
+        self._active_flip_v    = False
+        self._active_zoom      = 100
 
         self._block_signals(True)
         self._grad_switch.set_active(True)
@@ -466,10 +907,29 @@ class ImageLayoutPopover(Gtk.Popover):
         self._block_signals(False)
 
         self._refresh_pos_buttons()
-        self._refresh_size_buttons()
+        self._refresh_size_scale()
+        self._refresh_opacity_buttons()
+        self._refresh_fade_buttons()
+        self._refresh_fit_buttons()
+        self._refresh_focal_buttons()
+        self._refresh_grayscale_scale()
+        self._refresh_blur_scale()
+        self._refresh_tint_ui()
+        self._refresh_flip_buttons()
+        self._refresh_zoom_scale()
 
         self._insert_btn.set_label("Choose image…")
         self._insert_btn.set_visible(True)
+
+        # Show AI generation button only when a Gemini key is configured.
+        try:
+            from .session import load_api_keys as _load_api_keys
+            _claude_key, _gemini_key = _load_api_keys()
+            self._ai_btn.set_visible(bool(_gemini_key))
+            self._infographic_btn.set_visible(bool(_claude_key))
+        except Exception:
+            self._ai_btn.set_visible(False)
+            self._infographic_btn.set_visible(False)
 
         # Insert mode: autohide ON so clicking outside dismisses the popover.
         self.set_autohide(True)
@@ -488,10 +948,24 @@ class ImageLayoutPopover(Gtk.Popover):
 
         *edit_cb(layout, description)* is called immediately on every change.
         """
-        self._edit_mode   = True
-        self._edit_cb     = edit_cb
-        self._active_pos  = layout.get("position", "right")
-        self._active_size = layout.get("size", "50")
+        self._edit_mode        = True
+        self._edit_cb          = edit_cb
+        self._active_pos       = layout.get("position", "right")
+        self._active_size      = layout.get("size", "50")
+        self._active_opacity   = layout.get("opacity", 75)
+        # Fall back to the position default when the document has no fade token.
+        self._active_fade = (
+            layout.get("fade")
+            or _POSITION_DEFAULT_FADE.get(self._active_pos, "left")
+        )
+        self._active_fit       = layout.get("fit", "cover")
+        self._active_focal     = layout.get("focal", "focal-center")
+        self._active_grayscale = layout.get("grayscale", 0)
+        self._active_blur      = layout.get("blur", 0)
+        self._active_tint      = layout.get("tint", None)
+        self._active_flip_h    = layout.get("flip_h", False)
+        self._active_flip_v    = layout.get("flip_v", False)
+        self._active_zoom      = layout.get("zoom", 100)
 
         self._block_signals(True)
         self._grad_switch.set_active(layout.get("gradient", True))
@@ -499,9 +973,20 @@ class ImageLayoutPopover(Gtk.Popover):
         self._block_signals(False)
 
         self._refresh_pos_buttons()
-        self._refresh_size_buttons()
+        self._refresh_size_scale()
+        self._refresh_opacity_buttons()
+        self._refresh_fade_buttons()
+        self._refresh_fit_buttons()
+        self._refresh_focal_buttons()
+        self._refresh_grayscale_scale()
+        self._refresh_blur_scale()
+        self._refresh_tint_ui()
+        self._refresh_flip_buttons()
+        self._refresh_zoom_scale()
 
         self._insert_btn.set_visible(False)
+        self._ai_btn.set_visible(False)
+        self._infographic_btn.set_visible(False)
 
         # Edit mode: autohide OFF so the click on the GtkSourceView that
         # triggered this popover does not immediately dismiss it.  The popover
@@ -515,14 +1000,32 @@ class ImageLayoutPopover(Gtk.Popover):
 
     def _block_signals(self, block: bool) -> None:
         fn = "handler_block_by_func" if block else "handler_unblock_by_func"
-        getattr(self._grad_switch, fn)(self._on_grad_changed)
-        getattr(self._alt_entry,   fn)(self._on_alt_changed)
+        getattr(self._grad_switch,      fn)(self._on_grad_changed)
+        getattr(self._alt_entry,        fn)(self._on_alt_changed)
+        getattr(self._size_scale,       fn)(self._on_size_changed)
+        getattr(self._grayscale_scale,  fn)(self._on_grayscale_changed)
+        getattr(self._blur_scale,       fn)(self._on_blur_changed)
+        getattr(self._zoom_scale,       fn)(self._on_zoom_changed)
 
     def _current_layout(self) -> dict:
+        grad_on = self._grad_switch.get_active()
+        is_bg   = self._active_pos == "background"
+        fit     = self._active_fit
+        focal   = self._active_focal if (fit == "cover" and not is_bg) else "focal-center"
         return {
-            "position": self._active_pos,
-            "size":     self._active_size,
-            "gradient": self._grad_switch.get_active(),
+            "position":  self._active_pos,
+            "size":      self._active_size,
+            "gradient":  grad_on,
+            "opacity":   self._active_opacity,
+            "fade":      self._active_fade if (grad_on and not is_bg) else None,
+            "fit":       fit,
+            "focal":     focal,
+            "grayscale": self._active_grayscale,
+            "blur":      self._active_blur,
+            "tint":      self._active_tint,
+            "flip_h":    self._active_flip_h,
+            "flip_v":    self._active_flip_v,
+            "zoom":      self._active_zoom,
         }
 
     def _schedule_writeback(self) -> None:
@@ -542,16 +1045,79 @@ class ImageLayoutPopover(Gtk.Popover):
     # ── Control signal handlers ───────────────────────────────────────────────
 
     def _on_pos_clicked(self, btn: Gtk.Button, token: str) -> None:
-        self._active_pos = token
+        self._active_pos  = token
+        self._active_fade = _POSITION_DEFAULT_FADE.get(token, "left")
         self._refresh_pos_buttons()
+        self._refresh_fade_buttons()
         self._schedule_writeback()
 
-    def _on_size_clicked(self, btn: Gtk.Button, token: str) -> None:
-        self._active_size = token
-        self._refresh_size_buttons()
+    def _on_size_changed(self, scale: Gtk.Scale) -> None:
+        self._active_size = str(int(scale.get_value()))
+        self._schedule_writeback()
+
+    def _on_opacity_clicked(self, btn: Gtk.Button, token: str) -> None:
+        self._active_opacity = int(token)
+        self._refresh_opacity_buttons()
+        self._schedule_writeback()
+
+    def _on_fade_clicked(self, btn: Gtk.Button, token: str) -> None:
+        self._active_fade = token
+        self._refresh_fade_buttons()
+        self._schedule_writeback()
+
+    def _on_fit_clicked(self, btn: Gtk.Button, token: str) -> None:
+        self._active_fit = token
+        self._refresh_fit_buttons()
+        if hasattr(self, "_focal_box"):
+            is_bg = self._active_pos == "background"
+            self._focal_box.set_visible(not is_bg and token == "cover")
+        self._schedule_writeback()
+
+    def _on_focal_clicked(self, btn: Gtk.Button, token: str) -> None:
+        self._active_focal = token
+        self._refresh_focal_buttons()
+        self._schedule_writeback()
+
+    def _on_grayscale_changed(self, scale: Gtk.Scale) -> None:
+        self._active_grayscale = int(scale.get_value())
+        self._schedule_writeback()
+
+    def _on_blur_changed(self, scale: Gtk.Scale) -> None:
+        self._active_blur = int(scale.get_value())
+        self._schedule_writeback()
+
+    def _on_tint_none_clicked(self, btn: Gtk.Button) -> None:
+        self._active_tint = None
+        self._refresh_tint_ui()
+        self._schedule_writeback()
+
+    def _on_tint_color_set(self, btn: Gtk.ColorButton) -> None:
+        rgba = btn.get_rgba()
+        r = int(rgba.red   * 255)
+        g = int(rgba.green * 255)
+        b = int(rgba.blue  * 255)
+        self._active_tint = f"#{r:02x}{g:02x}{b:02x}"
+        self._refresh_tint_ui()
+        self._schedule_writeback()
+
+    def _on_flip_h_clicked(self, btn: Gtk.Button) -> None:
+        self._active_flip_h = not self._active_flip_h
+        self._refresh_flip_buttons()
+        self._schedule_writeback()
+
+    def _on_flip_v_clicked(self, btn: Gtk.Button) -> None:
+        self._active_flip_v = not self._active_flip_v
+        self._refresh_flip_buttons()
+        self._schedule_writeback()
+
+    def _on_zoom_changed(self, scale: Gtk.Scale) -> None:
+        self._active_zoom = int(scale.get_value())
         self._schedule_writeback()
 
     def _on_grad_changed(self, switch: Gtk.Switch, state: bool) -> bool:
+        if hasattr(self, "_fade_box"):
+            is_bg = self._active_pos == "background"
+            self._fade_box.set_visible(not is_bg and state)
         self._schedule_writeback()
         return False   # allow GTK to apply the visual state
 
@@ -605,7 +1171,64 @@ class ImageLayoutPopover(Gtk.Popover):
 
         dialog.open(parent_window, None, _on_done)
 
+    def _on_generate_ai_clicked(self, *_) -> None:
+        """Close the popover and open the AI image generation dialog."""
+        layout        = self._current_layout()
+        scene         = self._alt_entry.get_text().strip()
+        parent_window = self._parent_window
+        insert_cb     = self._insert_cb
 
+        # When the alt-text entry is empty, derive a scene hint from the slide
+        # the cursor is currently on (headline + first sentence(s) of notes).
+        if not scene and parent_window is not None:
+            editor = getattr(parent_window, "_editor", None)
+            if editor is not None:
+                scene = editor.get_current_slide_scene_hint()
+
+        # Validate prerequisites before opening the dialog.
+        if parent_window and not getattr(parent_window, "_file_path", None):
+            if hasattr(parent_window, "_show_toast"):
+                parent_window._show_toast(
+                    "Save the document first — AI images are written to "
+                    "assets/ next to the .md file."
+                )
+            return
+
+        self.popdown()
+
+        from .ai_image_dialog import AIImageDialog
+        dlg = AIImageDialog(
+            parent_window, layout, insert_cb, initial_scene=scene
+        )
+        dlg.present(parent_window)
+
+    def _on_infographic_clicked(self, *_) -> None:
+        """Close the popover and open the AI infographic generation dialog."""
+        layout        = self._current_layout()
+        parent_window = self._parent_window
+        insert_cb     = self._insert_cb
+
+        if parent_window and not getattr(parent_window, "_file_path", None):
+            if hasattr(parent_window, "_show_toast"):
+                parent_window._show_toast(
+                    "Save the document first — infographics are written to "
+                    "assets/ next to the .md file."
+                )
+            return
+
+        slide_md = ""
+        if parent_window is not None:
+            editor = getattr(parent_window, "_editor", None)
+            if editor is not None:
+                slide_md = editor.get_current_slide_markdown()
+
+        self.popdown()
+
+        from .ai_infographic_dialog import AIInfographicDialog
+        dlg = AIInfographicDialog(
+            parent_window, layout, insert_cb, initial_slide_md=slide_md
+        )
+        dlg.present(parent_window)
 
 
 class _TableInsertPopover(Gtk.Popover):
@@ -665,6 +1288,10 @@ class _TableInsertPopover(Gtk.Popover):
     def _draw(self, area, cr, width, height) -> None:
         gap = 3
         sz  = self._CELL_PX
+        style = area.get_style_context()
+        found, accent = style.lookup_color("accent_bg_color")
+        if not found:
+            accent = style.get_color()
         for row in range(self._MAX_ROWS):
             for col in range(self._MAX_COLS):
                 x = col * (sz + gap) + gap
@@ -672,7 +1299,7 @@ class _TableInsertPopover(Gtk.Popover):
                 selected = (col < self._hover_col
                             and row < self._hover_row)
                 if selected:
-                    cr.set_source_rgba(0.882, 0.439, 0.0, 0.85)  # accent
+                    cr.set_source_rgba(accent.red, accent.green, accent.blue, 0.85)
                 else:
                     cr.set_source_rgba(0.28, 0.28, 0.30, 0.9)
                 cr.rectangle(x, y, sz, sz)
@@ -951,6 +1578,11 @@ class Editor(Gtk.Box):
         end   = self._buffer.get_end_iter()
         return self._buffer.get_text(start, end, True)
 
+    def get_cursor_offset(self) -> int:
+        """Return the character offset of the insertion cursor in the buffer."""
+        cursor = self._buffer.get_iter_at_mark(self._buffer.get_insert())
+        return cursor.get_offset()
+
     def set_text(self, text: str) -> None:
         if self._debounce_source is not None:
             GLib.source_remove(self._debounce_source)
@@ -995,27 +1627,12 @@ class Editor(Gtk.Box):
             self._buffer.handler_unblock_by_func(self._on_buffer_changed)
 
     def scroll_to_slide(self, slide_index: int) -> None:
-        from .slides.splitter import split_slides
-        from .slides.frontmatter import parse_frontmatter
+        from .slides.utils import compute_slide_offsets
 
         full_text = self.get_text()
-        _meta, body = parse_frontmatter(full_text)
-        fm_end = full_text.find(body)
-        if fm_end == -1:
-            fm_end = 0
-
-        slides = split_slides(body)
-        if not slides or slide_index >= len(slides):
+        slide_offsets = compute_slide_offsets(full_text)
+        if not slide_offsets or slide_index >= len(slide_offsets):
             return
-
-        slide_offsets: list[int] = []
-        search_pos = 0
-        for slide_text in slides:
-            idx = body.find(slide_text.rstrip(), search_pos)
-            if idx == -1:
-                idx = search_pos
-            slide_offsets.append(fm_end + idx)
-            search_pos = idx + len(slide_text)
 
         target_offset = slide_offsets[slide_index]
         end_offset = (
@@ -1106,6 +1723,52 @@ class Editor(Gtk.Box):
 
     def insert_image_markdown(self, alt: str, rel_path: str) -> None:
         self._replace_selection(f"![{alt}]({rel_path})")
+
+    def get_current_slide_markdown(self) -> str:
+        """Return the full raw Markdown of the slide at the current cursor position."""
+        buf = self._buffer
+        full_text = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False)
+        cursor_line = buf.get_iter_at_mark(buf.get_insert()).get_line()
+        lines = full_text.splitlines()
+        sep_lines = [i for i, ln in enumerate(lines) if ln.strip() == "---"]
+        slide_start = 0
+        slide_end = len(lines)
+        for sep in sep_lines:
+            if sep <= cursor_line:
+                slide_start = sep + 1
+            else:
+                slide_end = sep
+                break
+        return "\n".join(lines[slide_start:slide_end])
+
+    def get_current_slide_scene_hint(self) -> str:
+        """
+        Return a scene-description hint for the slide at the current cursor.
+
+        Finds the slide boundaries by locating the nearest '---' separator
+        lines above and below the cursor, then delegates to
+        slides.image_gen.scene_hint_from_slide() to combine the heading with
+        the first sentence or two of speaker notes.
+        """
+        from .slides.image_gen import scene_hint_from_slide
+
+        buf = self._buffer
+        full_text = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False)
+        cursor_line = buf.get_iter_at_mark(buf.get_insert()).get_line()
+
+        lines = full_text.splitlines()
+        sep_lines = [i for i, l in enumerate(lines) if l.strip() == "---"]
+
+        slide_start = 0
+        slide_end = len(lines)
+        for sep in sep_lines:
+            if sep <= cursor_line:
+                slide_start = sep + 1
+            else:
+                slide_end = sep
+                break
+
+        return scene_hint_from_slide("\n".join(lines[slide_start:slide_end]))
 
     def get_img_toolbar_btn(self) -> "Gtk.Button | None":
         return self._img_toolbar_btn
@@ -1355,8 +2018,7 @@ class Editor(Gtk.Box):
         search_row.append(_nav_btn("go-down-symbolic",  "Next match",     self._find_next))
 
         self._case_btn = Gtk.ToggleButton()
-        self._case_btn.set_child(
-            Gtk.Image.new_from_icon_name("format-text-bold-symbolic"))
+        self._case_btn.set_label("Aa")
         self._case_btn.set_tooltip_text("Match case")
         self._case_btn.update_property([Gtk.AccessibleProperty.LABEL], ["Match case"])
         self._case_btn.add_css_class("flat")
@@ -1364,8 +2026,7 @@ class Editor(Gtk.Box):
         search_row.append(self._case_btn)
 
         self._regex_btn = Gtk.ToggleButton()
-        self._regex_btn.set_child(
-            Gtk.Image.new_from_icon_name("format-text-plaintext-symbolic"))
+        self._regex_btn.set_label(".*")
         self._regex_btn.set_tooltip_text("Regular expression")
         self._regex_btn.update_property(
             [Gtk.AccessibleProperty.LABEL], ["Regular expression"])
@@ -1748,7 +2409,10 @@ class Editor(Gtk.Box):
             return False
         inserted = []
         for gfile in files:
-            src    = Path(gfile.get_path())
+            path_str = gfile.get_path()
+            if not path_str:
+                continue
+            src    = Path(path_str)
             suffix = src.suffix.lower()
             if suffix not in self._IMAGE_EXTS:
                 continue
@@ -2156,7 +2820,11 @@ class Editor(Gtk.Box):
 
     # Layout tokens recognised by the slide renderer — used to split the alt
     # text into "human description" and "Presence layout tokens".
-    _LAYOUT_TOKENS = _IMAGE_POSITIONS | _IMAGE_SIZES | {"gradient", "nogradient"}
+    # Variable-length tokens (opacityN, fade-dir) are checked via regex below.
+    _LAYOUT_TOKENS = (
+        _IMAGE_POSITIONS | _IMAGE_FIT | _IMAGE_FOCAL
+        | {"gradient", "nogradient", "flip-h", "flip-v"}
+    )
 
     def _apply_image_tag(self) -> None:
         """
@@ -2277,7 +2945,15 @@ class Editor(Gtk.Box):
             pos = alt_start
             for part in alt_text.split("|"):
                 part_end = pos + len(part)
-                if part.strip().lower() in self._LAYOUT_TOKENS:
+                part_lower = part.strip().lower()
+                if (part_lower in self._LAYOUT_TOKENS
+                        or _OPACITY_TOKEN_RE.match(part_lower)
+                        or _FADE_TOKEN_RE.match(part_lower)
+                        or _SIZE_TOKEN_RE.match(part_lower)
+                        or _GRAYSCALE_TOKEN_RE.match(part_lower)
+                        or _BLUR_TOKEN_RE.match(part_lower)
+                        or _TINT_TOKEN_RE.match(part_lower)
+                        or _ZOOM_TOKEN_RE.match(part_lower)):
                     self._buffer.apply_tag(
                         token_tag, _iter(pos), _iter(part_end)
                     )

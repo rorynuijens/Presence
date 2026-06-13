@@ -153,8 +153,17 @@ _IMAGE_RE = re.compile(
 )
 
 # Valid layout token sets — used by both parser and CSS generator.
-IMAGE_POSITIONS = frozenset(("left", "right", "top", "bottom", "background"))
-IMAGE_SIZES     = frozenset(("30", "50", "70"))
+IMAGE_POSITIONS  = frozenset(("left", "right", "top", "bottom", "background"))
+IMAGE_FADE_DIRS  = frozenset(("left", "right", "top", "bottom"))
+IMAGE_FIT        = frozenset(("cover", "contain"))
+IMAGE_FOCAL      = frozenset(("focal-top", "focal-center", "focal-bottom"))
+
+_OPACITY_TOKEN_RE   = re.compile(r'^opacity(\d{1,3})$')
+_SIZE_TOKEN_RE      = re.compile(r'^(\d{1,3})$')
+_GRAYSCALE_TOKEN_RE = re.compile(r'^grayscale(\d{1,3})$')
+_BLUR_TOKEN_RE      = re.compile(r'^blur(\d{1,2})$')
+_TINT_TOKEN_RE      = re.compile(r'^tint-(#[0-9a-f]{3,8}|[a-z]{2,30})$')
+_ZOOM_TOKEN_RE      = re.compile(r'^zoom(\d{1,3})$')
 
 
 def parse_image_layout(alt: str) -> dict:
@@ -162,30 +171,76 @@ def parse_image_layout(alt: str) -> dict:
     Parse layout tokens embedded in an image alt-text string.
 
     Syntax (tokens separated by ``|``, order-insensitive):
-        position   — one of: left, right, top, bottom   (default: right)
-        size       — one of: 30, 50, 70  (percent)      (default: 50)
-        gradient   — literal word "gradient"             (default: True)
-        nogradient — literal word "nogradient"
+        position    — one of: left, right, top, bottom, background  (default: right)
+        size        — any integer 1–100  (percent)                   (default: 50)
+        gradient    — literal word "gradient"                        (default: True)
+        nogradient  — literal word "nogradient"
+        opacityN    — e.g. opacity75, opacity50  (0–100)             (default: 75)
+        fade-dir    — one of: fade-left, fade-right, fade-top,
+                      fade-bottom  (gradient direction)               (default: None)
+        fit         — one of: cover, contain                         (default: cover)
+        focal       — one of: focal-top, focal-center, focal-bottom  (default: focal-center)
+        grayscaleN  — e.g. grayscale100  (0–100, CSS grayscale filter)(default: 0)
+        blurN       — e.g. blur5  (0–20 px, CSS blur filter)         (default: 0)
+        tint-COLOR  — e.g. tint-black, tint-navy  (named CSS colour)  (default: None)
+        flip-h      — mirror image horizontally                       (default: False)
+        flip-v      — mirror image vertically                         (default: False)
+        zoomN       — e.g. zoom150  (100–300, CSS scale transform)    (default: 100)
 
     Any unrecognised tokens are silently ignored so the alt text can carry a
-    human-readable description alongside layout tokens, e.g.
-    "Blue Mosque|right|50|gradient".
+    human-readable description alongside layout tokens.
 
     Returns a dict:
-        {"position": str, "size": str, "gradient": bool}
+        {"position": str, "size": str, "gradient": bool,
+         "opacity": int, "fade": str | None,
+         "fit": str, "focal": str,
+         "grayscale": int, "blur": int, "tint": str | None,
+         "flip_h": bool, "flip_v": bool, "zoom": int}
     """
-    result = {"position": "right", "size": "50", "gradient": True}
+    result: dict = {
+        "position": "right", "size": "50", "gradient": True,
+        "opacity": 75, "fade": None,
+        "fit": "cover", "focal": "focal-center",
+        "grayscale": 0, "blur": 0, "tint": None,
+        "flip_h": False, "flip_v": False, "zoom": 100,
+    }
     for token in (t.strip().lower() for t in alt.split("|")):
         if token in IMAGE_POSITIONS:
             result["position"] = token
             if token == "background":
                 result["gradient"] = False
-        elif token in IMAGE_SIZES:
-            result["size"] = token
+        elif m2 := _SIZE_TOKEN_RE.match(token):
+            size_val = int(m2.group(1))
+            if 1 <= size_val <= 100:
+                result["size"] = token
         elif token == "gradient":
             result["gradient"] = True
         elif token == "nogradient":
             result["gradient"] = False
+        elif m := _OPACITY_TOKEN_RE.match(token):
+            result["opacity"] = max(0, min(100, int(m.group(1))))
+        elif token.startswith("fade-"):
+            direction = token[5:]
+            if direction in IMAGE_FADE_DIRS:
+                result["fade"] = direction
+        elif token in IMAGE_FIT:
+            result["fit"] = token
+        elif token in IMAGE_FOCAL:
+            result["focal"] = token
+        elif m := _GRAYSCALE_TOKEN_RE.match(token):
+            result["grayscale"] = max(0, min(100, int(m.group(1))))
+        elif m := _BLUR_TOKEN_RE.match(token):
+            result["blur"] = max(0, min(20, int(m.group(1))))
+        elif m := _TINT_TOKEN_RE.match(token):
+            result["tint"] = m.group(1)
+        elif token == "flip-h":
+            result["flip_h"] = True
+        elif token == "flip-v":
+            result["flip_v"] = True
+        elif m := _ZOOM_TOKEN_RE.match(token):
+            zoom_val = int(m.group(1))
+            if 100 <= zoom_val <= 300:
+                result["zoom"] = zoom_val
     return result
 
 

@@ -52,7 +52,10 @@ class Application(Adw.Application):
         """
         existing = self.get_active_window()
         for i, gfile in enumerate(files):
-            path = Path(gfile.get_path())
+            path_str = gfile.get_path()
+            if not path_str:
+                continue
+            path = Path(path_str)
             if (i == 0
                     and isinstance(existing, MainWindow)
                     and not existing._modified

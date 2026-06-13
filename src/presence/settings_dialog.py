@@ -18,9 +18,14 @@ gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GLib, Gdk, GdkPixbuf, Pango
 
 from .session import (load_editor_prefs, save_editor_prefs,
-                      load_presentation_prefs, save_presentation_prefs)
+                      load_presentation_prefs, save_presentation_prefs,
+                      load_api_keys, save_api_keys,
+                      load_ai_prefs, save_ai_prefs,
+                      persist_logo, _config_ini_file)
 from .app_utils import png_bytes_to_texture, make_file_filter, make_filter_store
 from .slides.themes import ASPECT_RATIOS
+from .slides.image_gen import IMAGE_STYLE_LABELS as _IMAGE_STYLES_ALL
+from .slides.infographic_gen import INFOGRAPHIC_MODEL_LABELS as _INFOGRAPHIC_MODEL_LABELS
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -337,6 +342,99 @@ class SettingsDialog(Adw.PreferencesDialog):
         )
         self.add(themes_page)
 
+        # ── Page 4: AI ────────────────────────────────────────────────────────
+        ai_page = Adw.PreferencesPage()
+        ai_page.set_title("AI")
+        ai_page.set_icon_name("preferences-system-symbolic")
+        self.add(ai_page)
+
+        api_group = Adw.PreferencesGroup(title="API Keys")
+        api_group.set_description(
+            f"Fallback storage: {_config_ini_file()}"
+        )
+        ai_page.add(api_group)
+
+        claude_key, gemini_key = load_api_keys()
+
+        self._claude_key_row = Adw.PasswordEntryRow(title="Claude API Key")
+        self._claude_key_row.set_text(claude_key)
+        self._claude_key_row.connect("notify::text", self._on_api_key_changed)
+        api_group.add(self._claude_key_row)
+
+        self._gemini_key_row = Adw.PasswordEntryRow(title="Gemini API Key")
+        self._gemini_key_row.set_text(gemini_key)
+        self._gemini_key_row.connect("notify::text", self._on_api_key_changed)
+        api_group.add(self._gemini_key_row)
+
+        for row in (self._claude_key_row, self._gemini_key_row):
+            ctrl = Gtk.EventControllerFocus()
+            row.add_controller(ctrl)
+            ctrl.connect("leave", lambda c, r=row: (
+                r.add_css_class("error") if not r.get_text()
+                else r.remove_css_class("error")
+            ))
+
+        # Gemini image generation settings
+        _GEMINI_MODELS = ["gemini-2.5-flash-image", "gemini-3.1-flash-image"]
+        _IMAGE_STYLES = _IMAGE_STYLES_ALL
+        model_group = Adw.PreferencesGroup(title="Image Generation")
+        model_group.set_description(
+            "Applied when generating slide images via the Gemini API"
+        )
+        ai_page.add(model_group)
+
+        ai_prefs = load_ai_prefs()
+
+        current_model = ai_prefs.get("gemini_model", _GEMINI_MODELS[0])
+        self._gemini_model_row = Adw.ComboRow(title="Gemini model")
+        self._gemini_model_row.set_subtitle("Model used when generating slide images")
+        self._gemini_model_row.set_model(Gtk.StringList.new(_GEMINI_MODELS))
+        selected_idx = _GEMINI_MODELS.index(current_model) if current_model in _GEMINI_MODELS else 0
+        self._gemini_model_row.set_selected(selected_idx)
+        self._gemini_model_row.connect(
+            "notify::selected", self._on_gemini_model_changed, _GEMINI_MODELS
+        )
+        model_group.add(self._gemini_model_row)
+
+        current_style = ai_prefs.get("image_style", _IMAGE_STYLES[0])
+        self._gemini_style_row = Adw.ComboRow(title="Image style")
+        self._gemini_style_row.set_subtitle("Visual style applied to all generated images")
+        self._gemini_style_row.set_model(Gtk.StringList.new(_IMAGE_STYLES))
+        style_idx = _IMAGE_STYLES.index(current_style) if current_style in _IMAGE_STYLES else 0
+        self._gemini_style_row.set_selected(style_idx)
+        self._gemini_style_row.connect(
+            "notify::selected", self._on_gemini_style_changed, _IMAGE_STYLES
+        )
+        model_group.add(self._gemini_style_row)
+
+        # Infographic generation settings
+        infographic_group = Adw.PreferencesGroup(title="Infographic Generation")
+        infographic_group.set_description(
+            "Applied when generating SVG infographics via Generate Infographic…"
+        )
+        ai_page.add(infographic_group)
+
+        current_infographic_model = ai_prefs.get(
+            "infographic_model", _INFOGRAPHIC_MODEL_LABELS[0]
+        )
+        self._infographic_model_row = Adw.ComboRow(title="Model")
+        self._infographic_model_row.set_subtitle(
+            "Model used when generating SVG infographics"
+        )
+        self._infographic_model_row.set_model(
+            Gtk.StringList.new(_INFOGRAPHIC_MODEL_LABELS)
+        )
+        infographic_idx = (
+            _INFOGRAPHIC_MODEL_LABELS.index(current_infographic_model)
+            if current_infographic_model in _INFOGRAPHIC_MODEL_LABELS else 0
+        )
+        self._infographic_model_row.set_selected(infographic_idx)
+        self._infographic_model_row.connect(
+            "notify::selected", self._on_infographic_model_changed,
+            _INFOGRAPHIC_MODEL_LABELS,
+        )
+        infographic_group.add(self._infographic_model_row)
+
         self.connect("closed", self._on_closed)
 
     # ── Theme grid ────────────────────────────────────────────────────────────
@@ -526,9 +624,16 @@ class SettingsDialog(Adw.PreferencesDialog):
             gfile = dialog.open_finish(result)
         except GLib.Error:
             return
-        path = Path(gfile.get_path())
+        path_str = gfile.get_path()
+        if not path_str:
+            return
+        path = Path(path_str)
         if not path.is_file():
             return
+        try:
+            path = persist_logo(path)
+        except OSError:
+            pass
         self._parent._converter.logo_path = path
         self._logo_row.set_subtitle(path.name)
         self._save_prefs()
@@ -537,6 +642,40 @@ class SettingsDialog(Adw.PreferencesDialog):
         self._parent._converter.logo_path = None
         self._logo_row.set_subtitle("No logo selected")
         self._save_prefs()
+
+    def _on_api_key_changed(self, row, _param) -> None:
+        row.remove_css_class("error")
+        keyring_used = save_api_keys(
+            self._claude_key_row.get_text(),
+            self._gemini_key_row.get_text(),
+        )
+        if not keyring_used:
+            self._parent._show_toast(
+                "GNOME Keyring unavailable — API keys stored in plaintext config.ini. "
+                "Set up a keyring for secure storage.",
+                timeout=8,
+            )
+
+    def _on_gemini_model_changed(self, row: Adw.ComboRow, _param,
+                                  models: list) -> None:
+        model = models[row.get_selected()]
+        prefs = load_ai_prefs()
+        prefs["gemini_model"] = model
+        save_ai_prefs(prefs)
+
+    def _on_gemini_style_changed(self, row: Adw.ComboRow, _param,
+                                  styles: list) -> None:
+        style = styles[row.get_selected()]
+        prefs = load_ai_prefs()
+        prefs["image_style"] = style
+        save_ai_prefs(prefs)
+
+    def _on_infographic_model_changed(self, row: Adw.ComboRow, _param,
+                                       models: list) -> None:
+        model = models[row.get_selected()]
+        prefs = load_ai_prefs()
+        prefs["infographic_model"] = model
+        save_ai_prefs(prefs)
 
     def _save_prefs(self) -> None:
         sw = self._switch_rows
