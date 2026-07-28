@@ -123,6 +123,11 @@ class MainWindow(Adw.ApplicationWindow):
         self._cursor_sync_cache: tuple[str, list[int]] | None = None
         # Slide the cursor is currently in — drives the live canvas
         self._current_slide: int = 0
+        # Build status: the document text the last successful build contained,
+        # against which the status chip decides whether a rebuild is needed.
+        self._built_text:    str | None = None
+        self._building_text: str | None = None
+        self._converting:    bool = False
         # Debounce source for saving the canvas divider position
         self._canvas_pos_source: int | None = None
 
@@ -182,6 +187,8 @@ class MainWindow(Adw.ApplicationWindow):
         self.connect("notify::maximized",      self._on_size_changed)
         self.connect("close-request",          self._on_close_request)
         self.connect("destroy",                self._on_destroy)
+
+        self._update_build_chip()
 
     # ── UI construction ───────────────────────────────────────────────────────
 
@@ -307,6 +314,8 @@ class MainWindow(Adw.ApplicationWindow):
         )
         bp_sidebar.add_setter(self._canvas, "visible", False)
         bp_sidebar.add_setter(self._left_split, "collapsed", True)
+        # Header gets crowded; the chip's icon still carries the state.
+        bp_sidebar.add_setter(self._chip_label, "visible", False)
         self.add_breakpoint(bp_sidebar)
 
     def _build_header(self) -> Adw.HeaderBar:
@@ -360,9 +369,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._title_label = Adw.WindowTitle(title="Untitled", subtitle="")
         bar.set_title_widget(self._title_label)
 
-        self._spinner = Gtk.Spinner()
-        self._spinner.set_visible(False)
-        bar.pack_end(self._spinner)
+        self._build_chip = self._build_status_chip()
 
         # Live canvas toggle — shows the slide the cursor is in (F8)
         self._canvas_btn = Gtk.ToggleButton()
@@ -413,7 +420,39 @@ class MainWindow(Adw.ApplicationWindow):
         self._present_btn.connect("clicked", self._on_present_clicked)
         bar.pack_end(self._present_btn)
 
+        # Packed last so it sits leftmost of the end group, beside Present:
+        # it describes the state of what Present and Share act on.
+        bar.pack_end(self._build_chip)
+
         return bar
+
+    def _build_status_chip(self) -> Gtk.Button:
+        """
+        The one place that says whether the build matches the document.
+
+        Replaces a bare spinner plus a toast on every successful build: state
+        you can miss and a notification for something routine.  Clicking it
+        rebuilds, so the indicator and its remedy are the same control.
+        """
+        self._chip_icon = Gtk.Image.new_from_icon_name("object-select-symbolic")
+        self._chip_spinner = Gtk.Spinner()
+
+        self._chip_visual = Gtk.Stack()
+        self._chip_visual.add_named(self._chip_icon, "icon")
+        self._chip_visual.add_named(self._chip_spinner, "spinner")
+
+        self._chip_label = Gtk.Label(label="Up to date")
+        self._chip_label.add_css_class("caption")
+
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        box.append(self._chip_visual)
+        box.append(self._chip_label)
+
+        chip = Gtk.Button()
+        chip.set_child(box)
+        chip.add_css_class("flat")
+        chip.connect("clicked", self._trigger_convert)
+        return chip
 
     def _build_share_popover(self) -> Gtk.Popover:
         """
@@ -746,6 +785,8 @@ class MainWindow(Adw.ApplicationWindow):
         # canvas directly — a freshly opened file starts at slide 1.
         self._current_slide = 0
         self._refresh_canvas(text)
+        self._update_word_count(text)
+        self._update_build_chip()
         display = self._pres_path or path
         self._set_title(display.name)
         self._modified = False
@@ -771,6 +812,7 @@ class MainWindow(Adw.ApplicationWindow):
         base = display.name if display else UNTITLED
         self._set_title(base + " •")
         self._refresh_canvas(text)
+        self._update_build_chip()
         self._trigger_convert()
 
     def _save(self) -> bool:
@@ -988,6 +1030,7 @@ class MainWindow(Adw.ApplicationWindow):
         # we do not parse the full document on every character (#37).
         self._debounce("_sidebar_update_source", 200, self._flush_sidebar_update, text)
         self._update_word_count(text)
+        self._update_build_chip()
 
     def _flush_sidebar_update(self, text: str) -> bool:
         self._sidebar_update_source = None
@@ -1158,6 +1201,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._sidebar.update_from_text(new_text)
         self._current_slide = insert_at
         self._refresh_canvas(new_text)
+        self._update_build_chip()
         # Scroll editor to the newly inserted slide
         GLib.idle_add(lambda: (self._editor.scroll_to_slide(insert_at), False))
 
@@ -1185,6 +1229,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._set_title(base + " •")
         self._sidebar.update_from_text(new_text)
         self._refresh_canvas(new_text)
+        self._update_build_chip()
 
     def _on_present_clicked(self, *_) -> None:
         """
@@ -1270,14 +1315,56 @@ class MainWindow(Adw.ApplicationWindow):
                 display.get_clipboard().set(str(self._output_path))
             self._show_toast("PDF path copied to clipboard", timeout=2)
 
+    # ── Build status ──────────────────────────────────────────────────────────
+
+    def _build_state(self) -> str:
+        """One of 'building', 'stale' or 'current'."""
+        if self._converting:
+            return "building"
+        if self._built_text is None:
+            return "stale"
+        return "current" if self._editor.get_text() == self._built_text else "stale"
+
+    def _update_build_chip(self) -> None:
+        """Reflect the build state; safe to call as often as convenient."""
+        state = self._build_state()
+
+        if state == "building":
+            self._chip_visual.set_visible_child_name("spinner")
+            self._chip_spinner.start()
+            self._chip_label.set_label("Building…")
+            self._chip_label.add_css_class("dim-label")
+            self._build_chip.set_sensitive(False)
+            self._build_chip.set_tooltip_text("Building the PDF…")
+        else:
+            self._chip_spinner.stop()
+            self._chip_visual.set_visible_child_name("icon")
+            self._build_chip.set_sensitive(True)
+            self._build_chip.set_tooltip_text("Rebuild now (Ctrl+Return)")
+            if state == "current":
+                self._chip_icon.set_from_icon_name("object-select-symbolic")
+                self._chip_label.set_label("Up to date")
+                self._chip_label.add_css_class("dim-label")
+            else:
+                self._chip_icon.set_from_icon_name("view-refresh-symbolic")
+                self._chip_label.set_label("Rebuild needed")
+                self._chip_label.remove_css_class("dim-label")
+
+        self._build_chip.update_property(
+            [Gtk.AccessibleProperty.LABEL],
+            [f"{self._chip_label.get_label()} — rebuild"],
+        )
+
     # ── Converter signal handlers ─────────────────────────────────────────────
 
     def _on_conversion_started(self, converter: Converter) -> None:
-        self._spinner.set_visible(True)
-        self._spinner.start()
+        self._converting = True
+        # The document as it stands is what this build will contain; on
+        # success it becomes the baseline the chip compares against.
+        self._building_text = self._editor.get_text()
         self._present_btn.set_sensitive(False)
         self._banner.set_revealed(False)
-        self._title_label.set_subtitle("Building…")
+        self._update_build_chip()
         # Show per-thumbnail spinners so users know thumbnails are updating (#71)
         self._sidebar.set_converting(True)
 
@@ -1289,16 +1376,15 @@ class MainWindow(Adw.ApplicationWindow):
         pdf_path:  str,
         html_uri:  str,
     ) -> None:
-        self._spinner.stop()
-        self._spinner.set_visible(False)
+        self._converting = False
+        self._built_text = self._building_text
+        self._update_build_chip()
         self._present_btn.set_sensitive(True)
         self._share_btn.set_sensitive(True)
         self._output_path = Path(pdf_path)
 
-        slides_word = "slide" if n_slides == 1 else "slides"
-        self._show_toast(
-            f"Built in {duration:.1f}s · {n_slides} {slides_word}", timeout=4
-        )
+        # No toast: a routine build that succeeded is what the chip is for.
+        log.debug("Built %d slides in %.2fs", n_slides, duration)
         self._slide_info = converter.slide_info
         self._thumbnails = converter.thumbnails
         self._html_uri   = html_uri
@@ -1336,13 +1422,14 @@ class MainWindow(Adw.ApplicationWindow):
             self._pack_pres()
 
     def _on_conversion_failed(self, converter: Converter, message: str) -> None:
-        self._spinner.stop()
-        self._spinner.set_visible(False)
+        self._converting = False
+        # Leave _built_text alone: a failed build did not change what is on
+        # disk, so the chip correctly keeps saying a rebuild is needed.
+        self._update_build_chip()
         self._present_btn.set_sensitive(True)
         self._open_presenter_after_convert = False
         # Stop thumbnail spinners on failure too (#71)
         self._sidebar.set_converting(False)
-        self._title_label.set_subtitle("")
         # Show a user-friendly message rather than a raw exception string (#87)
         friendly = _friendly_error(message)
         self._banner.set_title(friendly)
@@ -1782,8 +1869,7 @@ class MainWindow(Adw.ApplicationWindow):
         minutes = max(1, round(words / self._speaking_rate))
         time_str = (f"{minutes} min to present" if minutes < 60
                     else f"{minutes // 60}h {minutes % 60}m")
-        if not self._spinner.get_visible():
-            self._title_label.set_subtitle(f"{words} words · ~{time_str}")
+        self._title_label.set_subtitle(f"{words} words · ~{time_str}")
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
