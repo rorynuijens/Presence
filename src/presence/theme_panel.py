@@ -119,17 +119,9 @@ class ThemePanel(Gtk.Box):
         preview_box.append(name_row)
         body.append(preview_box)
 
-        # Swatch grid label
-        swatch_label = Gtk.Label(label="All themes")
-        swatch_label.add_css_class("caption")
-        swatch_label.add_css_class("dim-label")
-        swatch_label.set_xalign(0)
-        swatch_label.set_margin_start(12)
-        swatch_label.set_margin_end(12)
-        swatch_label.set_margin_bottom(4)
-        body.append(swatch_label)
-
-        # Swatch grid
+        # Swatch grid — lives in the chooser dialog, not the panel.  Browsing
+        # 27 themes is a once-per-deck task and does not earn permanent space
+        # beside the document.
         self._swatch_flow = Gtk.FlowBox()
         self._swatch_flow.set_selection_mode(Gtk.SelectionMode.NONE)
         self._swatch_flow.set_homogeneous(True)
@@ -140,7 +132,7 @@ class ThemePanel(Gtk.Box):
         self._swatch_flow.set_margin_bottom(12)
         self._swatch_flow.set_max_children_per_line(3)
         self._swatch_flow.set_min_children_per_line(3)
-        body.append(self._swatch_flow)
+        self._theme_dialog: Adw.Dialog | None = None
 
         slide_group = Adw.PreferencesGroup()
         slide_group.set_title("Slide settings")
@@ -148,6 +140,15 @@ class ThemePanel(Gtk.Box):
         slide_group.set_margin_end(12)
         slide_group.set_margin_top(8)
         slide_group.set_margin_bottom(8)
+
+        self._theme_row = Adw.ActionRow(title="Theme")
+        change_btn = Gtk.Button(label="Change…")
+        change_btn.add_css_class("flat")
+        change_btn.set_valign(Gtk.Align.CENTER)
+        change_btn.connect("clicked", self._on_change_theme)
+        self._theme_row.add_suffix(change_btn)
+        self._theme_row.set_activatable_widget(change_btn)
+        slide_group.add(self._theme_row)
 
         from .slides.themes import ASPECT_RATIOS
         self._ratios = list(ASPECT_RATIOS.keys())
@@ -374,6 +375,7 @@ class ThemePanel(Gtk.Box):
         if theme is None:
             return
         self._preview_name.set_label(theme.name)
+        self._theme_row.set_subtitle(theme.name)
         self._thumb_cancelled[0] = True
         self._thumb_cancelled = [False]
         ratio     = self._converter.ratio if self._converter else "16:9"
@@ -390,6 +392,26 @@ class ThemePanel(Gtk.Box):
                     picture.set_paintable(texture)
 
         _thumb_cache.get_async(theme, ratio, _on_png)
+
+    def _on_change_theme(self, *_) -> None:
+        """Open the theme chooser."""
+        if self._theme_dialog is None:
+            scroll = Gtk.ScrolledWindow()
+            scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+            scroll.set_vexpand(True)
+            scroll.set_child(self._swatch_flow)
+
+            toolbar = Adw.ToolbarView()
+            toolbar.add_top_bar(Adw.HeaderBar())
+            toolbar.set_content(scroll)
+
+            self._theme_dialog = Adw.Dialog()
+            self._theme_dialog.set_title("Choose a theme")
+            self._theme_dialog.set_content_width(520)
+            self._theme_dialog.set_content_height(620)
+            self._theme_dialog.set_child(toolbar)
+
+        self._theme_dialog.present(self)
 
     def _rebuild_swatches(self) -> None:
         """Clear and repopulate the swatch FlowBox with colour-only cards."""

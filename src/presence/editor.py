@@ -168,13 +168,18 @@ def _build_alt(desc: str, layout: dict) -> str:
 
 # ── ImageLayoutPopover ────────────────────────────────────────────────────────
 
-class ImageLayoutPopover(Gtk.Popover):
+class ImageLayoutControls(Gtk.Box):
     """
-    Non-modal popover for inserting OR editing an image's layout.
+    The image layout controls: position, size, filters, alt text.
 
-    Insert mode — opened from the toolbar button; "Choose image…" action.
-    Edit mode   — opened when cursor is on an image tag; changes write back
-                  immediately (no Apply button needed).
+    Container-agnostic so the same controls serve two hosts — the inspector
+    panel, where they edit the image the cursor is on, and
+    ImageLayoutPopover, which anchors them to the toolbar's insert button.
+    A host supplies *dismiss_cb* if it needs to close itself when the
+    controls finish an action.
+
+    Insert mode — "Choose image…" action, used by the popover host.
+    Edit mode   — changes write back immediately (no Apply button needed).
 
     GNOME HIG compliance:
       • Flat toggle buttons for position — each shows a small SVG icon that
@@ -251,10 +256,11 @@ class ImageLayoutPopover(Gtk.Popover):
         "background": "Background",
     }
 
-    def __init__(self, parent_widget: Gtk.Widget,
-                 insert_cb: Callable[[str, str], None]) -> None:
-        super().__init__()
+    def __init__(self, insert_cb: Callable[[str, str], None],
+                 dismiss_cb: Callable[[], None] | None = None) -> None:
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self._insert_cb  = insert_cb
+        self._dismiss_cb = dismiss_cb
         self._edit_cb: Callable[[dict, str], None] | None = None
         self._edit_mode  = False
         self._active_pos       = "right"
@@ -277,10 +283,6 @@ class ImageLayoutPopover(Gtk.Popover):
         # opened so that _on_insert_clicked has a valid parent for the FileDialog
         # even after popdown() has unparented the popover from the widget tree.
         self._parent_window: "Gtk.Window | None" = None
-
-        self.set_parent(parent_widget)
-        self.set_has_arrow(True)
-        self.set_autohide(True)
 
         # Install scoped CSS once per process
         self._ensure_css()
@@ -308,7 +310,7 @@ class ImageLayoutPopover(Gtk.Popover):
             return row
 
         # ── Header ────────────────────────────────────────────────────────────
-        header = Gtk.Label(label="Image layout")
+        self._header = header = Gtk.Label(label="Image layout")
         header.set_xalign(0.0)
         header.add_css_class("ilp-header")
         header.set_margin_top(10)
@@ -358,8 +360,8 @@ class ImageLayoutPopover(Gtk.Popover):
         self._size_scale = Gtk.Scale.new_with_range(
             Gtk.Orientation.HORIZONTAL, 1, 100, 1
         )
-        for _v, _lbl in ((30, "30%"), (50, "50%"), (70, "70%"), (100, "Full")):
-            self._size_scale.add_mark(_v, Gtk.PositionType.BOTTOM, _lbl)
+        for _v in (30, 50, 70, 100):
+            self._size_scale.add_mark(_v, Gtk.PositionType.BOTTOM, None)
         self._size_scale.set_value(50)
         self._size_scale.connect("value-changed", self._on_size_changed)
         root.append(_inline_slider("Size", self._size_scale))
@@ -628,8 +630,8 @@ class ImageLayoutPopover(Gtk.Popover):
         self._zoom_scale = Gtk.Scale.new_with_range(
             Gtk.Orientation.HORIZONTAL, 100, 300, 5
         )
-        for _v, _l in ((100, "1×"), (200, "2×"), (300, "3×")):
-            self._zoom_scale.add_mark(_v, Gtk.PositionType.BOTTOM, _l)
+        for _v in (100, 200, 300):
+            self._zoom_scale.add_mark(_v, Gtk.PositionType.BOTTOM, None)
         self._zoom_scale.set_value(100)
         self._zoom_scale.connect("value-changed", self._on_zoom_changed)
         root.append(_inline_slider("Zoom %", self._zoom_scale))
@@ -680,7 +682,8 @@ class ImageLayoutPopover(Gtk.Popover):
         scroll.set_max_content_height(560)
         scroll.set_propagate_natural_height(True)
         scroll.set_child(root)
-        self.set_child(scroll)
+        scroll.set_vexpand(True)
+        self.append(scroll)
 
         # Initialise visual state
         self._refresh_pos_buttons()
@@ -688,11 +691,20 @@ class ImageLayoutPopover(Gtk.Popover):
         self._refresh_fit_buttons()
         self._refresh_focal_buttons()
 
+    def set_header_visible(self, visible: bool) -> None:
+        """Hide the internal title where the host already provides one."""
+        self._header.set_visible(visible)
+
+    def _dismiss(self) -> None:
+        """Ask the host to close, if it is the kind of host that closes."""
+        if self._dismiss_cb is not None:
+            self._dismiss_cb()
+
     # ── CSS ───────────────────────────────────────────────────────────────────
 
     @classmethod
     def _ensure_css(cls) -> None:
-        """Install scoped CSS for the popover once per process."""
+        """Install scoped CSS for the controls once per process."""
         if cls._CSS_INSTALLED:
             return
         css = Gtk.CssProvider()
@@ -931,15 +943,10 @@ class ImageLayoutPopover(Gtk.Popover):
             self._ai_btn.set_visible(False)
             self._infographic_btn.set_visible(False)
 
-        # Insert mode: autohide ON so clicking outside dismisses the popover.
-        self.set_autohide(True)
-
-        # Capture the parent window now, while the popover is still attached
-        # to the widget tree.  After popup() + autohide fires (when the file
-        # dialog steals focus), get_root() on self returns None.
+        # Capture the parent window now, while the controls are still
+        # attached to the widget tree.  In the popover host, autohide fires
+        # when the file dialog steals focus and get_root() then returns None.
         self._parent_window = self.get_root()
-
-        self.popup()
 
     def open_edit_mode(self, layout: dict, description: str,
                        edit_cb: Callable[[dict, str], None]) -> None:
@@ -987,14 +994,7 @@ class ImageLayoutPopover(Gtk.Popover):
         self._insert_btn.set_visible(False)
         self._ai_btn.set_visible(False)
         self._infographic_btn.set_visible(False)
-
-        # Edit mode: autohide OFF so the click on the GtkSourceView that
-        # triggered this popover does not immediately dismiss it.  The popover
-        # is dismissed explicitly by _dismiss_img_popover() when the cursor
-        # moves off the image line (via the 300 ms cursor-polling timer).
-        self.set_autohide(False)
-
-        self.popup()
+        self._parent_window = self.get_root()
 
     # ── Signal helpers ────────────────────────────────────────────────────────
 
@@ -1137,7 +1137,7 @@ class ImageLayoutPopover(Gtk.Popover):
         # making get_root() return None.
         parent_window = self._parent_window
 
-        self.popdown()
+        self._dismiss()
 
         dialog = Gtk.FileDialog.new()
         dialog.set_title("Choose image")
@@ -1194,7 +1194,7 @@ class ImageLayoutPopover(Gtk.Popover):
                 )
             return
 
-        self.popdown()
+        self._dismiss()
 
         from .ai_image_dialog import AIImageDialog
         dlg = AIImageDialog(
@@ -1222,13 +1222,44 @@ class ImageLayoutPopover(Gtk.Popover):
             if editor is not None:
                 slide_md = editor.get_current_slide_markdown()
 
-        self.popdown()
+        self._dismiss()
 
         from .ai_infographic_dialog import AIInfographicDialog
         dlg = AIInfographicDialog(
             parent_window, layout, insert_cb, initial_slide_md=slide_md
         )
         dlg.present(parent_window)
+
+
+class ImageLayoutPopover(Gtk.Popover):
+    """
+    Anchors ImageLayoutControls to a button, for the toolbar insert flow.
+
+    Editing an existing image happens in the inspector panel instead, where
+    the controls do not sit on top of the text being edited.
+    """
+
+    def __init__(self, parent_widget: Gtk.Widget,
+                 insert_cb: Callable[[str, str], None]) -> None:
+        super().__init__()
+        self.set_parent(parent_widget)
+        self.set_has_arrow(True)
+        self.set_autohide(True)
+        self.controls = ImageLayoutControls(insert_cb, dismiss_cb=self.popdown)
+        self.set_child(self.controls)
+
+    def open_insert_mode(self) -> None:
+        self.set_autohide(True)
+        self.popup()
+        self.controls.open_insert_mode()
+
+    def open_edit_mode(self, layout: dict, description: str,
+                       edit_cb: "Callable[[dict, str], None]") -> None:
+        # Autohide off: the click on the text view that opened this must not
+        # immediately dismiss it.
+        self.set_autohide(False)
+        self.popup()
+        self.controls.open_edit_mode(layout, description, edit_cb)
 
 
 class _TableInsertPopover(Gtk.Popover):
@@ -1401,6 +1432,10 @@ class Editor(Gtk.Box):
         self._insert_image_popover: ImageLayoutPopover | None = None
         # The toolbar insert-image button — used as popover anchor
         self._img_toolbar_btn:  Gtk.Button | None = None
+        # Set by the window: (layout, description, edit_cb) -> bool.  Returns
+        # True when the inspector took the image, in which case no popover
+        # opens.  Falls back to the popover whenever the panel is closed.
+        self._image_context_cb = None
         self._font_size: int = 13
         self._line_length: int = 64  # column position for margin guide
         self._table_popover: _TableInsertPopover | None = None
@@ -1792,21 +1827,33 @@ class Editor(Gtk.Box):
         """
         Called by the window's 300ms cursor-polling timer.
 
-        Only responsible for DISMISSAL: if the cursor has moved to a line
-        that does not contain an image tag, close the popover.
+        With an inspector attached this both opens and closes the image
+        context: the panel sits beside the text, so following the cursor onto
+        an image costs the writer nothing.
 
-        Opening the popover is handled by _on_view_click_for_image(), which
-        fires on an explicit mouse click — not by this timer.  This avoids
-        the popover opening unexpectedly on every cursor movement and prevents
-        it from interfering with scrolling.
+        Without one, it is only responsible for DISMISSAL — opening is left to
+        _on_view_click_for_image() on an explicit click, because a popover
+        appearing on every cursor movement would cover the text and fight
+        scrolling.
         """
+        cursor  = self._buffer.get_iter_at_mark(self._buffer.get_insert())
+        line_no = cursor.get_line()
+
+        if self._image_context_cb is not None:
+            on_image = bool(_IMAGE_RE.search(self._get_line_text(line_no) or ""))
+            if on_image:
+                if line_no != self._last_img_line:
+                    self._open_img_edit_popover_for_line(line_no)
+            elif self._last_img_line != -1:
+                self._current_img_match = None
+                self._last_img_line     = -1
+                self._image_context_cb(None, "", None)
+            return
+
         if self._image_layout_popover is None:
             return
         if not self._image_layout_popover.get_visible():
             return   # nothing to dismiss
-
-        cursor  = self._buffer.get_iter_at_mark(self._buffer.get_insert())
-        line_no = cursor.get_line()
 
         # Fast path: cursor is still on the image line — keep popover open.
         if line_no == self._last_img_line:
@@ -1847,6 +1894,18 @@ class Editor(Gtk.Box):
 
         self._current_img_match = (alt_raw, src, line_no)
         self._last_img_line     = line_no
+
+        # Prefer the inspector: the controls sit beside the text rather than
+        # on top of the line being edited.
+        if self._image_context_cb is not None:
+            if self._image_context_cb(layout, desc, self._on_img_edit):
+                # Close a popover left over from before the panel was opened,
+                # but keep the match/line tracking _dismiss_img_popover() would
+                # clear — writeback and cursor-exit both depend on it.
+                if (self._image_layout_popover is not None
+                        and self._image_layout_popover.get_visible()):
+                    self._image_layout_popover.popdown()
+                return
 
         # Create/retrieve the popover first, then position it — set_pointing_to
         # requires the popover to exist and be parented to the view.
@@ -2554,6 +2613,16 @@ class Editor(Gtk.Box):
 
         # Try to open the popover for whichever line the cursor is on.
         self._open_img_edit_popover_for_line(line_no)
+
+    def set_image_context_callback(self, cb) -> None:
+        """
+        Route the image under the cursor to *cb(layout, description, edit_cb)*.
+
+        *cb* returns True when it has taken the image, which suppresses the
+        popover.  It is called with layout=None when the cursor leaves every
+        image, so the host can go back to its default context.
+        """
+        self._image_context_cb = cb
 
     def set_insert_image_callback(self, cb) -> None:
         self._insert_image_cb = cb

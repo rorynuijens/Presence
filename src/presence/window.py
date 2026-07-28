@@ -18,10 +18,11 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, Gio, GLib, Gdk, Pango
 
-from .editor     import Editor
+from .editor     import Editor, ImageLayoutControls
 from .preview    import SlideCanvas
 from .sidebar    import Sidebar
 from .theme_panel    import ThemePanel
+from .inspector      import Inspector
 from .settings_dialog import SettingsDialog
 from .app_utils        import png_bytes_to_texture, make_file_filter, make_filter_store
 from .ai_import_dialog import AIImportDialog, generate_missing_images
@@ -215,6 +216,12 @@ class MainWindow(Adw.ApplicationWindow):
         self._editor      = Editor()
         self._canvas      = SlideCanvas()
         self._theme_panel = ThemePanel()
+        # The panel follows the cursor: slide settings in body text, image
+        # layout on an image line.  The controls are the same ones the
+        # toolbar's insert popover uses.
+        self._image_controls = ImageLayoutControls(self._on_insert_image_from_panel)
+        self._image_controls.set_header_visible(False)
+        self._inspector = Inspector(self._theme_panel, self._image_controls)
 
         self._sidebar.connect("slide-selected",       self._on_slide_selected)
         self._sidebar.connect("slide-insert-after",   self._on_slide_insert_after)
@@ -224,6 +231,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._editor.set_insert_image_callback(self._on_insert_image)
         self._editor.connect("changed",               self._on_editor_changed)
         self._editor.connect("live-changed",          self._on_editor_live_changed)
+        self._editor.set_image_context_callback(self._on_image_context)
         self._theme_panel.connect("rebuild-needed",   self._on_theme_panel_rebuild)
 
         # Right sidebar: theme panel shown inline via a Revealer.
@@ -244,7 +252,7 @@ class MainWindow(Adw.ApplicationWindow):
         )
         panel_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         panel_box.append(self._theme_sep)
-        panel_box.append(self._theme_panel)
+        panel_box.append(self._inspector)
         self._theme_revealer.set_child(panel_box)
 
         # Editor ‖ live canvas.  A Paned rather than a fixed split so the
@@ -388,9 +396,9 @@ class MainWindow(Adw.ApplicationWindow):
         # Theme panel toggle — right sidebar visibility (F10)
         self._theme_panel_btn = Gtk.ToggleButton()
         self._theme_panel_btn.set_icon_name("sidebar-show-right-symbolic")
-        self._theme_panel_btn.set_tooltip_text("Show theme panel (F10)")
+        self._theme_panel_btn.set_tooltip_text("Show inspector (F10)")
         self._theme_panel_btn.update_property(
-            [Gtk.AccessibleProperty.LABEL], ["Show theme panel"]
+            [Gtk.AccessibleProperty.LABEL], ["Show inspector"]
         )
         self._theme_panel_btn.set_active(False)
         self._theme_panel_btn.add_css_class("flat")
@@ -1105,6 +1113,26 @@ class MainWindow(Adw.ApplicationWindow):
         self._canvas.set_visible(visible)
         self._canvas_open = visible
         self._save_window_state()
+
+    def _on_image_context(self, layout, description, edit_cb) -> bool:
+        """
+        The cursor moved onto (or off) an image.
+
+        Returns True when the inspector took it, which tells the editor not to
+        open its popover.  With the panel closed nothing is taken, so the
+        popover still serves people who work without it.
+        """
+        if not self._theme_panel_btn.get_active():
+            return False
+        if layout is None:
+            self._inspector.show_slide_context()
+            return True
+        self._inspector.show_image_context(layout, description, edit_cb)
+        return True
+
+    def _on_insert_image_from_panel(self, alt: str, rel_path: str) -> None:
+        """Insert-mode callback for the panel's copy of the image controls."""
+        self._editor.insert_image_markdown(alt, rel_path)
 
     def _on_canvas_visibility(self, canvas: SlideCanvas, _param) -> None:
         """Re-render whenever the canvas becomes visible again."""
