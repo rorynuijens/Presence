@@ -65,6 +65,8 @@ The codebase lives entirely under `src/presence/` and splits into two layers:
 - `theme_panel.py` / `theme_editor.py` / `theme_manager_ui.py` — slide settings, theme chooser dialog and editor UI.
 - `session.py` — persistence: window state, recent files, editor prefs, recovery files.
 
+**The fold marker.** A slide is a fixed 1280x720 box with `overflow: hidden`, so a build knows exactly where each slide runs out of room. `renderer.py` stamps every block with `data-src-line` (slide start line from `compute_slide_start_lines()`, plus the block's line within the slide), and after layout `converter._measure_folds()` walks WeasyPrint's box tree for the topmost block crossing the slide's text area. The editor draws a rule there, anchored to a `Gtk.TextMark` so it follows the content while you edit. Measured against the content box, not the page edge, because themes reserve the lower padding for the slide number and progress bar.
+
 **When a PDF build runs.** Saving does not build. A build happens when the document is opened, when it is explicitly asked for (the header status chip, Ctrl+Return), before anything that consumes the output (Present, Export PDF/HTML/Images, Open PDF — all routed through `MainWindow._with_current_build()`), and on every save only if the user enables "Convert on save" in Settings. The header chip reports whether the built PDF still matches the document, comparing text rather than tracking a modified flag.
 
 ## Slide syntax (key separators)

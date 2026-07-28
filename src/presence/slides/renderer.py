@@ -65,7 +65,8 @@ def get_pygments_css(style_name: str = "friendly") -> str:
 _md = MarkdownIt("commonmark", {"html": False}).enable("table")
 
 
-def render_slide_content(markdown_text: str) -> str:
+def render_slide_content(markdown_text: str,
+                         line_offset: int | None = None) -> str:
     """
     Convert *markdown_text* to an HTML fragment (no <html>/<body> wrapper).
 
@@ -74,19 +75,46 @@ def render_slide_content(markdown_text: str) -> str:
     GitHub-style callout blockquotes (> [!info], > [!tip], etc.) are
     transformed into <div class="callout-KIND"> elements.
 
+    When *line_offset* is given, every top-level block carries a
+    ``data-src-line`` attribute holding its line number in the source
+    document (*line_offset* plus the block's line within this fragment).
+    That is what lets a layout measurement of the rendered page be traced
+    back to the line the writer needs to edit.
+
     Returns an empty string for empty/whitespace-only input.
     Falls back to a <pre> block on any error so slides never go blank.
     """
     if not markdown_text or not markdown_text.strip():
         return ""
     try:
-        html = _md.render(markdown_text)
+        if line_offset is None:
+            html = _md.render(markdown_text)
+        else:
+            html = _render_with_source_lines(markdown_text, line_offset)
         if _PYGMENTS:
             html = _highlight_code_blocks(html)
         html = _transform_callouts(html)
         return html
     except Exception:
         return f"<pre>{_html.escape(markdown_text)}</pre>"
+
+
+def _render_with_source_lines(markdown_text: str, line_offset: int) -> str:
+    """
+    Render, stamping each top-level block with its source line.
+
+    Parsing and rendering are driven separately rather than through
+    _md.render() so the tokens can be annotated in between; the shared parser
+    is never mutated, which keeps this safe for concurrent callers.
+    """
+    tokens = _md.parse(markdown_text)
+    for token in tokens:
+        # Every block, not just top-level ones: a fourteen-item list is a
+        # single top-level block, and "this list is too long" is far less
+        # useful than pointing at the item where the room runs out.
+        if token.block and token.map:
+            token.attrSet("data-src-line", str(line_offset + token.map[0]))
+    return _md.renderer.render(tokens, _md.options, {})
 
 
 _CALLOUT_KINDS = {

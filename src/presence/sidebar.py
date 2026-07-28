@@ -154,8 +154,15 @@ class Sidebar(Gtk.Box):
             len(_re.findall(r'\S+', s.get('body', '')))
             for s in slide_info
         ]
-        # Flag slides with >120 words as potentially overflowing
-        overflows = [w > 120 for w in word_counts]
+        # Overflow is measured from the laid-out page, not guessed from a
+        # word count: the converter reports the line where each slide runs
+        # out of room, and None when it fits.  Fall back to the old >120-word
+        # heuristic only when no measurement is available.
+        overflows = [
+            (s["fold_line"] is not None) if s.get("fold_line", "missing") != "missing"
+            else w > 120
+            for s, w in zip(slide_info, word_counts)
+        ]
         self._rebuild(titles, notes, thumbnails, has_notes,
                       word_counts, wpm, overflows)
 

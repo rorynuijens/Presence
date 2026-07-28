@@ -1448,6 +1448,11 @@ class MainWindow(Adw.ApplicationWindow):
             pending, self._after_build = self._after_build, None
             pending()
 
+        # Draw the fold rules measured from the page that was just laid out.
+        self._editor.set_fold_lines(
+            [info.get("fold_line") for info in converter.slide_info]
+        )
+
         # Stop thumbnail spinners before replacing content (#71)
         self._sidebar.set_converting(False)
         overflow_count = self._sidebar.update_from_conversion(

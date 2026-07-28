@@ -38,7 +38,8 @@ from .slides.css import build_css
 from .slides.html import md_to_html_slides
 from .slides.themes import ASPECT_RATIOS
 from .slides.theme_loader import load_all_themes
-from .slides.utils import encode_logo, safe_subpath
+from .slides.utils import (encode_logo, safe_subpath,
+                            compute_slide_start_lines)
 from .slides.thumbnails_render import render_thumbnails
 
 log = logging.getLogger(__name__)
@@ -63,6 +64,111 @@ class Preview:
     slide_info: list
     width:      int
     height:     int
+
+
+def _measure_folds(document, n_slides: int) -> list[int | None]:
+    """
+    Find, per slide, the first source line whose block runs past the slide.
+
+    Slides are a fixed box with overflow:hidden, so WeasyPrint lays every
+    block out and simply clips what does not fit.  Walking the box tree after
+    layout therefore says exactly where a slide runs out of room, which a
+    word count can only guess at.  The data-src-line attributes put there by
+    the renderer turn a y coordinate back into a line the writer can edit.
+
+    Returns one entry per slide: the line number, or None when it all fits.
+    Any failure yields None rather than a wrong line — the box tree is
+    WeasyPrint's internal representation and may change between versions.
+    """
+    folds: list[int | None] = []
+    try:
+        pages = list(document.pages)
+    except Exception:
+        return [None] * n_slides
+
+    for page in pages[:n_slides]:
+        folds.append(_fold_line_for_page(page))
+    folds.extend([None] * (n_slides - len(folds)))
+    return folds
+
+
+def _fold_line_for_page(page) -> "int | None":
+    """First line that runs past the slide's text area on *page*, or None."""
+    try:
+        boxes = list(_walk_boxes(page._page_box))
+        limit = _content_bottom(boxes, page.height)
+
+        best_y: float | None = None
+        best_line: int | None = None
+
+        for box in boxes:
+            line = _box_line(box)
+            if line is None:
+                continue
+            # Skip containers: a <ul> is stamped with its first item's line,
+            # so letting it compete would fold the list at an item that fits.
+            # A box counts only when its whole subtree comes from one line.
+            if _subtree_lines(box) != {line}:
+                continue
+            # Ignore zero-height boxes, which carry no visible content.
+            if box.height <= 0 or box.position_y + box.height <= limit:
+                continue
+            # Topmost box that crosses: where the slide runs out of room.
+            if best_y is None or box.position_y < best_y:
+                best_y = box.position_y
+                best_line = line
+        return best_line
+    except Exception:
+        log.debug("Fold measurement failed", exc_info=True)
+        return None
+
+
+def _box_line(box) -> "int | None":
+    """The source line stamped on *box*, if any."""
+    element = getattr(box, "element", None)
+    if element is None or not hasattr(element, "get"):
+        return None
+    raw = element.get("data-src-line")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def _subtree_lines(box) -> set:
+    """Every source line appearing in *box* and its descendants."""
+    return {line for line in (_box_line(b) for b in _walk_boxes(box))
+            if line is not None}
+
+
+def _walk_boxes(box):
+    """Yield *box* and every descendant."""
+    stack = [box]
+    while stack:
+        current = stack.pop()
+        yield current
+        stack.extend(getattr(current, "children", ()) or ())
+
+
+def _content_bottom(boxes, page_height: float) -> float:
+    """
+    Bottom of the slide's text area.
+
+    Themes reserve the lower padding for the slide number and progress bar,
+    so content reaching into it collides with them — the slide has run out of
+    room even though overflow:hidden would not clip until the page edge.
+    Measuring against the text area warns at the point the design intends.
+    """
+    for box in boxes:
+        element = getattr(box, "element", None)
+        if element is None or not hasattr(element, "get"):
+            continue
+        classes = (element.get("class") or "").split()
+        if "slide" in classes:
+            return box.content_box_y() + box.height
+    return page_height
 
 
 class Converter(GObject.Object):
@@ -287,8 +393,8 @@ class Converter(GObject.Object):
     def _run(self, input_path: Path, output_path: Path) -> None:
         t0 = time.monotonic()
         try:
-            text = input_path.read_text(encoding="utf-8")
-            meta, text = parse_frontmatter(text)
+            raw_text = input_path.read_text(encoding="utf-8")
+            meta, text = parse_frontmatter(raw_text)
 
             ctx = self._render_context(meta, input_path.parent)
 
@@ -300,6 +406,7 @@ class Converter(GObject.Object):
                 slides, ctx.css, ctx.logo_b64, meta,
                 width=ctx.width, height=ctx.height, theme_bg=ctx.theme_bg,
                 base_url=str(input_path.parent),
+                line_offsets=compute_slide_start_lines(raw_text),
             )
 
             html_path = output_path.with_suffix(".html")
@@ -311,9 +418,14 @@ class Converter(GObject.Object):
                 )
             wp_doc    = _weasyprint.HTML(
                 string=html, base_url=str(input_path.parent)
-            )
+            ).render()
             pdf_bytes = wp_doc.write_pdf()
             output_path.write_bytes(pdf_bytes)
+
+            # Same laid-out document the PDF came from, so the folds describe
+            # the file the writer will actually hand out.
+            for info, fold in zip(slide_info, _measure_folds(wp_doc, len(slides))):
+                info["fold_line"] = fold
 
             duration   = time.monotonic() - t0
             n_slides   = len(slides)

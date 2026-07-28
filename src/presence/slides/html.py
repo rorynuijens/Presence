@@ -107,6 +107,7 @@ def md_to_html_slides(
     theme_bg: str = "#ffffff",
     base_url: "str | None" = None,
     only_index: "int | None" = None,
+    line_offsets: "list[int] | None" = None,
 ) -> tuple[str, list[dict]]:
     """
     Render all slides to a complete HTML string.
@@ -120,6 +121,10 @@ def md_to_html_slides(
     would contain.  Used by the live canvas, which only ever shows one slide
     and should not pay for markup it will not display.  *slide_info* always
     covers every slide.
+
+    *line_offsets* gives each slide's starting line in the source document.
+    When present, blocks carry ``data-src-line``, so a layout measurement of
+    the rendered page can name the line that overflows.
     """
     slide_htmls = []
     slide_info  = []
@@ -145,6 +150,9 @@ def md_to_html_slides(
         })
 
         page_num = i if first_is_title else i + 1
+        line_offset = (line_offsets[i]
+                       if line_offsets is not None and i < len(line_offsets)
+                       else None)
 
         # Markdown rendering is the only costly step here; skip it entirely
         # for slides the caller will not display.
@@ -152,7 +160,8 @@ def md_to_html_slides(
             continue
 
         if title_slide:
-            html_frag = _render_title_slide(cleaned_md, meta, logo_b64)
+            html_frag = _render_title_slide(cleaned_md, meta, logo_b64,
+                                            line_offset=line_offset)
         elif images:
             if len(images) >= 2:
                 # Two images: render side-by-side or top/bottom split
@@ -160,17 +169,20 @@ def md_to_html_slides(
                     cleaned_md, images[0], images[1],
                     page_num, total_numbered, logo_b64, theme_override,
                     height=height, theme_bg=bg, base_url=base_url,
+                    line_offset=line_offset,
                 )
             else:
                 html_frag = _render_image_slide(
                     cleaned_md, images[0]["src"], images[0]["layout"],
                     page_num, total_numbered, logo_b64, theme_override,
                     height=height, base_url=base_url,
+                    line_offset=line_offset,
                 )
         else:
             html_frag = _render_normal_slide(cleaned_md, page_num,
                                              total_numbered, logo_b64,
-                                             theme_override)
+                                             theme_override,
+                                             line_offset=line_offset)
 
         slide_htmls.append(html_frag)
 
@@ -233,8 +245,9 @@ def _theme_attr(theme_override: str) -> str:
     return ""
 
 
-def _render_title_slide(slide_md: str, meta: dict, logo_b64: str | None) -> str:
-    content = render_slide_content(slide_md)
+def _render_title_slide(slide_md: str, meta: dict, logo_b64: str | None,
+                        line_offset: int | None = None) -> str:
+    content = render_slide_content(slide_md, line_offset)
 
     meta_parts = []
     if meta.get("author"):
@@ -266,6 +279,7 @@ def _render_image_slide(
     *,
     height:         int = 720,
     base_url:       "str | None" = None,
+    line_offset:    int | None = None,
 ) -> str:
     """
     Render a slide that contains an image with flexible layout.
@@ -279,7 +293,7 @@ def _render_image_slide(
     size 1-100 works.  data-img-pos and data-img-fade still drive gradient
     direction in CSS; data-img-fit and data-img-focal drive object-fit/position.
     """
-    content   = render_slide_content(slide_md)
+    content   = render_slide_content(slide_md, line_offset)
     t_attr    = _theme_attr(theme_override)
 
     pos       = layout.get("position", "right")
@@ -394,17 +408,26 @@ def _render_normal_slide(
     total:          int,
     logo_b64:       str | None,
     theme_override: str = "",
+    line_offset:    int | None = None,
 ) -> str:
     cols = split_two_columns(slide_md)
     if cols:
+        # The right column starts after the ||| line.  Without that shift its
+        # blocks would claim the left column's line numbers, so when the
+        # column cannot be located it goes unstamped rather than lying.
+        right_offset = None
+        if line_offset is not None and cols[1]:
+            marker = slide_md.find(cols[1])
+            if marker != -1:
+                right_offset = line_offset + slide_md.count("\n", 0, marker)
         content = (
             '<div class="two-col">'
-            f'<div class="col">{render_slide_content(cols[0])}</div>'
-            f'<div class="col">{render_slide_content(cols[1])}</div>'
+            f'<div class="col">{render_slide_content(cols[0], line_offset)}</div>'
+            f'<div class="col">{render_slide_content(cols[1], right_offset)}</div>'
             '</div>'
         )
     else:
-        content = render_slide_content(slide_md)
+        content = render_slide_content(slide_md, line_offset)
     t_attr  = _theme_attr(theme_override)
     return (
         f'<div class="slide"{t_attr}>'
@@ -428,6 +451,7 @@ def _render_two_image_slide(
     height:         int = 720,
     theme_bg:       str = "#ffffff",
     base_url:       "str | None" = None,
+    line_offset:    int | None = None,
 ) -> str:
     """
     Render a slide with two images.
@@ -441,7 +465,7 @@ def _render_two_image_slide(
     Each image panel uses its own size token (default 30% each,
     leaving 40% for text).  Gradients face inward toward the text.
     """
-    content = render_slide_content(slide_md)
+    content = render_slide_content(slide_md, line_offset)
     t_attr  = _theme_attr(theme_override)
 
     layout_a = img_a.get("layout", {})

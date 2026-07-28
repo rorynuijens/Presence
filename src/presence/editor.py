@@ -1436,6 +1436,10 @@ class Editor(Gtk.Box):
         # True when the inspector took the image, in which case no popover
         # opens.  Falls back to the popover whenever the panel is closed.
         self._image_context_cb = None
+        # Text marks at the lines where slides run out of room.  Marks rather
+        # than line numbers so the rules stay attached to the content they
+        # describe while the writer edits above them.
+        self._fold_marks: list = []
         self._font_size: int = 13
         self._line_length: int = 64  # column position for margin guide
         self._table_popover: _TableInsertPopover | None = None
@@ -1521,8 +1525,21 @@ class Editor(Gtk.Box):
             self._badge_draw.set_can_target(False)
             self._badge_draw.set_draw_func(self._draw_slide_badges)
             self._img_edit_overlay.add_overlay(self._badge_draw)
+
+            # Fold rules span the full width, so they get their own overlay.
+            self._fold_draw = Gtk.DrawingArea()
+            self._fold_draw.set_hexpand(True)
+            self._fold_draw.set_vexpand(True)
+            self._fold_draw.set_can_target(False)
+            self._fold_draw.set_draw_func(self._draw_folds)
+            self._img_edit_overlay.add_overlay(self._fold_draw)
             # Recompute slide starts whenever the buffer changes.
             self._buffer.connect('changed', self._update_badge_starts)
+            self._buffer.connect(
+                'changed',
+                lambda *_: self._fold_draw.queue_draw()
+                if getattr(self, "_fold_draw", None) is not None else None,
+            )
             GLib.idle_add(self._update_badge_starts)
             # After realize, measure the gutter width and wire up scroll.
             self._view.connect('realize', self._on_view_realize_badges)
@@ -2683,6 +2700,8 @@ class Editor(Gtk.Box):
                     def _on_scroll(*_):
                         if self._badge_draw:
                             self._badge_draw.queue_draw()
+                        if getattr(self, "_fold_draw", None) is not None:
+                            self._fold_draw.queue_draw()
                     vadj.connect("value-changed", _on_scroll)
         except Exception:
             pass
@@ -2779,6 +2798,90 @@ class Editor(Gtk.Box):
         if self._badge_draw is not None:
             self._badge_draw.queue_draw()
         return GLib.SOURCE_REMOVE
+
+    # ── Fold rules ────────────────────────────────────────────────────────────
+
+    def set_fold_lines(self, lines) -> None:
+        """
+        Mark the lines where each slide runs out of room.
+
+        *lines* holds one entry per slide — a 0-based line number, or None
+        for a slide that fits.  Positions are held as text marks so they
+        follow the content as the document is edited, rather than pointing at
+        whatever ends up on that line number later.
+        """
+        for mark in self._fold_marks:
+            try:
+                self._buffer.delete_mark(mark)
+            except Exception:
+                pass
+        self._fold_marks = []
+
+        last_line = self._buffer.get_line_count() - 1
+        for line_no in lines or ():
+            if line_no is None or not (0 <= line_no <= last_line):
+                continue
+            ok, it = self._buffer.get_iter_at_line(line_no)
+            if not ok:
+                continue
+            mark = self._buffer.create_mark(None, it, True)
+            self._fold_marks.append(mark)
+
+        if getattr(self, "_fold_draw", None) is not None:
+            self._fold_draw.queue_draw()
+
+    def clear_fold_lines(self) -> None:
+        """Forget every fold rule."""
+        self.set_fold_lines([])
+
+    def _draw_folds(self, area, cr, width, height) -> None:
+        """
+        Draw a hairline where each slide stops fitting, labelled in the margin.
+
+        Markdown is unbounded and a slide is 1280x720; this is the only place
+        that tension is visible while writing rather than after a build.
+        """
+        if not self._fold_marks or not self._view.get_realized():
+            return
+
+        layout = None
+        if _PangoCairo is not None:
+            layout = _PangoCairo.create_layout(cr)
+            layout.set_font_description(Pango.FontDescription.from_string("Sans 8"))
+
+        for mark in self._fold_marks:
+            try:
+                it = self._buffer.get_iter_at_mark(mark)
+            except Exception:
+                continue
+            buf_rect = self._view.get_iter_location(it)
+            _x, y = self._view.buffer_to_window_coords(
+                Gtk.TextWindowType.TEXT, 0, buf_rect.y
+            )
+            if y < -20 or y > height + 20:
+                continue   # scrolled out of view
+
+            y = float(y) + 0.5          # crisp single-pixel rule
+            label_w = 0.0
+            if layout is not None:
+                layout.set_text("slide is full", -1)
+                label_w = layout.get_pixel_size()[0]
+
+            cr.save()
+            cr.set_source_rgba(0.85, 0.30, 0.25, 0.75)
+            cr.set_line_width(1.0)
+            cr.set_dash([3.0, 3.0])
+            cr.move_to(0.0, y)
+            cr.line_to(max(0.0, width - label_w - 20.0), y)
+            cr.stroke()
+            cr.restore()
+
+            if layout is not None:
+                cr.save()
+                cr.set_source_rgba(0.85, 0.30, 0.25, 0.9)
+                cr.move_to(width - label_w - 12.0, y - 7.0)
+                _PangoCairo.show_layout(cr, layout)
+                cr.restore()
 
     def _draw_slide_badges(self, area, cr, width, height) -> None:
         """

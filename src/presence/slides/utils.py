@@ -129,3 +129,14 @@ def compute_slide_offsets(text: str) -> list[int]:
         offsets.append(fm_end + idx)
         search_pos = idx + len(slide_text)
     return offsets
+
+
+def compute_slide_start_lines(text: str) -> list[int]:
+    """
+    Return the 0-based line in *text* where each slide's content begins.
+
+    Lines are counted over the whole document, frontmatter included, so the
+    numbers can be handed straight to the editor.  One entry per slide, in
+    the order split_slides() returns them.
+    """
+    return [text.count("\n", 0, offset) for offset in compute_slide_offsets(text)]
