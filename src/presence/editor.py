@@ -1422,6 +1422,10 @@ class Editor(Gtk.Box):
         else:
             self._init_plain_view()
 
+        # Must precede any menu that references editor.* actions.
+        self._install_action_group()
+        self._view.set_extra_menu(self._build_context_menu())
+
         self.connect("destroy", self._on_destroy)
 
         # Find bar inside a Revealer for slide-down animation (#53)
@@ -1453,10 +1457,10 @@ class Editor(Gtk.Box):
         self._img_edit_overlay.set_vexpand(True)
 
         # Toolbar: wrap in a ScrolledWindow(EXTERNAL, NEVER) so that GTK's
-        # C-level EXTERNAL-policy measure() reports minimum=0 to the parent.
-        # The toolbar itself still gets its full natural width allocated and is
-        # clipped by set_overflow(HIDDEN).  This prevents the toolbar's ~1050 px
-        # natural width from propagating as the window minimum.
+        # C-level EXTERNAL-policy measure() reports minimum=0 to the parent,
+        # keeping the bar from setting the window's minimum width.  It used to
+        # also hide six unreachable buttons; the bar is now six controls wide
+        # and this is only insurance for extreme window sizes.
         toolbar_scroll = Gtk.ScrolledWindow()
         toolbar_scroll.set_policy(Gtk.PolicyType.EXTERNAL, Gtk.PolicyType.NEVER)
         toolbar_scroll.set_child(self._build_toolbar())
@@ -1968,8 +1972,9 @@ class Editor(Gtk.Box):
         self._find_revealer.set_reveal_child(True)
         self._replace_row.set_visible(False)
         self._search_entry.grab_focus()
-        if self._buffer.get_has_selection():
-            _ok, start, end = self._buffer.get_selection_bounds()
+        bounds = self._selection_bounds()
+        if bounds is not None:
+            start, end = bounds
             self._search_entry.set_text(
                 self._buffer.get_text(start, end, True)
             )
@@ -2123,8 +2128,9 @@ class Editor(Gtk.Box):
         if not self._has_search:
             return
         replacement = self._replace_entry.get_text()
-        if self._buffer.get_has_selection():
-            _ok, start, end = self._buffer.get_selection_bounds()
+        bounds = self._selection_bounds()
+        if bounds is not None:
+            start, end = bounds
             try:
                 self._search_context.replace(start, end, replacement, -1)
             except Exception:
@@ -2164,7 +2170,98 @@ class Editor(Gtk.Box):
 
     # ── Toolbar ───────────────────────────────────────────────────────────────
 
+    # ── Toolbar ───────────────────────────────────────────────────────────────
+
+    # Everything the toolbar used to show as its own button.  Each entry is
+    # (action name, label, callback) and feeds both the overflow menu and the
+    # text view's context menu, so the two can never drift apart.
+    def _editor_action_specs(self) -> list[tuple[str, str, object]]:
+        return [
+            ("heading-1",     "Heading 1",        lambda: self._heading(1)),
+            ("heading-2",     "Heading 2",        lambda: self._heading(2)),
+            ("heading-3",     "Heading 3",        lambda: self._heading(3)),
+            ("bold",          "Bold",             self.bold),
+            ("italic",        "Italic",           self.italic),
+            ("strikethrough", "Strikethrough",
+             lambda: self._wrap("~~", "~~", "text")),
+            ("inline-code",   "Inline code",
+             lambda: self._wrap("`", "`", "code")),
+            ("code-block",    "Code block",       self._code_block),
+            ("blockquote",    "Blockquote",       lambda: self._line_prefix("> ")),
+            ("bullet-list",   "Bullet list",      lambda: self._line_prefix("- ")),
+            ("numbered-list", "Numbered list",    lambda: self._line_prefix("1. ")),
+            ("link",          "Link…",            self._link),
+            ("comment",       "Slide comment",    self.insert_comment),
+            ("find",          "Find…",            self.show_find),
+            ("find-replace",  "Find and replace…", self.show_find_replace),
+        ]
+
+    def _install_action_group(self) -> None:
+        """
+        Publish the formatting actions as an "editor" action group.
+
+        Menus reference them by name, which is what lets the overflow menu and
+        the context menu share one definition.
+        """
+        group = Gio.SimpleActionGroup()
+        for name, _label, cb in self._editor_action_specs():
+            action = Gio.SimpleAction.new(name, None)
+            action.connect("activate", lambda _a, _p, cb=cb: cb())
+            group.add_action(action)
+        # GTK 4 has no getter for an inserted action group, so keep the
+        # reference — it is the only handle for querying or extending it.
+        self._action_group = group
+        self.insert_action_group("editor", group)
+
+    def _build_overflow_menu(self) -> Gio.Menu:
+        """Everything that is not a slide-structure insert."""
+        labels = {name: label for name, label, _ in self._editor_action_specs()}
+
+        def section(*names) -> Gio.Menu:
+            m = Gio.Menu()
+            for n in names:
+                m.append(labels[n], f"editor.{n}")
+            return m
+
+        menu = Gio.Menu()
+        menu.append_section(None, section("heading-1", "heading-2", "heading-3"))
+        menu.append_section(None, section("bold", "italic", "strikethrough",
+                                          "inline-code", "code-block"))
+        menu.append_section(None, section("blockquote", "bullet-list",
+                                          "numbered-list"))
+        menu.append_section(None, section("link", "comment"))
+        menu.append_section(None, section("find", "find-replace"))
+        return menu
+
+    def _build_context_menu(self) -> Gio.Menu:
+        """
+        Formatting for the text view's own right-click menu.
+
+        This is where a selection-based action belongs: the pointer is already
+        on the text, and GNOME users look here for what applies to a selection.
+        """
+        labels = {name: label for name, label, _ in self._editor_action_specs()}
+
+        fmt = Gio.Menu()
+        for name in ("bold", "italic", "strikethrough", "inline-code", "link"):
+            fmt.append(labels[name], f"editor.{name}")
+
+        menu = Gio.Menu()
+        menu.append_submenu("Format", fmt)
+        return menu
+
     def _build_toolbar(self) -> Gtk.Box:
+        """
+        Slide structure only, plus an overflow menu.
+
+        The bar used to carry twenty buttons and a comment conceding that it
+        clipped; with the live canvas taking half the window it clipped six of
+        them off with no scrollbar to reach them.  What stays is the work that
+        has no keystroke and no equivalent anywhere else — the separators that
+        make a Markdown file a deck, and the two inserts that open a popover.
+        Formatting moved to the overflow menu and the text context menu, both
+        driven by the same action group.
+        """
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
         bar.set_margin_start(6)
         bar.set_margin_end(6)
@@ -2181,51 +2278,22 @@ class Editor(Gtk.Box):
             b.connect("clicked", cb)
             return b
 
-        def label_btn(label, tooltip, cb):
-            b = Gtk.Button(label=label)
-            b.set_tooltip_text(tooltip)
-            b.add_css_class("flat")
-            b.connect("clicked", cb)
-            return b
-
         def sep():
             s = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
             s.set_margin_start(4)
             s.set_margin_end(4)
             return s
 
-        # Group 1: headings
-        bar.append(label_btn("H1", "Heading 1", lambda *_: self._heading(1)))
-        bar.append(label_btn("H2", "Heading 2", lambda *_: self._heading(2)))
-        bar.append(label_btn("H3", "Heading 3", lambda *_: self._heading(3)))
-        bar.append(sep())
-        # Group 2: inline formatting
-        bar.append(icon_btn("format-text-bold-symbolic",
-                             "Bold (Ctrl+B)", lambda *_: self._wrap("**", "**", "bold text")))
-        bar.append(icon_btn("format-text-italic-symbolic",
-                             "Italic (Ctrl+I)", lambda *_: self._wrap("*", "*", "italic text")))
-        bar.append(icon_btn("format-text-strikethrough-symbolic",
-                             "Strikethrough", lambda *_: self._wrap("~~", "~~", "text")))
-        bar.append(sep())
-        # Group 3: slide structure — put early so they survive toolbar clipping
+        # Slide structure — the separators that turn prose into slides.
         bar.append(icon_btn("list-add-symbolic",
-                             "New slide (---)", lambda *_: self._new_slide()))
+                            "New slide (---)", lambda *_: self._new_slide()))
         bar.append(icon_btn("view-dual-symbolic",
-                             "Two columns (|||)", lambda *_: self._two_columns()))
+                            "Two columns (|||)", lambda *_: self._two_columns()))
         bar.append(icon_btn("document-edit-symbolic",
-                             "Speaker notes (^^^)", lambda *_: self._speaker_notes()))
+                            "Speaker notes (^^^)", lambda *_: self._speaker_notes()))
         bar.append(sep())
-        # Group 4: find — keyboard shortcuts exist but toolbar access matters
-        bar.append(icon_btn("edit-find-symbolic",
-                             "Find (Ctrl+F)", lambda *_: self.show_find()))
-        bar.append(icon_btn("edit-find-replace-symbolic",
-                             "Find and replace (Ctrl+H)",
-                             lambda *_: self.show_find_replace()))
-        bar.append(sep())
-        # Group 5: insertion
-        bar.append(icon_btn("insert-link-symbolic",
-                             "Insert link (Ctrl+K)", lambda *_: self._link()))
 
+        # Inserts that need a popover anchored to a real button.
         self._img_toolbar_btn = icon_btn(
             "insert-image-symbolic", "Insert image",
             lambda *_: (self._insert_image_cb() if self._insert_image_cb
@@ -2234,26 +2302,22 @@ class Editor(Gtk.Box):
         bar.append(self._img_toolbar_btn)
 
         self._tbl_toolbar_btn = icon_btn(
-            'view-grid-symbolic', 'Insert table',
+            "view-grid-symbolic", "Insert table",
             lambda *_: self._open_table_popover(self._tbl_toolbar_btn)
         )
         bar.append(self._tbl_toolbar_btn)
         bar.append(sep())
-        # Group 6: block formatting
-        bar.append(icon_btn("format-text-plaintext-symbolic",
-                             "Inline code", lambda *_: self._wrap("`", "`", "code")))
-        bar.append(label_btn("{ }", "Code block", lambda *_: self._code_block()))
-        bar.append(sep())
-        bar.append(icon_btn("format-indent-more-symbolic",
-                             "Blockquote", lambda *_: self._line_prefix("> ")))
-        bar.append(icon_btn("view-list-bullet-symbolic",
-                             "Bullet list", lambda *_: self._line_prefix("- ")))
-        bar.append(icon_btn("view-list-ordered-symbolic",
-                             "Numbered list", lambda *_: self._line_prefix("1. ")))
-        bar.append(sep())
-        bar.append(icon_btn("chat-message-new-symbolic",
-                             "Insert slide comment",
-                             lambda *_: self.insert_comment()))
+
+        overflow = Gtk.MenuButton()
+        overflow.set_icon_name("view-more-symbolic")
+        overflow.set_tooltip_text("Formatting and find")
+        overflow.update_property(
+            [Gtk.AccessibleProperty.LABEL], ["Formatting and find"]
+        )
+        overflow.add_css_class("flat")
+        overflow.set_menu_model(self._build_overflow_menu())
+        bar.append(overflow)
+
         return bar
 
     # ── Formatting actions ────────────────────────────────────────────────────
@@ -2269,11 +2333,23 @@ class Editor(Gtk.Box):
         self._buffer.place_cursor(insert)
         self._view.grab_focus()
 
+    def _selection_bounds(self):
+        """
+        Return (start, end) iters for the selection, or None if there is none.
+
+        PyGObject's override of gtk_text_buffer_get_selection_bounds() drops
+        the C function's gboolean and returns an empty tuple when nothing is
+        selected — never the three values the C signature suggests.
+        """
+        bounds = self._buffer.get_selection_bounds()
+        return bounds if bounds else None
+
     def _get_selection(self):
-        if self._buffer.get_has_selection():
-            _ok, start, end = self._buffer.get_selection_bounds()
-            return self._buffer.get_text(start, end, True), True
-        return "", False
+        bounds = self._selection_bounds()
+        if bounds is None:
+            return "", False
+        start, end = bounds
+        return self._buffer.get_text(start, end, True), True
 
     def _replace_selection(self, text: str) -> None:
         self._buffer.begin_user_action()
