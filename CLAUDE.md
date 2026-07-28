@@ -57,8 +57,9 @@ The codebase lives entirely under `src/presence/` and splits into two layers:
 
 - `application.py` / `window.py` — app lifecycle and main window.
 - `editor.py` — GtkSourceView-based Markdown editor with slide-number badges in the gutter.
-- `converter.py` — `Converter(GObject.Object)` runs conversion on a background thread; emits `conversion-started / conversion-complete / conversion-failed` GObject signals and handles watch-mode polling.
-- `sidebar.py` — thumbnail strip.
+- `converter.py` — `Converter(GObject.Object)`, the two-speed render pipeline. `build_preview()` is the fast path: Markdown → HTML for one slide, synchronous, milliseconds, drives the live canvas. `convert()` is the slow path: Markdown → HTML → PDF → thumbnails on a background thread, emitting `conversion-started / conversion-complete / conversion-failed`; it also handles watch-mode polling. Both share the cached theme/CSS resolution in `_render_context()`.
+- `preview.py` — `SlideCanvas`, the live pane showing whichever slide the cursor is in. Renders HTML in a WebKit view (JavaScript disabled) and fits it with the view's zoom level; a `Gtk.DrawingArea` acts as a size sentinel because GTK 4 has no widget resize signal and the `size_allocate` vfunc is not delivered to Python subclasses of `Gtk.Box`.
+- `sidebar.py` — thumbnail strip (rendered from the PDF, so it updates on build rather than on keystroke).
 - `presenter.py` — presenter view (current slide + notes + timer).
 - `theme_panel.py` / `theme_editor.py` / `theme_manager_ui.py` — theme browser and editor UI.
 - `session.py` — persistence: window state, recent files, editor prefs, recovery files.

@@ -106,12 +106,20 @@ def md_to_html_slides(
     height:   int = 720,
     theme_bg: str = "#ffffff",
     base_url: "str | None" = None,
+    only_index: "int | None" = None,
 ) -> tuple[str, list[dict]]:
     """
     Render all slides to a complete HTML string.
 
     Returns (html, slide_info) where slide_info is a list of
     {'title': str, 'notes': str} dicts used by the thumbnail index.
+
+    When *only_index* is given, the returned document contains just that one
+    slide's markup — slide numbering and title-slide detection still consider
+    the whole deck, so the fragment is identical to the one the full document
+    would contain.  Used by the live canvas, which only ever shows one slide
+    and should not pay for markup it will not display.  *slide_info* always
+    covers every slide.
     """
     slide_htmls = []
     slide_info  = []
@@ -137,6 +145,11 @@ def md_to_html_slides(
         })
 
         page_num = i if first_is_title else i + 1
+
+        # Markdown rendering is the only costly step here; skip it entirely
+        # for slides the caller will not display.
+        if only_index is not None and i != only_index:
+            continue
 
         if title_slide:
             html_frag = _render_title_slide(cleaned_md, meta, logo_b64)

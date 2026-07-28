@@ -19,6 +19,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, Gio, GLib, Gdk, Pango
 
 from .editor     import Editor
+from .preview    import SlideCanvas
 from .sidebar    import Sidebar
 from .theme_panel    import ThemePanel
 from .settings_dialog import SettingsDialog
@@ -92,6 +93,8 @@ class MainWindow(Adw.ApplicationWindow):
         if state.get("maximized"):
             self.maximize()
         self._theme_panel_open: bool = state.get("theme_panel_visible", False)
+        self._canvas_open:      bool = state.get("canvas_visible", True)
+        self._canvas_position:  int  = state.get("canvas_position", 0)
 
         self._file_path:     Path | None = None
         self._output_path:   Path | None = None
@@ -118,6 +121,10 @@ class MainWindow(Adw.ApplicationWindow):
         self._cursor_sync_source: int | None = None
         # Cache for cursor-sync: avoid re-parsing unchanged text every 300ms
         self._cursor_sync_cache: tuple[str, list[int]] | None = None
+        # Slide the cursor is currently in — drives the live canvas
+        self._current_slide: int = 0
+        # Debounce source for saving the canvas divider position
+        self._canvas_pos_source: int | None = None
 
         prefs = load_editor_prefs()
 
@@ -197,6 +204,7 @@ class MainWindow(Adw.ApplicationWindow):
 
         self._sidebar     = Sidebar()
         self._editor      = Editor()
+        self._canvas      = SlideCanvas()
         self._theme_panel = ThemePanel()
 
         self._sidebar.connect("slide-selected",       self._on_slide_selected)
@@ -206,6 +214,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._editor.connect_undo_notify(self._on_undo_state_changed)
         self._editor.set_insert_image_callback(self._on_insert_image)
         self._editor.connect("changed",               self._on_editor_changed)
+        self._editor.connect("live-changed",          self._on_editor_live_changed)
         self._theme_panel.connect("rebuild-needed",   self._on_theme_panel_rebuild)
 
         # Right sidebar: theme panel shown inline via a Revealer.
@@ -229,8 +238,30 @@ class MainWindow(Adw.ApplicationWindow):
         panel_box.append(self._theme_panel)
         self._theme_revealer.set_child(panel_box)
 
+        # Editor ‖ live canvas.  A Paned rather than a fixed split so the
+        # writer decides how much of the window is source and how much is
+        # slide; the divider position is persisted between sessions.
+        self._canvas_paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        self._canvas_paned.set_hexpand(True)
+        self._canvas_paned.set_vexpand(True)
+        self._canvas_paned.set_resize_start_child(True)
+        self._canvas_paned.set_resize_end_child(True)
+        self._canvas_paned.set_shrink_start_child(False)
+        self._canvas_paned.set_shrink_end_child(False)
+        self._editor.set_size_request(360, -1)
+        self._canvas.set_size_request(280, -1)
+        self._canvas_paned.set_start_child(self._editor)
+        self._canvas_paned.set_end_child(self._canvas)
+        self._canvas_paned.connect(
+            "notify::position", self._on_canvas_position_changed
+        )
+        # Catches every way the canvas can come back — the toggle, the
+        # breakpoint releasing on a wider window — so it is never restored
+        # showing a slide from before the document changed.
+        self._canvas.connect("notify::visible", self._on_canvas_visibility)
+
         editor_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        editor_row.append(self._editor)
+        editor_row.append(self._canvas_paned)
         editor_row.append(self._theme_revealer)
 
         # Left sidebar: thumbnail strip, collapses to drawer on narrow windows.
@@ -252,10 +283,29 @@ class MainWindow(Adw.ApplicationWindow):
         self._toast_overlay.set_child(self._left_split)
         root.set_content(self._toast_overlay)
 
-        # Collapse thumbnail sidebar below 800 px.
+        # Apply persisted canvas visibility.  Hiding the widget is enough —
+        # GtkPaned gives the whole width to the remaining child.
+        self._canvas.set_visible(self._canvas_open)
+        if self._canvas_position > 0:
+            self._canvas_paned.set_position(self._canvas_position)
+
+        # Only one breakpoint applies at a time, so the narrower condition
+        # must repeat what the wider one does and be added last.
+        #
+        # Below 1180 px there is not enough room for source and slide
+        # side by side, so the canvas steps aside; below 800 px the
+        # thumbnail sidebar becomes a drawer as well.  Both are restored
+        # to their previous state when the window grows again.
+        bp_canvas = Adw.Breakpoint.new(
+            Adw.BreakpointCondition.parse("max-width: 1180px")
+        )
+        bp_canvas.add_setter(self._canvas, "visible", False)
+        self.add_breakpoint(bp_canvas)
+
         bp_sidebar = Adw.Breakpoint.new(
             Adw.BreakpointCondition.parse("max-width: 800px")
         )
+        bp_sidebar.add_setter(self._canvas, "visible", False)
         bp_sidebar.add_setter(self._left_split, "collapsed", True)
         self.add_breakpoint(bp_sidebar)
 
@@ -313,6 +363,18 @@ class MainWindow(Adw.ApplicationWindow):
         self._spinner = Gtk.Spinner()
         self._spinner.set_visible(False)
         bar.pack_end(self._spinner)
+
+        # Live canvas toggle — shows the slide the cursor is in (F8)
+        self._canvas_btn = Gtk.ToggleButton()
+        self._canvas_btn.set_icon_name("view-reveal-symbolic")
+        self._canvas_btn.set_tooltip_text("Show live canvas (F8)")
+        self._canvas_btn.update_property(
+            [Gtk.AccessibleProperty.LABEL], ["Show live canvas"]
+        )
+        self._canvas_btn.add_css_class("flat")
+        self._canvas_btn.set_active(self._canvas_open)
+        self._canvas_btn.connect("toggled", self._on_canvas_toggled)
+        bar.pack_end(self._canvas_btn)
 
         # Theme panel toggle — right sidebar visibility (F10)
         self._theme_panel_btn = Gtk.ToggleButton()
@@ -531,8 +593,9 @@ class MainWindow(Adw.ApplicationWindow):
             ("bold",   lambda *_: self._editor.bold(),         "<primary>b"),
             ("italic", lambda *_: self._editor.italic(),       "<primary>i"),
             ("link",   lambda *_: self._editor.insert_link(),  "<primary>k"),
-            # Sidebar / preview panel toggles with F9/F10 (#75)
+            # Panel toggles: slides F9, canvas F8, themes F10 (#75)
             ("toggle-sidebar",       self._on_toggle_sidebar,       "F9"),
+            ("toggle-canvas",        self._on_toggle_canvas,        "F8"),
             ("toggle-theme-panel",   self._on_toggle_theme_panel,   "F10"),
             ("ai-import",            self._on_ai_import,            None),
             ("ai-missing-images",    self._on_ai_missing_images,    None),
@@ -572,7 +635,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._converter.stop_watch()
         for attr in ("_autosave_source", "_size_save_source",
                      "_initial_convert_source", "_sidebar_update_source",
-                     "_cursor_sync_source"):
+                     "_cursor_sync_source", "_canvas_pos_source"):
             src = getattr(self, attr, None)
             if src is not None:
                 GLib.source_remove(src)
@@ -679,6 +742,10 @@ class MainWindow(Adw.ApplicationWindow):
         self._editor.set_base_path(path)
         self._editor.set_text(text)
         self._sidebar.update_from_text(text)
+        # set_text() suppresses the editor's change signals, so drive the
+        # canvas directly — a freshly opened file starts at slide 1.
+        self._current_slide = 0
+        self._refresh_canvas(text)
         display = self._pres_path or path
         self._set_title(display.name)
         self._modified = False
@@ -703,6 +770,7 @@ class MainWindow(Adw.ApplicationWindow):
         display = self._pres_path or self._file_path
         base = display.name if display else UNTITLED
         self._set_title(base + " •")
+        self._refresh_canvas(text)
         self._trigger_convert()
 
     def _save(self) -> bool:
@@ -926,6 +994,78 @@ class MainWindow(Adw.ApplicationWindow):
         self._sidebar.update_from_text(text)
         return GLib.SOURCE_REMOVE
 
+    # ── Live canvas ───────────────────────────────────────────────────────────
+
+    def _on_editor_live_changed(self, editor: Editor, text: str) -> None:
+        """Editor settled for 150 ms — re-render the slide under the cursor."""
+        self._refresh_canvas(text)
+
+    def _canvas_base_dir(self) -> Path:
+        """Directory relative image paths in the document resolve against."""
+        if self._file_path is not None:
+            return self._file_path.parent
+        return Path.home()
+
+    def _refresh_canvas(self, text: str | None = None) -> None:
+        """
+        Render the current slide into the canvas.
+
+        Does nothing while the canvas is hidden or WebKit is missing, so a
+        writer who has closed the pane pays nothing for it.
+        """
+        if not self._canvas.get_visible() or not self._canvas.available:
+            return
+
+        if text is None:
+            text = self._editor.get_text()
+
+        try:
+            preview = self._converter.build_preview(
+                text, self._canvas_base_dir(), self._current_slide
+            )
+        except ValueError as exc:
+            # Expected, recoverable states — an empty or slide-less document.
+            self._canvas.show_message("Nothing to show yet", str(exc))
+            return
+        except Exception as exc:
+            log.debug("Canvas render failed", exc_info=True)
+            self._canvas.show_message(
+                "Cannot render this slide", _friendly_error(str(exc))
+            )
+            return
+
+        self._canvas.show_slide(
+            preview.html, self._canvas_base_dir(),
+            preview.width, preview.height,
+        )
+
+    def _on_canvas_toggled(self, btn: Gtk.ToggleButton) -> None:
+        """Show or hide the live canvas (F8)."""
+        visible = btn.get_active()
+        self._canvas.set_visible(visible)
+        self._canvas_open = visible
+        self._save_window_state()
+
+    def _on_canvas_visibility(self, canvas: SlideCanvas, _param) -> None:
+        """Re-render whenever the canvas becomes visible again."""
+        if canvas.get_visible():
+            self._refresh_canvas()
+
+    def _on_toggle_canvas(self, *_) -> None:
+        self._canvas_btn.set_active(not self._canvas_btn.get_active())
+
+    def _on_canvas_position_changed(self, paned: Gtk.Paned, _param) -> None:
+        """Persist the divider position, debounced against drag jitter."""
+        if not self._canvas.get_visible():
+            return
+        self._canvas_position = paned.get_position()
+        self._debounce("_canvas_pos_source", 400, self._flush_canvas_position)
+
+    def _flush_canvas_position(self) -> bool:
+        self._canvas_pos_source = None
+        self._save_window_state()
+        return GLib.SOURCE_REMOVE
+
     def _sync_sidebar_to_cursor(self) -> bool:
         """
         Poll the editor cursor position every 300 ms and highlight the
@@ -934,9 +1074,10 @@ class MainWindow(Adw.ApplicationWindow):
         Caches the parsed slide-offset list so we only re-parse the document
         when the text has actually changed — avoids calling split_slides()
         3× per second on every keystroke.
+
+        The same position drives the live canvas, which always shows the
+        slide the cursor is in.
         """
-        if not self._slide_info:
-            return GLib.SOURCE_CONTINUE
         try:
             from .slides.utils import compute_slide_offsets
             text   = self._editor.get_text()
@@ -958,7 +1099,14 @@ class MainWindow(Adw.ApplicationWindow):
                 else:
                     break
 
-            self._sidebar.scroll_to_index(current)
+            if self._slide_info:
+                self._sidebar.scroll_to_index(current)
+
+            # Follow the cursor across slide boundaries.  Edits within one
+            # slide are handled by the live-changed signal instead.
+            if current != self._current_slide:
+                self._current_slide = current
+                self._refresh_canvas(text)
         except Exception:
             log.debug("Cursor sync error", exc_info=True)
 
@@ -976,6 +1124,10 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_slide_selected(self, sidebar: Sidebar, index: int) -> None:
         self._editor.scroll_to_slide(index)
+        # Update the canvas now rather than waiting for the cursor poll —
+        # a click should land on the slide immediately.
+        self._current_slide = index
+        self._refresh_canvas()
 
     def _on_slide_insert_after(self, sidebar: Sidebar, after_index: int) -> None:
         """
@@ -1004,6 +1156,8 @@ class MainWindow(Adw.ApplicationWindow):
         base = display.name if display else UNTITLED
         self._set_title(base + " •")
         self._sidebar.update_from_text(new_text)
+        self._current_slide = insert_at
+        self._refresh_canvas(new_text)
         # Scroll editor to the newly inserted slide
         GLib.idle_add(lambda: (self._editor.scroll_to_slide(insert_at), False))
 
@@ -1030,6 +1184,7 @@ class MainWindow(Adw.ApplicationWindow):
         base = display.name if display else UNTITLED
         self._set_title(base + " •")
         self._sidebar.update_from_text(new_text)
+        self._refresh_canvas(new_text)
 
     def _on_present_clicked(self, *_) -> None:
         """
@@ -1214,12 +1369,7 @@ class MainWindow(Adw.ApplicationWindow):
             # Start hide animation; _on_theme_revealer_state_changed will call
             # set_visible(False) once child-revealed reaches False (animation done).
             self._theme_revealer.set_reveal_child(False)
-        save_window_state({
-            "width":               self.get_width(),
-            "height":              self.get_height(),
-            "maximized":           self.is_maximized(),
-            "theme_panel_visible": visible,
-        })
+        self._save_window_state()
 
     def _on_theme_revealer_state_changed(self, revealer, _param) -> None:
         """After the hide animation completes, remove the panel from layout."""
@@ -1233,7 +1383,12 @@ class MainWindow(Adw.ApplicationWindow):
         self._sidebar_btn.set_active(split.get_show_sidebar())
 
     def _on_theme_panel_rebuild(self, panel) -> None:
-        """ThemePanel emitted rebuild-needed — trigger a conversion."""
+        """ThemePanel emitted rebuild-needed — restyle the canvas, rebuild the PDF."""
+        # Theme files may have been edited in place, so drop the cached CSS
+        # rather than relying on the cache key alone.
+        self._converter.invalidate_render_cache()
+        self._canvas.clear()
+        self._refresh_canvas()
         self._trigger_convert()
 
     def _on_slide_zoom(self, sidebar, index: int) -> None:
@@ -1258,6 +1413,8 @@ class MainWindow(Adw.ApplicationWindow):
             win._sidebar.update_from_text(_STARTER_TEMPLATE)
             win._modified = False          # template is not a user edit
             win.present()
+            # After present(), so the canvas has an allocation to scale into.
+            win._refresh_canvas(_STARTER_TEMPLATE)
         self._check_unsaved(_open_new)
 
     def show_open_dialog(self) -> None:
@@ -1584,13 +1741,19 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _flush_window_state(self) -> bool:
         self._size_save_source = None
-        save_window_state({
-            "width":              self.get_width(),
-            "height":             self.get_height(),
-            "maximized":          self.is_maximized(),
-            "theme_panel_visible": self._theme_panel_btn.get_active(),
-        })
+        self._save_window_state()
         return GLib.SOURCE_REMOVE
+
+    def _save_window_state(self) -> None:
+        """Write the full window state — every caller saves every key."""
+        save_window_state({
+            "width":               self.get_width(),
+            "height":              self.get_height(),
+            "maximized":           self.is_maximized(),
+            "theme_panel_visible": self._theme_panel_btn.get_active(),
+            "canvas_visible":      self._canvas_btn.get_active(),
+            "canvas_position":     self._canvas_position,
+        })
 
     # ── Autosave ──────────────────────────────────────────────────────────────
 

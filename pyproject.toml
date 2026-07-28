@@ -44,3 +44,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Test this checkout, not whichever copy of Presence happens to be installed.
+# Prepended to sys.path, so it wins over any editable install pointing
+# somewhere else.
+pythonpath = ["src"]

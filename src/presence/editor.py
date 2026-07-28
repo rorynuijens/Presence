@@ -1372,9 +1372,14 @@ class Editor(Gtk.Box):
 
     __gsignals__ = {
         "changed": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        # Same edits, shorter fuse — drives the live canvas, which must keep
+        # up with typing.  Kept separate from "changed" so the heavier
+        # sidebar/word-count work stays on the longer debounce.
+        "live-changed": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
     }
 
     DEBOUNCE_MS = 400
+    LIVE_DEBOUNCE_MS = 150
 
     def __init__(self) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -1382,6 +1387,7 @@ class Editor(Gtk.Box):
         self.set_vexpand(True)
 
         self._debounce_source:  int | None = None
+        self._live_debounce_source: int | None = None
         self._base_path:        Path | None = None
         self._insert_image_cb = None
         # Lazily constructed (created on first use, reused thereafter).
@@ -2972,12 +2978,24 @@ class Editor(Gtk.Box):
         self._debounce_source = GLib.timeout_add(
             self.DEBOUNCE_MS, self._emit_changed)
 
+        if self._live_debounce_source is not None:
+            GLib.source_remove(self._live_debounce_source)
+        self._live_debounce_source = GLib.timeout_add(
+            self.LIVE_DEBOUNCE_MS, self._emit_live_changed)
+
     def _emit_changed(self) -> bool:
         self._debounce_source = None
         self.emit("changed", self.get_text())
         return GLib.SOURCE_REMOVE
 
+    def _emit_live_changed(self) -> bool:
+        self._live_debounce_source = None
+        self.emit("live-changed", self.get_text())
+        return GLib.SOURCE_REMOVE
+
     def _on_destroy(self, *_) -> None:
-        if self._debounce_source is not None:
-            GLib.source_remove(self._debounce_source)
-            self._debounce_source = None
+        for attr in ("_debounce_source", "_live_debounce_source"):
+            source = getattr(self, attr, None)
+            if source is not None:
+                GLib.source_remove(source)
+                setattr(self, attr, None)
