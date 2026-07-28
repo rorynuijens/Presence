@@ -64,6 +64,8 @@ The codebase lives entirely under `src/presence/` and splits into two layers:
 - `theme_panel.py` / `theme_editor.py` / `theme_manager_ui.py` — theme browser and editor UI.
 - `session.py` — persistence: window state, recent files, editor prefs, recovery files.
 
+**When a PDF build runs.** Saving does not build. A build happens when the document is opened, when it is explicitly asked for (the header status chip, Ctrl+Return), before anything that consumes the output (Present, Export PDF/HTML/Images, Open PDF — all routed through `MainWindow._with_current_build()`), and on every save only if the user enables "Convert on save" in Settings. The header chip reports whether the built PDF still matches the document, comparing text rather than tracking a modified flag.
+
 ## Slide syntax (key separators)
 
 | Syntax | Effect |

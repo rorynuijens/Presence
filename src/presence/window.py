@@ -147,7 +147,9 @@ class MainWindow(Adw.ApplicationWindow):
         pres_prefs = load_presentation_prefs()
         self._auto_convert: bool = pres_prefs.get('auto_convert', False)
         self._timer_minutes: int = pres_prefs.get('timer_minutes', 0)
-        self._open_presenter_after_convert: bool = False
+        # Callable to run once the build matches the document, if anything is
+        # waiting on it (Present, an export, opening the PDF).
+        self._after_build = None
         # Speaking rate in WPM — default 110, persisted to session.json
         self._speaking_rate: int = pres_prefs.get('speaking_rate', 110)
         # Notes font size in presenter mode — default 22px, persisted on
@@ -816,6 +818,26 @@ class MainWindow(Adw.ApplicationWindow):
         self._trigger_convert()
 
     def _save(self) -> bool:
+        """
+        Write the document, and rebuild only if asked to on every save.
+
+        Saving used to always run a full PDF build, which put seconds between
+        Ctrl+S and being able to type again.  The live canvas already shows
+        the slide, and the status chip says when the PDF has fallen behind,
+        so the build is now something you ask for — from the chip, Ctrl+Return,
+        Present, or an export.  Settings still offers "Auto-convert on save"
+        for anyone who wants the old behaviour; that preference previously had
+        no effect, because the condition guarding it was always true in GUI
+        mode.
+        """
+        if not self._write_document():
+            return False
+        if self._auto_convert:
+            self._trigger_convert()
+        return True
+
+    def _write_document(self) -> bool:
+        """Write the document to disk. Never builds."""
         if self._file_path is None:
             return self._save_as_dialog()
         try:
@@ -830,13 +852,6 @@ class MainWindow(Adw.ApplicationWindow):
             save_last_file(display)
             # Delete any orphaned recovery file (fixes #59)
             delete_recovery_file(display)
-            # Trigger conversion: always when not in watch mode (existing
-            # behaviour), or immediately on every save if auto-convert is on.
-            # watching is always False in GUI mode (watch is CLI-only);
-            # the check is kept so that if watch is ever started externally,
-            # auto-save does not double-convert.
-            if not self._converter.watching or self._auto_convert:
-                self._trigger_convert()
             return True
         except OSError as e:
             self._show_error(f"Could not save: {e}")
@@ -907,8 +922,10 @@ class MainWindow(Adw.ApplicationWindow):
             input_path  = self._temp_md
             output_path = self._temp_pdf
         else:
-            if self._modified:
-                self._save()
+            # The converter reads from disk, so pending edits must land first.
+            # _write_document() rather than _save() so auto-convert cannot
+            # recurse back into here.
+            if self._modified and not self._write_document():
                 return
             self._cleanup_temp_files()
             input_path  = self._file_path
@@ -1231,22 +1248,27 @@ class MainWindow(Adw.ApplicationWindow):
         self._refresh_canvas(new_text)
         self._update_build_chip()
 
+    def _with_current_build(self, action) -> None:
+        """
+        Run *action* against a build that matches the document.
+
+        Anything consuming the PDF or HTML goes through here, so no export
+        or presentation can quietly ship the previous version of the deck.
+        """
+        if self._build_state() == "current" and self._html_uri:
+            action()
+            return
+        self._after_build = action
+        self._trigger_convert()
+
     def _on_present_clicked(self, *_) -> None:
-        """
-        Convert (if the source has changed since last build) then open
-        presenter mode.  If a conversion is already running the presenter
-        will open automatically when it finishes via _on_conversion_complete.
-        """
-        if self._modified or not self._html_uri:
-            # Need a fresh build — queue presenter to open on completion
-            self._open_presenter_after_convert = True
-            self._trigger_convert()
-        else:
-            # Already up to date — open presenter immediately
-            self._open_presenter_after_convert = False
-            self._on_presenter()
+        """Build if the deck has moved on, then open presenter mode."""
+        self._with_current_build(self._on_presenter)
 
     def _on_open_pdf_clicked(self, *_) -> None:
+        self._with_current_build(self._open_built_pdf)
+
+    def _open_built_pdf(self) -> None:
         if not (self._output_path and self._output_path.exists()):
             return
         pdf_path = self._output_path
@@ -1393,10 +1415,10 @@ class MainWindow(Adw.ApplicationWindow):
         if self._presenter_action:
             self._presenter_action.set_enabled(True)
 
-        # If Present was clicked while a build was needed, open now
-        if self._open_presenter_after_convert:
-            self._open_presenter_after_convert = False
-            self._on_presenter()
+        # Anything that was waiting for a current build can run now.
+        if self._after_build is not None:
+            pending, self._after_build = self._after_build, None
+            pending()
 
         # Stop thumbnail spinners before replacing content (#71)
         self._sidebar.set_converting(False)
@@ -1427,7 +1449,8 @@ class MainWindow(Adw.ApplicationWindow):
         # disk, so the chip correctly keeps saying a rebuild is needed.
         self._update_build_chip()
         self._present_btn.set_sensitive(True)
-        self._open_presenter_after_convert = False
+        # Whatever was queued cannot run against a failed build.
+        self._after_build = None
         # Stop thumbnail spinners on failure too (#71)
         self._sidebar.set_converting(False)
         # Show a user-friendly message rather than a raw exception string (#87)
@@ -1700,9 +1723,6 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_export_html(self, *_) -> None:
         """Save a self-contained copy of the generated HTML file."""
-        if not self._html_uri:
-            self._show_error("Convert the presentation first.")
-            return
         dialog = Gtk.FileDialog()
         dialog.set_title("Export HTML")
         if self._pres_path:
@@ -1736,7 +1756,11 @@ class MainWindow(Adw.ApplicationWindow):
                 f"Cannot write to '{dest.parent}' — permission denied."
             )
             return
-        # The HTML file is already on disk next to the PDF; copy it.
+        # Build first if the deck has moved on, then copy the HTML that sits
+        # next to the PDF.
+        self._with_current_build(lambda: self._copy_built_html(dest))
+
+    def _copy_built_html(self, dest: Path) -> None:
         from urllib.parse import urlparse
         from urllib.request import url2pathname
         src_path = Path(url2pathname(urlparse(self._html_uri).path))
@@ -1749,9 +1773,6 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_export_images(self) -> None:
         """Export each slide as a full-resolution PNG into a user-chosen folder."""
-        if not self._html_uri or not self._thumbnails:
-            self._show_error("Convert the presentation first.")
-            return
         dialog = Gtk.FileDialog()
         dialog.set_title("Choose Export Folder")
         self._active_file_dialog = dialog
@@ -1769,7 +1790,9 @@ class MainWindow(Adw.ApplicationWindow):
         folder = Path(path_str)
         if not folder.is_dir():
             return
+        self._with_current_build(lambda: self._render_slide_images(folder))
 
+    def _render_slide_images(self, folder: Path) -> None:
         # Use the high-res renderer so exported PNGs are crisp at 1920px wide.
         from .slides.thumbnails_render import render_slides_hires
 
