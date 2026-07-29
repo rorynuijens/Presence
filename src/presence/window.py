@@ -233,6 +233,8 @@ class MainWindow(Adw.ApplicationWindow):
         self._editor.connect("live-changed",          self._on_editor_live_changed)
         self._editor.set_image_context_callback(self._on_image_context)
         self._theme_panel.connect("rebuild-needed",   self._on_theme_panel_rebuild)
+        self._theme_panel.connect("theme-changed",    self._on_panel_theme_changed)
+        self._theme_panel.connect("ratio-changed",    self._on_panel_ratio_changed)
 
         # Right sidebar: theme panel shown inline via a Revealer.
         # Using a Revealer (not a nested OverlaySplitView) avoids the overlay
@@ -1522,6 +1524,47 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_left_split_show_changed(self, split, _param) -> None:
         self._sidebar_btn.set_active(split.get_show_sidebar())
+
+    def _on_panel_theme_changed(self, panel, slug: str) -> None:
+        self._sync_frontmatter_key("theme", slug)
+
+    def _on_panel_ratio_changed(self, panel, ratio: str) -> None:
+        self._sync_frontmatter_key("ratio", ratio)
+
+    def _sync_frontmatter_key(self, key: str, value: str) -> None:
+        """
+        Write *key* into the document's frontmatter when it pins one.
+
+        A document's frontmatter outranks the app's own setting, so a deck
+        carrying `theme: light` ignored the panel entirely: the panel moved,
+        a build ran, and the output was identical.  The panel is the control
+        for the document's settings, so it edits the document — which also
+        keeps the choice with the file rather than in this machine's prefs.
+
+        Documents without the key are left alone; there the app setting
+        already applies, and adding keys nobody asked for would be worse.
+        """
+        text = self._editor.get_text()
+        block = raw_frontmatter(text)
+        if not block:
+            return
+
+        pattern = re.compile(rf"^([ \t]*{re.escape(key)}[ \t]*:[ \t]*)(.*)$",
+                             re.MULTILINE)
+        m = pattern.search(block)
+        if m is None or m.group(2).strip() == value:
+            return
+
+        new_block = block[:m.start()] + m.group(1) + value + block[m.end():]
+        new_text = new_block + text[len(block):]
+
+        self._editor.set_text_as_user_action(new_text)
+        self._modified = True
+        display = self._pres_path or self._file_path
+        self._set_title((display.name if display else UNTITLED) + " •")
+        self._sidebar.update_from_text(new_text)
+        self._refresh_canvas(new_text)
+        self._update_build_chip()
 
     def _on_theme_panel_rebuild(self, panel) -> None:
         """ThemePanel emitted rebuild-needed — restyle the canvas, rebuild the PDF."""
