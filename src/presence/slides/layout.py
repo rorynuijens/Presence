@@ -22,10 +22,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import re
+
 from .splitter import _IMAGE_RE, IMAGE_POSITIONS
 
-__all__ = ["LayoutPlan", "positions_specified", "choose_layout",
-           "gallery_columns"]
+_SIZE_TOKEN = re.compile(r"^(\d{1,3})%?$")
+
+__all__ = ["LayoutPlan", "positions_specified", "sizes_specified",
+           "choose_layout", "gallery_columns", "auto_size", "cell_fit"]
 
 
 # Position pairs the two-image renderer understands. Anything else used to
@@ -49,6 +53,7 @@ class LayoutPlan:
     kind:    str
     columns: int = 0          # gallery only
     spans:   tuple = field(default_factory=tuple)   # gallery: cells spanning 2
+    size:    str | None = None   # single: chosen width, when none was written
 
 
 def positions_specified(slide_md: str) -> list[bool]:
@@ -63,6 +68,54 @@ def positions_specified(slide_md: str) -> list[bool]:
             for token in match.group(1).split("|"))
         for match in _IMAGE_RE.finditer(slide_md)
     ]
+
+
+def sizes_specified(slide_md: str) -> list[bool]:
+    """Whether each image carries a size token, in order."""
+    return [
+        any(_SIZE_TOKEN.match(token.strip()) and
+            1 <= int(_SIZE_TOKEN.match(token.strip()).group(1)) <= 100
+            for token in match.group(1).split("|"))
+        for match in _IMAGE_RE.finditer(slide_md)
+    ]
+
+
+def auto_size(word_count: int) -> str:
+    """
+    How much width an unsized image should take beside *word_count* words.
+
+    A fixed half-and-half wastes the slide when there is a line of text, and
+    crowds it when there is a paragraph. The steps are coarse on purpose:
+    layout that shifts with every word typed would be worse than one that is
+    merely imperfect.
+    """
+    if word_count <= 12:
+        return "60"
+    if word_count <= 40:
+        return "50"
+    return "40"
+
+
+def cell_fit(image_aspect: "float | None", cell_aspect: float) -> str:
+    """
+    Whether a gallery cell should crop its image or letterbox it.
+
+    Cropping looks better than letterboxing until the shapes disagree badly,
+    at which point cover throws away most of the picture — a portrait in a
+    landscape cell keeps a vertical strip of itself. Past that point showing
+    the whole image, bars and all, is the lesser loss.
+
+    The band is wide because the cells are: a 16:9 slide minus its heading
+    leaves a short, wide area, so cells run around 2.5:1 and even an ordinary
+    landscape photo is a "mismatch" against them. Judging mildly-off shapes
+    as mismatches would letterbox nearly everything and leave the grid full
+    of gaps. Only genuine disagreement — a portrait in a wide cell, or the
+    reverse — earns the bars.
+    """
+    if not image_aspect or cell_aspect <= 0:
+        return "cover"
+    ratio = image_aspect / cell_aspect
+    return "cover" if 0.45 <= ratio <= 2.2 else "contain"
 
 
 def gallery_columns(count: int) -> tuple[int, tuple]:
@@ -82,7 +135,9 @@ def gallery_columns(count: int) -> tuple[int, tuple]:
     return 3, ()
 
 
-def choose_layout(has_text: bool, images: list, specified: list) -> LayoutPlan:
+def choose_layout(has_text: bool, images: list, specified: list,
+                  word_count: int = 0,
+                  sized: "list | None" = None) -> LayoutPlan:
     """
     Pick a layout for a slide.
 
@@ -98,12 +153,18 @@ def choose_layout(has_text: bool, images: list, specified: list) -> LayoutPlan:
     def was_specified(i: int) -> bool:
         return specified[i] if i < len(specified) else False
 
+    def was_sized(i: int) -> bool:
+        return bool(sized) and i < len(sized) and sized[i]
+
     if count == 1:
         # An image alone on a slide should fill it. With text present, or
         # with a position the writer chose, leave today's behaviour alone.
         if not has_text and not was_specified(0):
             return LayoutPlan("bleed")
-        return LayoutPlan("single")
+        # Only choose a width where none was written; a size the writer typed
+        # is a choice like any other.
+        size = None if was_sized(0) else auto_size(word_count)
+        return LayoutPlan("single", size=size)
 
     if count == 2:
         pair = (images[0]["layout"].get("position"),

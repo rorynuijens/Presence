@@ -88,8 +88,11 @@ def _parse_alt(alt: str) -> tuple[str, dict]:
     Format: "Human description|position|size|gradient|opacityN|fade-dir|fit|focal"
     Tokens are order-insensitive and separated by |.
     """
+    # position starts unset: "the writer did not say" is a state the panel
+    # has to be able to show, and seeding "right" here is what made it look
+    # like a choice had been made.
     layout: dict = {
-        "position": "right", "size": "50", "gradient": True,
+        "position": None, "size": "50", "gradient": True,
         "opacity": 75, "fade": None,
         "fit": "cover", "focal": "focal-center",
         "grayscale": 0, "blur": 0, "tint": None,
@@ -140,7 +143,9 @@ def _build_alt(desc: str, layout: dict) -> str:
     tokens = []
     if desc.strip():
         tokens.append(desc.strip())
-    tokens.append(layout.get("position", "right"))
+    position = layout.get("position")
+    if position:
+        tokens.append(position)
     tokens.append(layout.get("size", "50"))
     tokens.append("gradient" if layout.get("gradient", True) else "nogradient")
     opacity = layout.get("opacity", 75)
@@ -261,6 +266,7 @@ class ImageLayoutControls(Gtk.Box):
         "top":        "Top",
         "bottom":     "Bottom",
         "background": "Background",
+        "auto":       "Auto",
     }
 
     def __init__(self, insert_cb: Callable[[str, str], None],
@@ -270,7 +276,7 @@ class ImageLayoutControls(Gtk.Box):
         self._dismiss_cb = dismiss_cb
         self._edit_cb: Callable[[dict, str], None] | None = None
         self._edit_mode  = False
-        self._active_pos       = "right"
+        self._active_pos       = None
         self._active_size      = "50"
         self._active_opacity   = 75
         self._active_fade      = "left"   # default for "right" position
@@ -356,6 +362,13 @@ class ImageLayoutControls(Gtk.Box):
         bg_btn = self._make_pos_button("background")
         bg_btn.set_hexpand(True)
 
+        # Auto is a real option, not the absence of one: it leaves the
+        # position out of the document so the slide arranges the image, which
+        # is also what happens to every image nobody has positioned.
+        auto_btn = self._make_pos_button("auto")
+        auto_btn.set_hexpand(True)
+
+        pos_grid.append(auto_btn)
         pos_grid.append(top_row)
         pos_grid.append(bot_row)
         pos_grid.append(bg_btn)
@@ -803,8 +816,9 @@ class ImageLayoutControls(Gtk.Box):
     def _refresh_pos_buttons(self) -> None:
         """Update selected/unselected styling on all position buttons."""
         is_bg = self._active_pos == "background"
+        active = self._active_pos or "auto"
         for token, btn in self._pos_buttons.items():
-            if token == self._active_pos:
+            if token == active:
                 btn.add_css_class("ilp-selected")
             else:
                 btn.remove_css_class("ilp-selected")
@@ -907,7 +921,7 @@ class ImageLayoutControls(Gtk.Box):
         """Reset to defaults and open for inserting a new image."""
         self._edit_mode        = False
         self._edit_cb          = None
-        self._active_pos       = "right"
+        self._active_pos       = None
         self._active_size      = "50"
         self._active_opacity   = 75
         self._active_fade      = _POSITION_DEFAULT_FADE["right"]
@@ -964,7 +978,7 @@ class ImageLayoutControls(Gtk.Box):
         """
         self._edit_mode        = True
         self._edit_cb          = edit_cb
-        self._active_pos       = layout.get("position", "right")
+        self._active_pos       = layout.get("position")
         self._active_size      = layout.get("size", "50")
         self._active_opacity   = layout.get("opacity", 75)
         # Fall back to the position default when the document has no fade token.
@@ -1052,7 +1066,9 @@ class ImageLayoutControls(Gtk.Box):
     # ── Control signal handlers ───────────────────────────────────────────────
 
     def _on_pos_clicked(self, btn: Gtk.Button, token: str) -> None:
-        self._active_pos  = token
+        # "auto" is stored as no position at all; everything downstream keys
+        # off its absence.
+        self._active_pos  = None if token == "auto" else token
         self._active_fade = _POSITION_DEFAULT_FADE.get(token, "left")
         self._refresh_pos_buttons()
         self._refresh_fade_buttons()

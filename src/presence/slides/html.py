@@ -92,7 +92,9 @@ def _apply_img_effects(
 from .splitter import (is_title_slide, extract_speaker_notes,
                           extract_images, infer_slide_title, split_two_columns)
 from .renderer    import render_slide_content
-from .layout      import choose_layout, positions_specified
+from .layout      import (choose_layout, positions_specified,
+                          sizes_specified, cell_fit)
+from .utils       import image_aspect
 from .frontmatter import extract_slide_directives
 from .utils       import logo_img_tag, progress_bar_html
 
@@ -166,13 +168,18 @@ def md_to_html_slides(
         elif images:
             # Ask what the slide should be rather than branching on how many
             # images it happens to have; see layout.py for the rules.
-            plan = choose_layout(bool(cleaned_md.strip()), images,
-                                 positions_specified(slide_body))
+            plan = choose_layout(
+                bool(cleaned_md.strip()), images,
+                positions_specified(slide_body),
+                word_count=len(cleaned_md.split()),
+                sized=sizes_specified(slide_body),
+            )
             if plan.kind == "gallery":
                 html_frag = _render_gallery_slide(
                     cleaned_md, images, plan,
                     page_num, total_numbered, logo_b64, theme_override,
-                    height=height, base_url=base_url, line_offset=line_offset,
+                    width=width, height=height,
+                    base_url=base_url, line_offset=line_offset,
                 )
             elif plan.kind == "pair":
                 html_frag = _render_two_image_slide(
@@ -183,6 +190,8 @@ def md_to_html_slides(
                 )
             else:
                 layout = images[0]["layout"]
+                if plan.size is not None:
+                    layout = {**layout, "size": plan.size}
                 if plan.kind == "bleed":
                     # An image alone on a slide fills it; the writer chose no
                     # position, so the seeded "right at 50%" is not a choice
@@ -465,6 +474,7 @@ def _render_gallery_slide(
     logo_b64:       str | None,
     theme_override: str = "",
     *,
+    width:          int = 1280,
     height:         int = 720,
     base_url:       "str | None" = None,
     line_offset:    int | None = None,
@@ -476,6 +486,25 @@ def _render_gallery_slide(
     pictures, and it exists because the alternative was dropping them: a
     slide with three images used to show one.
     """
+    text = render_slide_content(slide_md, line_offset)
+
+    # Geometry first: the cells need their own size before they can be asked
+    # whether cropping suits the picture in them.
+    #
+    # .slide reserves 8% of the width each side, 8% above and 11% below.
+    # Text, when there is any, takes a quarter of the remaining height. Rows
+    # must end up definite: an image at height:100% inside an indefinite row
+    # collapses, and WeasyPrint then renders the whole grid empty.
+    gap        = int(height * 0.025)
+    content_w  = width * (1 - 0.16)
+    content_h  = height * (1 - 0.08 - 0.11)
+    cell_w     = (content_w - gap * (plan.columns - 1)) / plan.columns
+    tracks     = len(images) + sum(1 for i in range(len(images))
+                                   if (i + 1) in plan.spans)
+    rows       = max(1, -(-tracks // plan.columns))
+    reserved   = content_h * 0.24 if text else 0
+    row_h      = max(40, int((content_h - reserved - gap * (rows - 1)) / rows))
+
     cells = []
     for index, image in enumerate(images):
         raw_src = image.get("src", "")
@@ -488,29 +517,21 @@ def _render_gallery_slide(
                                        layout.get("grayscale", 0),
                                        layout.get("blur", 0))
         src = _html.escape(_urlquote(effective, safe="+/=:;,"))
-        span = ' data-span="2"' if (index + 1) in plan.spans else ""
+        spans_two = (index + 1) in plan.spans
+        span = ' data-span="2"' if spans_two else ""
+        this_w = cell_w * 2 + gap if spans_two else cell_w
+        fit = cell_fit(image_aspect(raw_src, base_url),
+                       this_w / row_h if row_h else 0)
         cells.append(
-            f'<div class="gallery-cell"{span}><img src="{src}" alt=""></div>'
+            f'<div class="gallery-cell"{span}>'
+            f'<img src="{src}" alt="" style="object-fit:{fit}">'
+            f'</div>'
         )
 
-    text = render_slide_content(slide_md, line_offset)
-    text_html = f'<div class="gallery-text">{text}</div>' if text else ""
     t_attr = _theme_attr(theme_override)
-
-    # Give the rows a definite pixel height.  The slide reserves 8% above and
-    # 11% below for its own chrome; text, when there is any, takes a quarter
-    # of what is left.  Rows must be definite: an image at height:100% inside
-    # an indefinite row collapses to nothing.
-    content_h = height * (1 - 0.08 - 0.11)
-    gap       = int(height * 0.025)
-    tracks    = len(images) + sum(1 for i in range(len(images))
-                                  if (i + 1) in plan.spans)
-    rows      = max(1, -(-tracks // plan.columns))
-    reserved  = content_h * 0.24 if text else 0
-    row_h     = max(40, int((content_h - reserved - gap * (rows - 1)) / rows))
-
     style = (f"grid-template-columns: repeat({plan.columns}, 1fr);"
              f"grid-auto-rows: {row_h}px;")
+    text_html = f'<div class="gallery-text">{text}</div>' if text else ""
     return (
         f'<div class="slide has-gallery"{t_attr}>'
         f'{text_html}'

@@ -4,6 +4,8 @@ utils.py — Small shared helpers with no domain-specific dependencies.
 
 import base64
 import logging
+from functools import lru_cache
+from urllib.parse import urlparse
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -140,3 +142,43 @@ def compute_slide_start_lines(text: str) -> list[int]:
     the order split_slides() returns them.
     """
     return [text.count("\n", 0, offset) for offset in compute_slide_offsets(text)]
+
+
+# ── Intrinsic image size ──────────────────────────────────────────────────────
+
+@lru_cache(maxsize=512)
+def _size_for(path: str, mtime: float, nbytes: int) -> "tuple[int, int] | None":
+    """Cached header read. Keyed on mtime and size so edits are picked up."""
+    try:
+        from PIL import Image
+        with Image.open(path) as img:
+            return img.size
+    except Exception:
+        return None
+
+
+def image_aspect(src: str, base_url: "str | None") -> "float | None":
+    """
+    Width / height of *src*, or None when it cannot be determined.
+
+    Pillow reads only the header for .size, and the result is cached against
+    the file's mtime, so this stays cheap enough for the live canvas — which
+    re-renders on a 150 ms debounce and would otherwise reopen every image on
+    every keystroke.
+    """
+    if not src or src.startswith("data:"):
+        return None
+    parsed = urlparse(src)
+    if parsed.scheme in ("http", "https"):
+        return None      # not worth a network round trip mid-render
+    try:
+        path = Path(src) if Path(src).is_absolute() else (
+            (Path(base_url) / src).resolve() if base_url else Path(src)
+        )
+        stat = path.stat()
+        size = _size_for(str(path), stat.st_mtime, stat.st_size)
+    except OSError:
+        return None
+    if not size or size[1] == 0:
+        return None
+    return size[0] / size[1]

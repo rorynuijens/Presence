@@ -8,8 +8,9 @@ an explicit choice is never overridden.
 
 import pytest
 
-from presence.slides.layout import (LayoutPlan, choose_layout,
-                                    gallery_columns, positions_specified)
+from presence.slides.layout import (LayoutPlan, auto_size, cell_fit,
+                                    choose_layout, gallery_columns,
+                                    positions_specified, sizes_specified)
 from presence.slides.splitter import extract_images
 
 
@@ -129,3 +130,61 @@ def test_three_images_read_as_two_over_one():
 def test_even_grids_have_no_spanning_cells():
     for count in (2, 4, 6):
         assert gallery_columns(count)[1] == ()
+
+
+# ── Width chosen from how much text shares the slide ─────────────────────────
+
+def test_a_line_of_text_leaves_the_image_most_of_the_slide():
+    assert auto_size(6) == "60"
+
+
+def test_a_paragraph_takes_room_back_from_the_image():
+    assert auto_size(90) == "40"
+
+
+def test_the_middle_case_is_the_old_fixed_half():
+    assert auto_size(25) == "50"
+
+
+def test_width_is_only_chosen_when_none_was_written():
+    chosen = choose_layout(True, [_img()], [False], word_count=6,
+                           sized=[False])
+    written = choose_layout(True, [_img()], [False], word_count=6,
+                            sized=[True])
+    assert chosen.size == "60"
+    assert written.size is None      # leave the writer's number alone
+
+
+def test_sizes_specified_reads_size_tokens():
+    assert sizes_specified("![a|30](x.png)") == [True]
+    assert sizes_specified("![a|left](x.png)") == [False]
+    assert sizes_specified("![a](x.png)") == [False]
+
+
+def test_an_out_of_range_size_is_not_a_size():
+    assert sizes_specified("![a|400](x.png)") == [False]
+
+
+# ── Cropping versus letterboxing ─────────────────────────────────────────────
+
+def test_a_shape_close_to_its_cell_is_cropped():
+    assert cell_fit(1.5, 1.6) == "cover"
+
+
+def test_an_ordinary_photo_in_a_wide_cell_is_still_cropped():
+    """Cells run about 2.5:1; treating that as a mismatch would letterbox
+    nearly every picture and leave the grid full of gaps."""
+    assert cell_fit(4 / 3, 2.5) == "cover"
+
+
+def test_a_portrait_in_a_wide_cell_is_shown_whole():
+    assert cell_fit(2 / 3, 2.5) == "contain"
+
+
+def test_a_panorama_in_a_tall_cell_is_shown_whole():
+    assert cell_fit(4.0, 0.6) == "contain"
+
+
+def test_an_unknown_shape_falls_back_to_cropping():
+    assert cell_fit(None, 2.5) == "cover"
+    assert cell_fit(1.5, 0) == "cover"
