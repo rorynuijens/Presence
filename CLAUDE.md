@@ -49,10 +49,11 @@ The codebase lives entirely under `src/presence/` and splits into two layers:
 2. `splitter.py` — splits Markdown into per-slide strings on `---` separators; also handles `|||` (two-column split), `^^^` (speaker notes), image layout tokens in alt-text, and title-slide detection. All operations work on raw strings only.
 3. `renderer.py` — converts Markdown fragments to HTML using `markdown-it-py` with optional Pygments syntax highlighting.
 4. `css.py` — builds the full CSS string from a `Theme` object via `build_css(theme, width, height, logo_b64)`. Colour values from theme files are validated against an allowlist to prevent CSS injection.
-5. `html.py` — assembles the complete HTML document; dispatches to per-slide-type renderers (`_render_title_slide`, `_render_normal_slide`, `_render_image_slide`, `_render_two_image_slide`).
-6. `themes.py` / `theme_loader.py` — `Theme` dataclass and discovery of theme directories.
-7. `thumbnails.py` / `thumbnails_render.py` — PDF-to-thumbnail rendering.
-8. `handout.py` — the talk as a document: each slide's picture with the `^^^` script beneath it, images inlined as data URIs. Deliberately unthemed — a theme is display type for a room, a handout is read at arm's length.
+5. `layout.py` — decides how a slide is laid out, as a pure function of its content. An explicit position token always wins; auto layout only fills the gap where the writer did not choose. Because the parser seeds `position` with `"right"`, `positions_specified()` re-asks the same markdown — via the parser's own regex and vocabulary — whether a token was actually written.
+6. `html.py` — assembles the complete HTML document; dispatches to per-slide-type renderers (`_render_title_slide`, `_render_normal_slide`, `_render_image_slide`, `_render_two_image_slide`, `_render_gallery_slide`) according to the layout plan. Gallery rows carry an inline pixel height: indefinite rows collapse images set to `height:100%`, which renders the whole grid empty in WeasyPrint.
+7. `themes.py` / `theme_loader.py` — `Theme` dataclass and discovery of theme directories.
+8. `thumbnails.py` / `thumbnails_render.py` — PDF-to-thumbnail rendering.
+9. `handout.py` — the talk as a document: each slide's picture with the `^^^` script beneath it, images inlined as data URIs. Deliberately unthemed — a theme is display type for a room, a handout is read at arm's length.
 
 **`src/presence/`** (GTK 4 / Libadwaita frontend):
 

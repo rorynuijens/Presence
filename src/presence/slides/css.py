@@ -665,6 +665,47 @@ a {{
 .slide.has-two-images[data-split="v"] .slide-image-b-gradient {{
     background-image: linear-gradient(to bottom, {t.bg} 0%, transparent 60%);
 }}
+
+/* ── Gallery: any number of images the writer did not arrange ──────────── */
+
+/* Row height is set inline, in pixels, by the renderer.  A percentage or a
+   flex basis leaves the rows indefinite, and an image at height:100% inside an
+   indefinite row collapses — in WeasyPrint the whole grid renders empty. */
+.slide.has-gallery .gallery {{
+    display: grid;
+    gap: {int(height * 0.025)}px;
+    width: 100%;
+}}
+
+/* Cells share the space equally and crop rather than distort: a grid of
+   pictures at different aspect ratios is unreadable if each one letterboxes
+   itself. */
+.slide.has-gallery .gallery-cell {{
+    position: relative;
+    overflow: hidden;
+    min-height: 0;
+}}
+
+.slide.has-gallery .gallery-cell img {{
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}}
+
+.slide.has-gallery .gallery-cell[data-span="2"] {{
+    grid-column: span 2;
+}}
+
+/* Text above the pictures, and only as much room as it needs. */
+.slide.has-gallery .gallery-text {{
+    flex: 0 0 auto;
+    margin-bottom: {int(height * 0.03)}px;
+}}
+
+.slide.has-gallery .gallery-text > *:last-child {{
+    margin-bottom: 0;
+}}
 """
 
     if t.custom_css_path:
