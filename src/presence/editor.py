@@ -1461,6 +1461,9 @@ class Editor(Gtk.Box):
         # slide boundary.  Rebuilt by _update_badge_starts on every change,
         # so unlike the fold rules these need no marks to stay accurate.
         self._sep_bands: list[tuple[int, int, str]] = []
+        # Line range currently washed as "the slide you are in", so the tag is
+        # only reapplied when the cursor actually crosses a boundary.
+        self._tinted_block: tuple[int, int] | None = None
         self._slide_ranges:  list[tuple[int,int]] = []  # (first, last) per slide
 
         # Image-edit popover state
@@ -1474,6 +1477,8 @@ class Editor(Gtk.Box):
             self._init_source_view()
         else:
             self._init_plain_view()
+
+        self._buffer.connect("mark-set", self._on_cursor_moved)
 
         # Must precede any menu that references editor.* actions.
         self._install_action_group()
@@ -1710,26 +1715,14 @@ class Editor(Gtk.Box):
         target_offset = slide_offsets[slide_index]
         target_line = full_text.count('\n', 0, target_offset)
 
-        # End at the last content line before the separator that closes this
-        # slide.  Running to the next slide's first line — which is what the
-        # next offset points at — swallowed the separator and the following
-        # heading, so the highlight covered one band too many.
-        n = self._buffer.get_line_count()
-        end_line = n - 1
-        for ln in range(target_line, n):
-            if self._is_slide_sep(ln):
-                end_line = ln - 1
-                break
-        while end_line > target_line and not (self._get_line_text(end_line) or "").strip():
-            end_line -= 1
-        end_line = max(end_line, target_line)
-
-        ok1, start_it = self._buffer.get_iter_at_line(target_line)
-        ok2, end_it   = self._buffer.get_iter_at_line(end_line)
-        if not ok1 or not ok2:
+        ok, start_it = self._buffer.get_iter_at_line(target_line)
+        if not ok:
             return
-        end_it.forward_to_line_end()
-        self._buffer.select_range(start_it, end_it)
+        # Place the cursor rather than selecting the slide.  A selection was
+        # how you used to see which slide you were on, but it is a poor sign
+        # for it — one keystroke replaces the lot — and the wash now says it
+        # without putting the text at risk.
+        self._buffer.place_cursor(start_it)
         self._view.scroll_to_iter(start_it, 0.05, True, 0.0, 0.0)
         self._view.grab_focus()
 
@@ -2835,6 +2828,9 @@ class Editor(Gtk.Box):
 
         if getattr(self, "_sep_draw", None) is not None:
             self._sep_draw.queue_draw()
+        # Boundaries may have moved under the cursor.
+        self._tinted_block = None
+        self._update_current_slide_tint()
         return GLib.SOURCE_REMOVE
 
     # ── Slide bands ───────────────────────────────────────────────────────────
@@ -3004,6 +3000,106 @@ class Editor(Gtk.Box):
 
         self._apply_separator_tag()
         self._apply_image_tag()
+        self._apply_current_slide_tag()
+
+    def _apply_current_slide_tag(self) -> None:
+        """
+        Create (or recolour) the tag that washes the slide you are in.
+
+        paragraph-background spans the full line width and paints beneath the
+        text, which an overlay cannot do — a drawn rectangle would sit on top
+        of what you are reading.
+
+        The wash is deliberately faint.  It marks which block of the document
+        you are working in; anything stronger would compete with the text and
+        with the fold rule.
+        """
+        table = self._buffer.get_tag_table()
+        tag = table.lookup("presence-current-slide")
+        if tag is None:
+            tag = self._buffer.create_tag("presence-current-slide")
+
+        dark = False
+        try:
+            dark = Adw.StyleManager.get_default().get_dark()
+        except Exception:
+            pass
+        rgba = Gdk.RGBA()
+        # Lighten on dark backgrounds, darken on light ones: the same
+        # translucent black would only ever muddy a dark theme.
+        rgba.parse("rgba(255,255,255,0.05)" if dark else "rgba(0,0,0,0.04)")
+        tag.set_property("paragraph-background-rgba", rgba)
+        self._tinted_block = None      # force a repaint at the new colour
+
+    def _current_slide_block(self, line_no: int) -> "tuple[int, int] | None":
+        """
+        The divider-to-divider line range containing *line_no*.
+
+        Returns None inside the frontmatter, which belongs to no slide.  The
+        dividers themselves stay untinted so each slide reads as its own
+        block with the band sitting in the gap between.
+        """
+        last = self._buffer.get_line_count() - 1
+        bands = self._sep_bands
+        if not bands:
+            return (0, last)           # one slide, no separators
+
+        seps = [sep for _num, sep, _title in bands]
+        idx = -1
+        for i, sep in enumerate(seps):
+            if sep <= line_no:
+                idx = i
+            else:
+                break
+
+        if idx == -1:
+            # Above every band: frontmatter when band 1 opens slide 1,
+            # otherwise the first slide of a document without frontmatter.
+            if bands[0][0] == 1:
+                return None
+            return (0, max(0, seps[0] - 1))
+
+        start = seps[idx] + 1
+        end = (seps[idx + 1] - 1) if idx + 1 < len(seps) else last
+        return (start, end) if start <= end else None
+
+    def _update_current_slide_tint(self, *_) -> None:
+        """Wash the slide the cursor is in; a no-op while it stays put."""
+        table = self._buffer.get_tag_table()
+        tag = table.lookup("presence-current-slide")
+        if tag is None:
+            return
+
+        cursor = self._buffer.get_iter_at_mark(self._buffer.get_insert())
+        block = self._current_slide_block(cursor.get_line())
+        if block == self._tinted_block:
+            return
+        self._tinted_block = block
+
+        self._buffer.remove_tag(tag, self._buffer.get_start_iter(),
+                                self._buffer.get_end_iter())
+        if block is None:
+            return
+        ok1, start = self._buffer.get_iter_at_line(block[0])
+        if not ok1:
+            return
+        # End at the start of the divider's line rather than at the end of the
+        # block's own: forward_to_line_end() jumps to the *next* line when the
+        # iter already sits at one — which an empty line always does — and a
+        # zero-length range on a trailing blank line paints nothing at all,
+        # leaving a gap above the divider.
+        last_line = self._buffer.get_line_count() - 1
+        if block[1] < last_line:
+            ok2, end = self._buffer.get_iter_at_line(block[1] + 1)
+            if not ok2:
+                return
+        else:
+            end = self._buffer.get_end_iter()
+        self._buffer.apply_tag(tag, start, end)
+
+    def _on_cursor_moved(self, buffer, location, mark) -> None:
+        if mark is buffer.get_insert():
+            self._update_current_slide_tint()
 
     def _apply_separator_tag(self) -> None:
         """
