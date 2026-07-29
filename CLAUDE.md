@@ -52,6 +52,7 @@ The codebase lives entirely under `src/presence/` and splits into two layers:
 5. `html.py` — assembles the complete HTML document; dispatches to per-slide-type renderers (`_render_title_slide`, `_render_normal_slide`, `_render_image_slide`, `_render_two_image_slide`).
 6. `themes.py` / `theme_loader.py` — `Theme` dataclass and discovery of theme directories.
 7. `thumbnails.py` / `thumbnails_render.py` — PDF-to-thumbnail rendering.
+8. `handout.py` — the talk as a document: each slide's picture with the `^^^` script beneath it, images inlined as data URIs. Deliberately unthemed — a theme is display type for a room, a handout is read at arm's length.
 
 **`src/presence/`** (GTK 4 / Libadwaita frontend):
 

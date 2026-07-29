@@ -526,6 +526,12 @@ class MainWindow(Adw.ApplicationWindow):
             "One PNG per slide, into a folder",
             self._on_export_images,
         ))
+        box.append(_row(
+            "view-paged-symbolic",
+            "Handout…",
+            "Your slides and script, to read or print",
+            self._on_export_handout,
+        ))
 
         popover.set_child(box)
         return popover
@@ -561,7 +567,8 @@ class MainWindow(Adw.ApplicationWindow):
         export_menu = Gio.Menu()
         export_menu.append("PDF…",    "win.export")
         export_menu.append("HTML…",   "win.export-html")
-        export_menu.append("Images…", "win.export-images")
+        export_menu.append("Images…",  "win.export-images")
+        export_menu.append("Handout…", "win.export-handout")
         menu.append_submenu("Export", export_menu)
 
         s3 = Gio.Menu()
@@ -628,6 +635,7 @@ class MainWindow(Adw.ApplicationWindow):
             ("export",       self._on_export,                             "<primary><shift>e"),
             ("export-html",   self._on_export_html,                       None),
             ("export-images", self._on_export_images,                     None),
+            ("export-handout", self._on_export_handout,                    None),
             ("open-pdf",      self._on_open_pdf_clicked,                  None),
             ("show-output",   self._on_show_in_file_manager,              None),
             ("copy-pdf-path", self._on_copy_pdf_path,                     None),
@@ -1900,6 +1908,90 @@ class MainWindow(Adw.ApplicationWindow):
             self._show_toast(
                 f"{saved} image{'s' if saved != 1 else ''} exported → {folder.name}/"
             )
+            return GLib.SOURCE_REMOVE
+
+        threading.Thread(target=_render, daemon=True).start()
+
+    # ── Handout ───────────────────────────────────────────────────────────────
+
+    def _on_export_handout(self, *_) -> None:
+        """Export the talk as a document: each slide with its script."""
+        dialog = Gtk.FileDialog()
+        dialog.set_title("Export Handout")
+        display = self._pres_path or self._file_path
+        stem = display.stem if display else "presentation"
+        dialog.set_initial_name(f"{stem}-handout.pdf")
+        if display:
+            dialog.set_initial_folder(
+                Gio.File.new_for_path(str(display.parent))
+            )
+        dialog.set_filters(make_filter_store(
+            make_file_filter("PDF files", "*.pdf")
+        ))
+        self._active_file_dialog = dialog
+        dialog.save(self, None, self._on_export_handout_response)
+
+    def _on_export_handout_response(self, dialog, result) -> None:
+        self._active_file_dialog = None
+        try:
+            gfile = dialog.save_finish(result)
+        except GLib.Error:
+            return
+        path_str = gfile.get_path()
+        if not path_str:
+            return
+        dest = Path(path_str)
+        if not dest.suffix:
+            dest = dest.with_suffix(".pdf")
+        if not os.access(dest.parent, os.W_OK):
+            self._show_toast(
+                f"Cannot write to '{dest.parent}' — permission denied."
+            )
+            return
+        # A handout is made of slide pictures, so it needs a build that
+        # matches the document just as much as any other export does.
+        self._with_current_build(lambda: self._write_handout(dest))
+
+    def _write_handout(self, dest: Path) -> None:
+        if self._output_path is None or not self._output_path.exists():
+            self._show_toast("No build to make a handout from.")
+            return
+        try:
+            pdf_bytes = self._output_path.read_bytes()
+        except OSError as e:
+            self._show_toast(f"Could not read the built PDF: {e}")
+            return
+
+        meta, _body = parse_frontmatter(self._editor.get_text())
+        slide_info = list(self._slide_info)
+
+        # Rasterising every slide and laying out a document is seconds of
+        # work, so it runs off the main thread like the image export does.
+        def _render() -> None:
+            try:
+                from .slides.thumbnails_render import render_slides_hires
+                from .slides.handout import build_handout_html
+                import weasyprint
+
+                pngs = render_slides_hires(pdf_bytes, width_px=1000)
+                html = build_handout_html(slide_info, pngs, meta)
+                data = weasyprint.HTML(string=html).write_pdf()
+            except Exception as exc:
+                log.exception("Handout export failed")
+                GLib.idle_add(_failed, str(exc))
+                return
+            GLib.idle_add(_done, data)
+
+        def _done(data: bytes) -> bool:
+            try:
+                dest.write_bytes(data)
+                self._show_toast(f"Handout exported → {dest.name}")
+            except OSError as e:
+                self._show_toast(f"Could not write the handout: {e}")
+            return GLib.SOURCE_REMOVE
+
+        def _failed(message: str) -> bool:
+            self._show_toast(f"Could not build the handout: {message}")
             return GLib.SOURCE_REMOVE
 
         threading.Thread(target=_render, daemon=True).start()
