@@ -74,6 +74,13 @@ _POSITION_DEFAULT_FADE: dict[str, str] = {
 }
 
 
+# Same heading rule the sidebar's titles use, so a band and its
+# thumbnail never disagree about what a slide is called.
+from .slides.splitter import _strip_inline_markdown
+
+_HEADING_RE = re.compile(r'^#{1,3}\s+(.+)$')
+
+
 def _parse_alt(alt: str) -> tuple[str, dict]:
     """
     Split an alt string into (description, layout_dict).
@@ -1412,6 +1419,10 @@ class Editor(Gtk.Box):
     DEBOUNCE_MS = 400
     LIVE_DEBOUNCE_MS = 150
 
+    # Blank space opened above and below a separator line.  The band's rule is
+    # drawn in the upper half of it, clear of the "---" glyphs.
+    _SEP_SPACE = 16
+
     def __init__(self) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.set_hexpand(True)
@@ -1445,8 +1456,11 @@ class Editor(Gtk.Box):
         self._table_popover: _TableInsertPopover | None = None
 
         # Slide-number badge overlay (DrawingArea over the gutter)
-        self._badge_draw:    Gtk.DrawingArea | None = None
         self._badge_starts:  list[tuple[int,int]] = []  # (slide_num, line_no)
+        # (slide_num, separator_line, title) for the band drawn at each
+        # slide boundary.  Rebuilt by _update_badge_starts on every change,
+        # so unlike the fold rules these need no marks to stay accurate.
+        self._sep_bands: list[tuple[int, int, str]] = []
         self._slide_ranges:  list[tuple[int,int]] = []  # (first, last) per slide
 
         # Image-edit popover state
@@ -1514,17 +1528,14 @@ class Editor(Gtk.Box):
         if _GTKSOURCE_AVAILABLE:
             # Slide-number badge drawing area — overlaid on the gutter column.
             # set_can_target(False) so it never intercepts mouse events.
-            self._badge_draw = Gtk.DrawingArea()
-            self._badge_draw.set_halign(Gtk.Align.START)
-            self._badge_draw.set_valign(Gtk.Align.FILL)
-            self._badge_draw.set_vexpand(True)
-            # Width covers the full left area (gutter + text left-margin).
-            # The badge X position is computed in _draw_slide_badges.
-            self._badge_draw.set_size_request(120, -1)
-            self._badge_draw.set_margin_start(0)
-            self._badge_draw.set_can_target(False)
-            self._badge_draw.set_draw_func(self._draw_slide_badges)
-            self._img_edit_overlay.add_overlay(self._badge_draw)
+            # Slide bands: added before the fold overlay so a fold rule, which
+            # is the more urgent signal, paints on top where they coincide.
+            self._sep_draw = Gtk.DrawingArea()
+            self._sep_draw.set_hexpand(True)
+            self._sep_draw.set_vexpand(True)
+            self._sep_draw.set_can_target(False)
+            self._sep_draw.set_draw_func(self._draw_slide_bands)
+            self._img_edit_overlay.add_overlay(self._sep_draw)
 
             # Fold rules span the full width, so they get their own overlay.
             self._fold_draw = Gtk.DrawingArea()
@@ -2678,30 +2689,19 @@ class Editor(Gtk.Box):
         """
         Called once after the GtkSourceView is realized.
 
-        Measures the gutter width so the badge DrawingArea can be positioned
-        just past it.  Also connects the vertical scroll adjustment so badges
-        redraw when the user scrolls.
+        Connects the vertical scroll adjustment so the drawn overlays follow
+        the text.
         """
         try:
-            # Measure the left gutter width (line numbers, marks, etc.)
-            gutter = view.get_gutter(Gtk.TextWindowType.LEFT)
-            if gutter is not None:
-                gutter_w = gutter.get_allocated_width()
-            else:
-                gutter_w = 0
-
-            # margin_start stays 0; badge X is computed in _draw_slide_badges
-
-            # Redraw badges on vertical scroll
             scroll = view.get_parent()
             if scroll is not None:
                 vadj = scroll.get_vadjustment()
                 if vadj is not None:
                     def _on_scroll(*_):
-                        if self._badge_draw:
-                            self._badge_draw.queue_draw()
-                        if getattr(self, "_fold_draw", None) is not None:
-                            self._fold_draw.queue_draw()
+                        for area in (getattr(self, "_sep_draw", None),
+                                     getattr(self, "_fold_draw", None)):
+                            if area is not None:
+                                area.queue_draw()
                     vadj.connect("value-changed", _on_scroll)
         except Exception:
             pass
@@ -2734,17 +2734,26 @@ class Editor(Gtk.Box):
 
         # ── Skip YAML frontmatter (--- ... ---) ───────────────────────────
         body_start = 0
+        frontmatter_end = -1
         if self._is_slide_sep(0):
             for ln in range(1, min(n, 50)):
                 if self._is_slide_sep(ln):
                     body_start = ln + 1
+                    frontmatter_end = ln
                     break
 
         # ── Single-pass scan ──────────────────────────────────────────────
         slide_ranges: list[tuple[int, int]] = []
         starts_list:  list[int]             = []
+        sep_lines:    list[int]             = []   # separator opening each slide
+        titles:       list[str]             = []   # heading text per slide
+        heading: str = ""                          # first heading in this slide
 
         slide_first   = body_start   # first line of current slide
+        # Slide 1 opens on the frontmatter's closing fence, if the document
+        # has frontmatter; without it, slide 1 simply has no boundary above.
+        opening_sep   = frontmatter_end
+        pending_sep   = -1           # separator just seen
         badge_line    = -1           # first content line found so far
         in_notes      = False        # True after ^^^ within a slide
         tint_last     = body_start   # last line included in tint so far
@@ -2755,6 +2764,9 @@ class Editor(Gtk.Box):
             is_notes = self._is_notes_sep(ln)
 
             if is_sep:
+                # This separator opens the next slide, so it is where that
+                # slide's band belongs.
+                pending_sep = ln
                 # End of current slide — only commit if there was actual content.
                 if badge_line >= 0:
                     # Include the --- line in the tint only when there are no
@@ -2764,9 +2776,13 @@ class Editor(Gtk.Box):
                         tint_last = ln   # extend tint to include the ---
                     slide_ranges.append((slide_first, tint_last))
                     starts_list.append(badge_line)
+                    titles.append(heading)
+                    sep_lines.append(opening_sep)
                 # Start next slide on the following line
+                opening_sep = pending_sep
                 slide_first = ln + 1
                 badge_line  = -1
+                heading     = ""
                 in_notes    = False
                 tint_last   = ln + 1
                 continue
@@ -2784,6 +2800,10 @@ class Editor(Gtk.Box):
             tint_last = ln  # extend tint to this line
             if badge_line < 0 and t:  # first non-empty, non-sep, non-notes line
                 badge_line = ln
+            if not heading:
+                m = _HEADING_RE.match(t or "")
+                if m:
+                    heading = _strip_inline_markdown(m.group(1).strip())
 
         # ── Commit last slide (no trailing ---) ───────────────────────────
         if slide_first < n:
@@ -2791,13 +2811,89 @@ class Editor(Gtk.Box):
             starts_list.append(
                 badge_line if badge_line >= 0 else slide_first
             )
+            titles.append(heading)
+            sep_lines.append(opening_sep)
 
         self._badge_starts = list(enumerate(starts_list, start=1))
         self._slide_ranges = slide_ranges
 
-        if self._badge_draw is not None:
-            self._badge_draw.queue_draw()
+        # The first slide opens the document rather than a separator, so it
+        # has no band; every other slide gets one naming what follows it.
+        self._sep_bands = [
+            (num, sep, title or f"Slide {num}")
+            for num, (sep, title) in enumerate(zip(sep_lines, titles), start=1)
+            if sep >= 0
+        ]
+
+        if getattr(self, "_sep_draw", None) is not None:
+            self._sep_draw.queue_draw()
         return GLib.SOURCE_REMOVE
+
+    # ── Slide bands ───────────────────────────────────────────────────────────
+
+    def _line_y(self, line_no: int) -> "float | None":
+        """
+        Y of *line_no* in overlay coordinates, or None if it is out of view.
+
+        buffer_to_window_coords(TEXT) already accounts for the view's top
+        margin, and the view sits at the overlay's origin, so the value needs
+        no further adjustment — measured, because the deleted badge code
+        added top_margin here and drew everything a margin too low.
+        """
+        ok, it = self._buffer.get_iter_at_line(line_no)
+        if not ok:
+            return None
+        buf_rect = self._view.get_iter_location(it)
+        _x, y = self._view.buffer_to_window_coords(
+            Gtk.TextWindowType.TEXT, 0, buf_rect.y
+        )
+        return float(y)
+
+    def _draw_slide_bands(self, area, cr, width, height) -> None:
+        """
+        Draw a rule at each slide boundary, naming the slide it opens.
+
+        The separators are the document's real structure, and as bare "---"
+        in a monospace stream they were its faintest signal.  Drawn this way
+        the source scrolls like a deck, and the slide numbers no longer need
+        a second home in the gutter.
+        """
+        if not self._sep_bands or not self._view.get_realized():
+            return
+
+        layout = None
+        if _PangoCairo is not None:
+            layout = _PangoCairo.create_layout(cr)
+            layout.set_font_description(Pango.FontDescription.from_string("Sans 8"))
+
+        for slide_num, sep_line, title in self._sep_bands:
+            y = self._line_y(sep_line)
+            if y is None or y < -40 or y > height + 40:
+                continue
+
+            # Float the rule in the space the separator tag opens above the
+            # line, so it never strikes through the "---" glyphs.
+            y = round(y - self._SEP_SPACE / 2) + 0.5
+
+            label_w = 0.0
+            if layout is not None:
+                layout.set_text(f"{slide_num} \u00b7 {title}", -1)
+                label_w = layout.get_pixel_size()[0]
+
+            cr.save()
+            cr.set_source_rgba(0.55, 0.55, 0.55, 0.45)
+            cr.set_line_width(1.0)
+            cr.move_to(0.0, y)
+            cr.line_to(max(0.0, width - label_w - 20.0), y)
+            cr.stroke()
+            cr.restore()
+
+            if layout is not None:
+                cr.save()
+                cr.set_source_rgba(0.55, 0.55, 0.55, 0.95)
+                cr.move_to(width - label_w - 12.0, y - 7.0)
+                _PangoCairo.show_layout(cr, layout)
+                cr.restore()
 
     # ── Fold rules ────────────────────────────────────────────────────────────
 
@@ -2854,14 +2950,11 @@ class Editor(Gtk.Box):
                 it = self._buffer.get_iter_at_mark(mark)
             except Exception:
                 continue
-            buf_rect = self._view.get_iter_location(it)
-            _x, y = self._view.buffer_to_window_coords(
-                Gtk.TextWindowType.TEXT, 0, buf_rect.y
-            )
-            if y < -20 or y > height + 20:
+            y = self._line_y(it.get_line())
+            if y is None or y < -20 or y > height + 20:
                 continue   # scrolled out of view
 
-            y = float(y) + 0.5          # crisp single-pixel rule
+            y = round(y) + 0.5          # crisp single-pixel rule
             label_w = 0.0
             if layout is not None:
                 layout.set_text("slide is full", -1)
@@ -2882,103 +2975,6 @@ class Editor(Gtk.Box):
                 cr.move_to(width - label_w - 12.0, y - 7.0)
                 _PangoCairo.show_layout(cr, layout)
                 cr.restore()
-
-    def _draw_slide_badges(self, area, cr, width, height) -> None:
-        """
-        Cairo draw function for the slide-number badge overlay.
-
-        Coordinate system:
-          get_iter_location()  →  buffer coords  (scroll-independent)
-          buffer_to_window_coords(TEXT, 0, buf_y)  →  text-window coords
-            (text window = the area excluding gutter; Y=0 is the visible top)
-          We convert using TEXT not WIDGET so rect.x (which is the
-          horizontal text offset, potentially large) does not pollute Y.
-          The DrawingArea is positioned by margin_start to sit just after
-          the gutter, so we only need the Y value.
-        """
-        if not _GTKSOURCE_AVAILABLE:
-            return
-        # Guard: do nothing if the view has not been allocated yet.
-        if not self._view.get_realized():
-            return
-        starts = self._badge_starts
-        if not starts:
-            return
-
-        if _PangoCairo is None:
-            return   # PangoCairo unavailable — badges cannot be drawn
-
-        layout = _PangoCairo.create_layout(cr)
-        desc = Pango.FontDescription.from_string('Sans Bold 9')
-        layout.set_font_description(desc)
-
-        # Badge geometry: wider and taller than before so numbers are
-        # readable at a glance from normal viewing distance.
-        bw, bh, r = 32.0, 18.0, 4.0
-        # Place the badge just to the left of the text column.
-        # left_margin is the blank space between the gutter and the text.
-        # We centre the pill within that margin, clamped so it never overlaps text.
-        left_margin = float(self._view.get_left_margin())
-        gutter_w    = 0.0
-        try:
-            g = self._view.get_gutter(Gtk.TextWindowType.LEFT)
-            if g is not None:
-                gutter_w = float(g.get_allocated_width())
-        except Exception:
-            pass
-        # bx: left edge of pill — centred in the left_margin, after the gutter
-        available = left_margin
-        bx = gutter_w + max(2.0, (available - bw) / 2.0)
-
-        for slide_num, line_no in starts:
-            ok, it = self._buffer.get_iter_at_line(line_no)
-            if not ok:
-                continue
-
-            # get_iter_location gives the glyph rect in buffer coordinates.
-            # buf_y is the Y offset from the top of the buffer (grows as you
-            # scroll down).  We always pass x=0 to avoid the horizontal text
-            # indent skewing the conversion.
-            buf_rect = self._view.get_iter_location(it)
-            buf_y    = buf_rect.y
-            line_h   = buf_rect.height if buf_rect.height > 0 else 18
-
-            # Convert buffer Y → text-window Y.
-            # TEXT coords: Y=0 is the top of the visible text area.
-            # Negative means scrolled above the viewport.
-            try:
-                _tx, ty = self._view.buffer_to_window_coords(
-                    Gtk.TextWindowType.TEXT, 0, buf_y
-                )
-            except Exception:
-                continue
-
-            # Skip if completely outside the visible area
-            if ty + line_h < 0 or ty > height:
-                continue
-
-            # The DrawingArea is an overlay child whose Y=0 aligns with
-            # the ScrolledWindow top.  buffer_to_window_coords(TEXT) returns
-            # coordinates relative to the text-area top, which starts
-            # top_margin pixels below the scroll window top.  Add top_margin
-            # to convert from text-area coords to DrawingArea coords.
-            top_margin = self._view.get_top_margin()
-            by = float(ty) + top_margin + (line_h - bh) / 2
-
-            cr.new_path()
-            cr.arc(bx + r,      by + r,      r, math.pi,          3 * math.pi / 2)
-            cr.arc(bx + bw - r, by + r,      r, 3 * math.pi / 2,  0)
-            cr.arc(bx + bw - r, by + bh - r, r, 0,                math.pi / 2)
-            cr.arc(bx + r,      by + bh - r, r, math.pi / 2,      math.pi)
-            cr.close_path()
-            cr.set_source_rgba(0.486, 0.388, 0.780, 0.90)  # purple matching tint
-            cr.fill()
-
-            cr.set_source_rgba(1.0, 1.0, 1.0, 1.0)
-            layout.set_text(str(slide_num), -1)
-            pw, ph = layout.get_pixel_size()
-            cr.move_to(bx + (bw - pw) / 2, by + (bh - ph) / 2)
-            _PangoCairo.show_layout(cr, layout)
 
     # ── Style ─────────────────────────────────────────────────────────────────
 
@@ -3013,14 +3009,19 @@ class Editor(Gtk.Box):
 
         # Create the tag once; reuse on subsequent calls
         if tag_table.lookup("presence-separator") is None:
-            # Colour the text only — no background fill.  A solid dark
-            # background on "---" looks heavy and distracts from slide
-            # content.  The orange foreground is sufficient to make
-            # separators visually distinct (matches iA Presenter style).
-            tag = self._buffer.create_tag(
+            # The drawn band is what marks a slide boundary now, so the "---"
+            # itself is demoted to a quiet reminder that this is still just
+            # Markdown you can edit.  It stays visible and editable — hiding
+            # it would mean invisible text the cursor can fall into.
+            #
+            # The line spacing is what the band occupies: without it the rule
+            # would strike through the characters instead of floating above
+            # them, and slides would still run together as one stream.
+            self._buffer.create_tag(
                 "presence-separator",
-                foreground="#e17000",
-                weight=700,       # Pango.Weight.BOLD
+                foreground="#9a9996",
+                pixels_above_lines=self._SEP_SPACE,
+                pixels_below_lines=self._SEP_SPACE,
             )
 
         # Initial application — buffer may already have content
