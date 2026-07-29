@@ -1708,13 +1708,21 @@ class Editor(Gtk.Box):
             return
 
         target_offset = slide_offsets[slide_index]
-        end_offset = (
-            slide_offsets[slide_index + 1]
-            if slide_index + 1 < len(slide_offsets)
-            else len(full_text)
-        )
         target_line = full_text.count('\n', 0, target_offset)
-        end_line    = full_text.count('\n', 0, end_offset)
+
+        # End at the last content line before the separator that closes this
+        # slide.  Running to the next slide's first line — which is what the
+        # next offset points at — swallowed the separator and the following
+        # heading, so the highlight covered one band too many.
+        n = self._buffer.get_line_count()
+        end_line = n - 1
+        for ln in range(target_line, n):
+            if self._is_slide_sep(ln):
+                end_line = ln - 1
+                break
+        while end_line > target_line and not (self._get_line_text(end_line) or "").strip():
+            end_line -= 1
+        end_line = max(end_line, target_line)
 
         ok1, start_it = self._buffer.get_iter_at_line(target_line)
         ok2, end_it   = self._buffer.get_iter_at_line(end_line)
