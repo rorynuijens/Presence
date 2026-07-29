@@ -667,7 +667,7 @@ class ImageLayoutControls(Gtk.Box):
         self._insert_btn.connect("clicked", self._on_insert_clicked)
         root.append(self._insert_btn)
 
-        self._ai_btn = Gtk.Button(label="Generate with AI…")
+        self._ai_btn = Gtk.Button(label="Make an image for this slide")
         self._ai_btn.set_margin_start(10)
         self._ai_btn.set_margin_end(10)
         self._ai_btn.set_margin_bottom(6)
@@ -675,7 +675,7 @@ class ImageLayoutControls(Gtk.Box):
         self._ai_btn.set_visible(False)
         root.append(self._ai_btn)
 
-        self._infographic_btn = Gtk.Button(label="Generate Infographic…")
+        self._infographic_btn = Gtk.Button(label="Make an infographic for this slide")
         self._infographic_btn.set_margin_start(10)
         self._infographic_btn.set_margin_end(10)
         self._infographic_btn.set_margin_bottom(10)

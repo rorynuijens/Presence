@@ -1,9 +1,9 @@
 """
-ai_import_dialog.py — AI-powered Import & Convert dialog.
+ai_import_dialog.py — "Turn a document into slides" dialog.
 
 Accepts a document (PDF, DOCX, TXT, MD), extracts its text, calls the
 Claude API to generate a Markdown slide deck, and writes it into the editor.
-Image generation is handled separately via the Insert Image → Generate with AI
+Image generation is handled separately via the image controls' "Make an image
 dialog (ai_image_dialog.py).
 """
 from __future__ import annotations
@@ -66,7 +66,7 @@ _ANALYSIS_SYSTEM_PROMPT = (
 class AIImportDialog(Adw.Dialog):
     def __init__(self, parent_window) -> None:
         super().__init__()
-        self.set_title("Import & Convert")
+        self.set_title("Turn a document into slides")
         self.set_content_width(480)
         self._parent_window = parent_window
         self._selected_file: Path | None = None

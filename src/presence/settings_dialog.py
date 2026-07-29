@@ -410,7 +410,7 @@ class SettingsDialog(Adw.PreferencesDialog):
         # Infographic generation settings
         infographic_group = Adw.PreferencesGroup(title="Infographic Generation")
         infographic_group.set_description(
-            "Applied when generating SVG infographics via Generate Infographic…"
+            "Applied when you make an infographic for a slide"
         )
         ai_page.add(infographic_group)
 

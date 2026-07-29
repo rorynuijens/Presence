@@ -87,7 +87,7 @@ def build_shortcuts_window(parent) -> Gtk.ShortcutsWindow:
             <child>
               <object class="GtkShortcutsShortcut">
                 <property name="accelerator">&lt;Primary&gt;Return</property>
-                <property name="title">Force rebuild (convert)</property>
+                <property name="title">Rebuild the PDF</property>
               </object>
             </child>
           </object>

@@ -1,7 +1,7 @@
 """
 ai_image_dialog.py — Generate a single AI image via the Gemini API.
 
-Opened from the Insert Image popover when the user clicks "Generate with AI…".
+Opened from the image controls, from "Make an image for this slide".
 Presents: scene description entry, image style picker, Generate button, preview
 thumbnail, and an Insert button that writes the Markdown tag.
 """

@@ -1,7 +1,7 @@
 """
 ai_infographic_dialog.py — Generate a structured SVG infographic via the Claude API.
 
-Opened from the Insert Image popover when the user clicks "Generate Infographic…".
+Opened from the image controls, from "Make an infographic for this slide".
 Presents: editable slide content area, infographic type picker, layout controls
 (position/size/gradient — shared with image insertion), Generate button, SVG
 preview, and an Insert button that writes the Markdown image tag.
@@ -138,7 +138,7 @@ class AIInfographicDialog(Adw.Dialog):
         initial_slide_md: str = "",
     ) -> None:
         super().__init__()
-        self.set_title("Generate Infographic")
+        self.set_title("Make an infographic")
         self.set_content_width(480)
         self._parent_window  = parent_window
         self._layout         = layout

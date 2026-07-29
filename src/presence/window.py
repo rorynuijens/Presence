@@ -344,37 +344,17 @@ class MainWindow(Adw.ApplicationWindow):
         self._sidebar_btn.connect("toggled", self._on_sidebar_toggled)
         bar.pack_start(self._sidebar_btn)
 
-        for icon, tooltip, handler in [
-            ("document-new-symbolic",     "New (Ctrl+N)",         self._on_new),
-            ("document-open-symbolic",    "Open… (Ctrl+O)",       self._on_open),
-            ("document-save-symbolic",    "Save (Ctrl+S)",        self._on_save),
-            ("document-save-as-symbolic", "Save as… (Ctrl+⇧+S)", self._on_save_as),
-        ]:
-            b = Gtk.Button()
-            b.set_child(Gtk.Image.new_from_icon_name(icon))
-            b.set_tooltip_text(tooltip)
-            b.update_property([Gtk.AccessibleProperty.LABEL], [tooltip])
-            b.add_css_class("flat")
-            b.connect("clicked", handler)
-            bar.pack_start(b)
-
-        self._undo_btn = Gtk.Button()
-        self._undo_btn.set_child(Gtk.Image.new_from_icon_name("edit-undo-symbolic"))
-        self._undo_btn.set_tooltip_text("Undo (Ctrl+Z)")
-        self._undo_btn.update_property([Gtk.AccessibleProperty.LABEL], ["Undo"])
-        self._undo_btn.add_css_class("flat")
-        self._undo_btn.set_sensitive(False)
-        self._undo_btn.connect("clicked", lambda *_: self._editor.undo())
-        bar.pack_start(self._undo_btn)
-
-        self._redo_btn = Gtk.Button()
-        self._redo_btn.set_child(Gtk.Image.new_from_icon_name("edit-redo-symbolic"))
-        self._redo_btn.set_tooltip_text("Redo (Ctrl+⇧+Z)")
-        self._redo_btn.update_property([Gtk.AccessibleProperty.LABEL], ["Redo"])
-        self._redo_btn.add_css_class("flat")
-        self._redo_btn.set_sensitive(False)
-        self._redo_btn.connect("clicked", lambda *_: self._editor.redo())
-        bar.pack_start(self._redo_btn)
+        # New, Save, Save as, Undo and Redo used to sit here.  Every one of
+        # them has a universal keystroke and a menu entry, and GNOME does not
+        # want them in the header; opening a document is the one thing here
+        # that a newcomer cannot guess a shortcut for.
+        open_btn = Gtk.Button()
+        open_btn.set_child(Gtk.Image.new_from_icon_name("document-open-symbolic"))
+        open_btn.set_tooltip_text("Open… (Ctrl+O)")
+        open_btn.update_property([Gtk.AccessibleProperty.LABEL], ["Open"])
+        open_btn.add_css_class("flat")
+        open_btn.connect("clicked", self._on_open)
+        bar.pack_start(open_btn)
 
         self._title_label = Adw.WindowTitle(title="Untitled", subtitle="")
         bar.set_title_widget(self._title_label)
@@ -405,13 +385,16 @@ class MainWindow(Adw.ApplicationWindow):
         self._theme_panel_btn.connect("toggled", self._on_theme_panel_toggled)
         bar.pack_end(self._theme_panel_btn)
 
-        # Share button — opens a popover with all export options.
-        # Anchored to a real button so the popover arrow points correctly.
+        # Export — one verb, with the format as the choice inside it.  This
+        # was "Share / export" over a popover that mixed three formats with
+        # opening the working PDF and revealing its folder; those are about
+        # the build rather than about handing a deck to someone, and have
+        # moved to the menu.
         self._share_btn = Gtk.MenuButton()
         self._share_btn.set_icon_name("document-send-symbolic")
-        self._share_btn.set_tooltip_text("Share / export")
+        self._share_btn.set_tooltip_text("Export…")
         self._share_btn.update_property(
-            [Gtk.AccessibleProperty.LABEL], ["Share / export"]
+            [Gtk.AccessibleProperty.LABEL], ["Export"]
         )
         self._share_btn.add_css_class("flat")
         self._share_btn.set_popover(self._build_share_popover())
@@ -466,7 +449,7 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _build_share_popover(self) -> Gtk.Popover:
         """
-        Build the Share popover containing all export actions.
+        Build the Export popover: the three formats, and nothing else.
 
         Uses a Gtk.Popover with a vertical ListBox of action rows so each
         option has a clear icon, label and subtitle — more informative than
@@ -522,70 +505,78 @@ class MainWindow(Adw.ApplicationWindow):
             btn.connect("clicked", _clicked)
             return btn
 
-        box.append(_row(
-            "document-open-symbolic",
-            "Open PDF",
-            "Open the output in the system viewer",
-            self._on_open_pdf_clicked,
-        ))
-        box.append(_row(
-            "edit-copy-symbolic",
-            "Copy PDF path",
-            "Copy the output path to clipboard",
-            self._on_copy_pdf_path,
-        ))
-        box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+
         box.append(_row(
             "document-save-symbolic",
-            "Save PDF",
-            "Save to the current output location",
+            "PDF…",
+            "The deck as a PDF file",
             self._on_export,
         ))
-        box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
         box.append(_row(
             "text-x-generic-symbolic",
-            "Export HTML…",
-            "Self-contained HTML slide deck",
+            "HTML…",
+            "A self-contained web page",
             self._on_export_html,
         ))
         box.append(_row(
             "image-x-generic-symbolic",
-            "Export Images…",
-            "One PNG per slide into a folder",
+            "Images…",
+            "One PNG per slide, into a folder",
             self._on_export_images,
-        ))
-        box.append(_row(
-            "folder-open-symbolic",
-            "Show in file manager",
-            "Open the output folder",
-            self._on_show_in_file_manager,
         ))
 
         popover.set_child(box)
         return popover
 
     def _build_app_menu(self) -> Gio.Menu:
+        """
+        The menu now holds everything the header stopped showing.
+
+        Two verbs act on the document — Save writes the Markdown, Export
+        writes a deck someone else can open — and the build that sits between
+        them is not a concept the menu mentions.
+        """
         menu = Gio.Menu()
+
         s0 = Gio.Menu()
-        s0.append("Import & Convert…",       "win.ai-import")
-        s0.append("Generate missing images", "win.ai-missing-images")
+        s0.append("New window",  "win.new")
+        s0.append("Open…",       "win.open")
+        s0.append("Save",        "win.save")
+        s0.append("Save as…",    "win.save-as")
         menu.append_section(None, s0)
 
         s1 = Gio.Menu()
-        s1.append("Save As…",        "win.save-as")
-        s1.append("Export PDF…",     "win.export")
-        s1.append("Export HTML…",    "win.export-html")
+        s1.append("Undo", "win.undo")
+        s1.append("Redo", "win.redo")
         menu.append_section(None, s1)
+
+        # Named for what comes out, not for the machinery.
+        s2 = Gio.Menu()
+        s2.append("Turn a document into slides…", "win.ai-import")
+        s2.append("Fill in missing images",       "win.ai-missing-images")
+        menu.append_section(None, s2)
+
+        export_menu = Gio.Menu()
+        export_menu.append("PDF…",    "win.export")
+        export_menu.append("HTML…",   "win.export-html")
+        export_menu.append("Images…", "win.export-images")
+        menu.append_submenu("Export", export_menu)
+
+        s3 = Gio.Menu()
+        s3.append("Open the built PDF", "win.open-pdf")
+        s3.append("Show output folder", "win.show-output")
+        s3.append("Copy PDF path",      "win.copy-pdf-path")
+        menu.append_section(None, s3)
 
         self._recent_menu = Gio.Menu()
         self._rebuild_recent_menu()
         menu.append_submenu("Recent files", self._recent_menu)
 
-        s2 = Gio.Menu()
-        s2.append("Keyboard shortcuts", "win.shortcuts")
-        s2.append("Settings…",         "app.preferences")
-        s2.append("About",             "app.about")
-        menu.append_section(None, s2)
+        s4 = Gio.Menu()
+        s4.append("Keyboard shortcuts", "win.shortcuts")
+        s4.append("Settings…",          "app.preferences")
+        s4.append("About",              "app.about")
+        menu.append_section(None, s4)
         return menu
 
     def _rebuild_recent_menu(self) -> None:
@@ -633,7 +624,11 @@ class MainWindow(Adw.ApplicationWindow):
             ("find",         lambda *_: self._editor.show_find(),         "<primary>f"),
             ("find-replace", lambda *_: self._editor.show_find_replace(), "<primary>h"),
             ("export",       self._on_export,                             "<primary><shift>e"),
-            ("export-html",  self._on_export_html,                        None),
+            ("export-html",   self._on_export_html,                       None),
+            ("export-images", self._on_export_images,                     None),
+            ("open-pdf",      self._on_open_pdf_clicked,                  None),
+            ("show-output",   self._on_show_in_file_manager,              None),
+            ("copy-pdf-path", self._on_copy_pdf_path,                     None),
             ("presenter",    self._on_presenter,                          "<primary>p"),
             # F1 for shortcuts (#45 / #86)
             ("shortcuts",    self._on_shortcuts,                          "F1"),
@@ -1207,8 +1202,11 @@ class MainWindow(Adw.ApplicationWindow):
         return GLib.SOURCE_CONTINUE
 
     def _on_undo_state_changed(self, can_undo: bool, can_redo: bool) -> None:
-        self._undo_btn.set_sensitive(can_undo)
-        self._redo_btn.set_sensitive(can_redo)
+        # The buttons are gone; the menu items grey out via their actions.
+        for name, enabled in (("undo", can_undo), ("redo", can_redo)):
+            action = self.lookup_action(name)
+            if action is not None:
+                action.set_enabled(enabled)
 
     def _on_slide_selected(self, sidebar: Sidebar, index: int) -> None:
         self._editor.scroll_to_slide(index)
@@ -1804,7 +1802,7 @@ class MainWindow(Adw.ApplicationWindow):
             self._show_toast(f"Could not export HTML: {e}")
 
 
-    def _on_export_images(self) -> None:
+    def _on_export_images(self, *_) -> None:
         """Export each slide as a full-resolution PNG into a user-chosen folder."""
         dialog = Gtk.FileDialog()
         dialog.set_title("Choose Export Folder")
