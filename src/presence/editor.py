@@ -2618,13 +2618,72 @@ class Editor(Gtk.Box):
             inserted.append(f"![{alt}]({rel})")
         if not inserted:
             return False
+
+        target = self._drop_target_iter(x, y)
+        snippet = "\n\n" + "\n\n".join(inserted)
+        # Leave a blank line after the image unless the document has one
+        # already, so repeated drops do not stack up empty lines.
+        after = target.copy()
+        after.forward_char()
+        if not (after.is_end() or after.ends_line()):
+            snippet += "\n"
+
         self._buffer.begin_user_action()
         try:
-            self._buffer.insert_at_cursor("\n".join(inserted))
+            self._buffer.insert(target, snippet)
         finally:
             self._buffer.end_user_action()
         self._view.grab_focus()
         return True
+
+    def _drop_target_iter(self, x, y) -> "Gtk.TextIter":
+        """
+        Where a file dropped at (*x*, *y*) should be inserted.
+
+        Dropping onto a place in the text means "put it here", so the drop
+        position is used rather than wherever the cursor happens to be — which
+        could be anywhere, including inside the frontmatter, and inserting
+        there destroys it.
+
+        Returns an iter at the end of the target line, so the image becomes
+        its own paragraph rather than being spliced into a word.
+        """
+        it = None
+        try:
+            bx, by = self._view.window_to_buffer_coords(
+                Gtk.TextWindowType.WIDGET, int(x), int(y)
+            )
+            ok, found = self._view.get_iter_at_location(bx, by)
+            if ok:
+                it = found
+        except Exception:
+            it = None
+        if it is None:
+            it = self._buffer.get_iter_at_mark(self._buffer.get_insert())
+
+        line = max(it.get_line(), self._first_body_line())
+        ok, target = self._buffer.get_iter_at_line(line)
+        if not ok:
+            target = self._buffer.get_end_iter()
+        if not target.ends_line():
+            target.forward_to_line_end()
+        return target
+
+    def _first_body_line(self) -> int:
+        """
+        First line that is not part of the YAML frontmatter.
+
+        An image dropped into the frontmatter block silently breaks the
+        document's title, theme and ratio, so nothing is ever inserted above
+        this line.
+        """
+        if not self._is_slide_sep(0):
+            return 0
+        n = self._buffer.get_line_count()
+        for line in range(1, min(n, 50)):
+            if self._is_slide_sep(line):
+                return line + 1
+        return 0
 
     def _on_view_click_for_image(self, gesture, n_press, x, y) -> None:
         """
