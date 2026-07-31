@@ -120,6 +120,12 @@ def build_shortcuts_window(parent) -> Gtk.ShortcutsWindow:
             <property name="title">View</property>
             <child>
               <object class="GtkShortcutsShortcut">
+                <property name="accelerator">&lt;Primary&gt;&lt;Shift&gt;f</property>
+                <property name="title">Focus mode (dim every slide but this one)</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkShortcutsShortcut">
                 <property name="accelerator">F9</property>
                 <property name="title">Toggle slide panel</property>
               </object>

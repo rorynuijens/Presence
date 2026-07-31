@@ -80,6 +80,11 @@ from .slides.splitter import _strip_inline_markdown
 
 _HEADING_RE = re.compile(r'^#{1,3}\s+(.+)$')
 
+# Invalidation value for the cached current-slide range.  Not None: None is a
+# real answer (the cursor is in no slide), and comparing a stale None against
+# a fresh one would skip the repaint that clears the previous marking.
+_NO_BLOCK: tuple[int, int] = (-1, -1)
+
 
 def _parse_alt(alt: str) -> tuple[str, dict]:
     """
@@ -1479,7 +1484,13 @@ class Editor(Gtk.Box):
         self._sep_bands: list[tuple[int, int, str]] = []
         # Line range currently washed as "the slide you are in", so the tag is
         # only reapplied when the cursor actually crosses a boundary.
-        self._tinted_block: tuple[int, int] | None = None
+        self._tinted_block: tuple[int, int] | None = _NO_BLOCK
+        # Focus mode: the same boundary, used the other way round.
+        self._focus_mode: bool = False
+        # The lit range while focus mode is on, None while it is off.  The
+        # band and fold overlays read it to fade what they draw outside it,
+        # so they need it even when the tint has not moved.
+        self._focus_range: tuple[int, int] | None = None
         self._slide_ranges:  list[tuple[int,int]] = []  # (first, last) per slide
 
         # Image-edit popover state
@@ -2904,7 +2915,7 @@ class Editor(Gtk.Box):
         if getattr(self, "_sep_draw", None) is not None:
             self._sep_draw.queue_draw()
         # Boundaries may have moved under the cursor.
-        self._tinted_block = None
+        self._tinted_block = _NO_BLOCK
         self._update_current_slide_tint()
         return GLib.SOURCE_REMOVE
 
@@ -2945,10 +2956,19 @@ class Editor(Gtk.Box):
             layout = _PangoCairo.create_layout(cr)
             layout.set_font_description(Pango.FontDescription.from_string("Sans 8"))
 
+        focus = self._focus_range
         for slide_num, sep_line, title in self._sep_bands:
             y = self._line_y(sep_line)
             if y is None or y < -40 or y > height + 40:
                 continue
+
+            # In focus mode a full-strength rule across a dimmed page would
+            # be the loudest thing left on it.  Only the two that bracket the
+            # slide you are in stay lit; the rest recede with their text.
+            fade = 1.0
+            if focus is not None and sep_line not in (focus[0] - 1,
+                                                      focus[1] + 1):
+                fade = 0.3
 
             # Float the rule in the space the separator tag opens above the
             # line, so it never strikes through the "---" glyphs.
@@ -2960,7 +2980,7 @@ class Editor(Gtk.Box):
                 label_w = layout.get_pixel_size()[0]
 
             cr.save()
-            cr.set_source_rgba(0.55, 0.55, 0.55, 0.45)
+            cr.set_source_rgba(0.55, 0.55, 0.55, 0.45 * fade)
             cr.set_line_width(1.0)
             cr.move_to(0.0, y)
             cr.line_to(max(0.0, width - label_w - 20.0), y)
@@ -2969,7 +2989,7 @@ class Editor(Gtk.Box):
 
             if layout is not None:
                 cr.save()
-                cr.set_source_rgba(0.55, 0.55, 0.55, 0.95)
+                cr.set_source_rgba(0.55, 0.55, 0.55, 0.95 * fade)
                 cr.move_to(width - label_w - 12.0, y - 7.0)
                 _PangoCairo.show_layout(cr, layout)
                 cr.restore()
@@ -3024,14 +3044,22 @@ class Editor(Gtk.Box):
             layout = _PangoCairo.create_layout(cr)
             layout.set_font_description(Pango.FontDescription.from_string("Sans 8"))
 
+        focus = self._focus_range
         for mark in self._fold_marks:
             try:
                 it = self._buffer.get_iter_at_mark(mark)
             except Exception:
                 continue
-            y = self._line_y(it.get_line())
+            line = it.get_line()
+            y = self._line_y(line)
             if y is None or y < -20 or y > height + 20:
                 continue   # scrolled out of view
+
+            # A red warning about a slide you are not writing is exactly the
+            # interruption focus mode exists to remove.
+            fade = 1.0
+            if focus is not None and not focus[0] <= line <= focus[1]:
+                fade = 0.25
 
             y = round(y) + 0.5          # crisp single-pixel rule
             label_w = 0.0
@@ -3040,7 +3068,7 @@ class Editor(Gtk.Box):
                 label_w = layout.get_pixel_size()[0]
 
             cr.save()
-            cr.set_source_rgba(0.85, 0.30, 0.25, 0.75)
+            cr.set_source_rgba(0.85, 0.30, 0.25, 0.75 * fade)
             cr.set_line_width(1.0)
             cr.set_dash([3.0, 3.0])
             cr.move_to(0.0, y)
@@ -3050,7 +3078,7 @@ class Editor(Gtk.Box):
 
             if layout is not None:
                 cr.save()
-                cr.set_source_rgba(0.85, 0.30, 0.25, 0.9)
+                cr.set_source_rgba(0.85, 0.30, 0.25, 0.9 * fade)
                 cr.move_to(width - label_w - 12.0, y - 7.0)
                 _PangoCairo.show_layout(cr, layout)
                 cr.restore()
@@ -3076,6 +3104,7 @@ class Editor(Gtk.Box):
         self._apply_separator_tag()
         self._apply_image_tag()
         self._apply_current_slide_tag()
+        self._apply_focus_tag()
 
     def _apply_current_slide_tag(self) -> None:
         """
@@ -3104,7 +3133,35 @@ class Editor(Gtk.Box):
         # translucent black would only ever muddy a dark theme.
         rgba.parse("rgba(255,255,255,0.05)" if dark else "rgba(0,0,0,0.04)")
         tag.set_property("paragraph-background-rgba", rgba)
-        self._tinted_block = None      # force a repaint at the new colour
+        self._tinted_block = _NO_BLOCK      # force a repaint at the new colour
+
+    def _apply_focus_tag(self) -> None:
+        """
+        Create (or recolour) the tag that dims everything you are not in.
+
+        An opaque grey rather than a translucent one, because flattening the
+        syntax colours is the point: text outside the slide you are writing
+        should read as one quiet block, not as dimmer highlighting that still
+        asks to be parsed.
+
+        One grey, not a light and a dark one.  The wash picks its colour off
+        Adw.StyleManager.get_dark(), but presence-markdown.xml pins the
+        editor's own background to #ffffff whatever the system is set to, so
+        the system's answer does not describe this widget.  Read against the
+        background the scheme actually paints instead.
+        """
+        table = self._buffer.get_tag_table()
+        tag = table.lookup("presence-unfocused")
+        if tag is None:
+            tag = self._buffer.create_tag("presence-unfocused")
+
+        rgba = Gdk.RGBA()
+        # Far enough from the background to stay legible when you glance at
+        # it — focus mode hides nothing — and far enough from the foreground
+        # that the eye does not land there.
+        rgba.parse("#b6b6b6")
+        tag.set_property("foreground-rgba", rgba)
+        self._tinted_block = _NO_BLOCK      # force a repaint at the new colour
 
     def _current_slide_block(self, line_no: int) -> "tuple[int, int] | None":
         """
@@ -3138,22 +3195,56 @@ class Editor(Gtk.Box):
         end = (seps[idx + 1] - 1) if idx + 1 < len(seps) else last
         return (start, end) if start <= end else None
 
+    def _focus_block(self, line_no: int) -> "tuple[int, int] | None":
+        """
+        The block focus mode keeps lit, which is not quite the washed one.
+
+        _current_slide_block() returns None in the frontmatter because the
+        frontmatter is not a slide and washing it as one would lie.  Focus
+        mode asks a different question — what am I editing — and there the
+        frontmatter is a perfectly good answer, so it gets lit like any
+        other block rather than dimming the whole document.
+        """
+        bands = self._sep_bands
+        if bands and bands[0][0] == 1 and 0 <= line_no < bands[0][1]:
+            # Stop before the closing fence: it opens slide 1, and dividers
+            # belong to no block, exactly as the wash treats them.
+            return (0, bands[0][1] - 1)
+        return self._current_slide_block(line_no)
+
     def _update_current_slide_tint(self, *_) -> None:
-        """Wash the slide the cursor is in; a no-op while it stays put."""
+        """
+        Mark the block the cursor is in; a no-op while it stays put.
+
+        Two ways of saying the same thing, and only ever one at a time: the
+        wash tints the block you are in, focus mode takes the contrast out
+        of every other one.  Painting both would say it twice.
+        """
         table = self._buffer.get_tag_table()
         tag = table.lookup("presence-current-slide")
         if tag is None:
             return
 
         cursor = self._buffer.get_iter_at_mark(self._buffer.get_insert())
-        block = self._current_slide_block(cursor.get_line())
+        line   = cursor.get_line()
+        block  = (self._focus_block(line) if self._focus_mode
+                  else self._current_slide_block(line))
         if block == self._tinted_block:
             return
         self._tinted_block = block
+        self._focus_range = block if self._focus_mode else None
 
         self._buffer.remove_tag(tag, self._buffer.get_start_iter(),
                                 self._buffer.get_end_iter())
-        if block is None:
+        self._update_focus_dim(block)
+        # The bands and fold rules fade with the text they annotate, so they
+        # have to be redrawn whenever the lit block moves.
+        for area in (getattr(self, "_sep_draw", None),
+                     getattr(self, "_fold_draw", None)):
+            if area is not None:
+                area.queue_draw()
+
+        if block is None or self._focus_mode:
             return
         ok1, start = self._buffer.get_iter_at_line(block[0])
         if not ok1:
@@ -3171,6 +3262,52 @@ class Editor(Gtk.Box):
         else:
             end = self._buffer.get_end_iter()
         self._buffer.apply_tag(tag, start, end)
+
+    def _update_focus_dim(self, block: "tuple[int, int] | None") -> None:
+        """Grey out everything outside *block*; clear it when focus is off."""
+        table = self._buffer.get_tag_table()
+        tag = table.lookup("presence-unfocused")
+        if tag is None:
+            return
+
+        self._buffer.remove_tag(tag, self._buffer.get_start_iter(),
+                                self._buffer.get_end_iter())
+        if not self._focus_mode or block is None:
+            return
+
+        # Syntax highlighting colours the same characters, and between two
+        # tags the higher priority wins rather than the one applied last.
+        # GtkSourceView creates its tags as it highlights, so the table
+        # grows behind us and the top has to be re-taken every time.
+        tag.set_priority(table.get_size() - 1)
+
+        ok, top = self._buffer.get_iter_at_line(block[0])
+        if ok:
+            self._buffer.apply_tag(tag, self._buffer.get_start_iter(), top)
+
+        last_line = self._buffer.get_line_count() - 1
+        if block[1] < last_line:
+            ok2, bottom = self._buffer.get_iter_at_line(block[1] + 1)
+            if ok2:
+                self._buffer.apply_tag(tag, bottom, self._buffer.get_end_iter())
+
+    def set_focus_mode(self, enabled: bool) -> None:
+        """
+        Dim every slide but the one the cursor is in.
+
+        The wash inverted: instead of tinting the block you are working in,
+        take the contrast away from the rest, so the slide you are writing
+        is the only thing on the page at full strength.
+        """
+        enabled = bool(enabled)
+        if enabled == self._focus_mode:
+            return
+        self._focus_mode = enabled
+        self._tinted_block = _NO_BLOCK      # both marks are recomputed from scratch
+        self._update_current_slide_tint()
+
+    def get_focus_mode(self) -> bool:
+        return self._focus_mode
 
     def _on_cursor_moved(self, buffer, location, mark) -> None:
         if mark is buffer.get_insert():

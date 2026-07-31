@@ -119,6 +119,7 @@ _EDITOR_KEY_MAP: dict[str, str] = {
     "auto_indent":      "editor_auto_indent",
     "spaces_tabs":      "editor_spaces_tabs",
     "line_length":      "editor_line_length",
+    "focus_mode":       "editor_focus_mode",
 }
 
 
@@ -143,13 +144,14 @@ def load_editor_prefs() -> dict:
             "highlight_line":   bool(data.get("editor_highlight_line",   True)),
             "auto_indent":      bool(data.get("editor_auto_indent",      True)),
             "spaces_tabs":      bool(data.get("editor_spaces_tabs",      True)),
+            "focus_mode":       bool(data.get("editor_focus_mode",       False)),
         }
     except (OSError, json.JSONDecodeError, TypeError, ValueError):
         return {
             "theme": "light", "ratio": "16:9", "logo": "", "font_size": 13,
             "syntax_highlight": True, "line_numbers": True,
             "highlight_line": True, "auto_indent": True, "spaces_tabs": True,
-            "line_length": 64,
+            "line_length": 64, "focus_mode": False,
         }
 
 

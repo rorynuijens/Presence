@@ -179,6 +179,9 @@ class MainWindow(Adw.ApplicationWindow):
         self._editor.set_auto_indent(prefs.get("auto_indent", True))
         self._editor.set_spaces_instead_of_tabs(prefs.get("spaces_tabs", True))
         self._editor.set_line_length(prefs.get("line_length", 64))
+        # Focus mode is a mode, not a setting, but it still outlives the
+        # window: the app should open the way it was left.
+        self._set_focus_mode(prefs.get("focus_mode", False), persist=False)
 
         self._autosave_source: int | None = GLib.timeout_add_seconds(30, self._autosave)
 
@@ -558,6 +561,13 @@ class MainWindow(Adw.ApplicationWindow):
         s1.append("Redo", "win.redo")
         menu.append_section(None, s1)
 
+        # A mode you turn on while writing, not a preference you configure
+        # once, so it belongs in the menu rather than in Settings.  The
+        # action is stateful, which is what draws this as a check item.
+        s1b = Gio.Menu()
+        s1b.append("Focus mode", "win.focus-mode")
+        menu.append_section(None, s1b)
+
         # Named for what comes out, not for the machinery.
         s2 = Gio.Menu()
         s2.append("Turn a document into slides…", "win.ai-import")
@@ -662,6 +672,17 @@ class MainWindow(Adw.ApplicationWindow):
                 self.get_application().set_accels_for_action(
                     f"win.{name}", [accel]
                 )
+
+        # Focus mode carries state so the menu can draw it checked, which
+        # the plain actions above cannot do.
+        focus = Gio.SimpleAction.new_stateful(
+            "focus-mode", None, GLib.Variant.new_boolean(False)
+        )
+        focus.connect("activate", self._on_focus_mode)
+        self.add_action(focus)
+        self.get_application().set_accels_for_action(
+            "win.focus-mode", ["<primary><shift>f"]
+        )
 
         # Presenter action: disabled until first successful conversion (#27)
         self._presenter_action = self.lookup_action("presenter")
@@ -1529,6 +1550,25 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_toggle_theme_panel(self, *_) -> None:
         self._theme_panel_btn.set_active(not self._theme_panel_btn.get_active())
+
+    def _on_focus_mode(self, action, _param) -> None:
+        self._set_focus_mode(not action.get_state().get_boolean())
+
+    def _set_focus_mode(self, enabled: bool, persist: bool = True) -> None:
+        """
+        Turn focus mode on or off, and remember it for next time.
+
+        *persist* is False when restoring at startup, which is reading the
+        preference rather than setting it — writing it straight back would
+        touch session.json on every launch for nothing.
+        """
+        enabled = bool(enabled)
+        self._editor.set_focus_mode(enabled)
+        action = self.lookup_action("focus-mode")
+        if action is not None:
+            action.set_state(GLib.Variant.new_boolean(enabled))
+        if persist:
+            save_editor_prefs({"focus_mode": enabled})
 
     def _on_left_split_show_changed(self, split, _param) -> None:
         self._sidebar_btn.set_active(split.get_show_sidebar())
