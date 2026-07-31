@@ -260,19 +260,68 @@ def speaking_seconds(words: int, wpm: int = 110) -> int:
     return max(1, round(words / wpm * 60))
 
 
-def slide_seconds(notes_md: str, body_md: str = "", wpm: int = 110) -> int:
+@dataclass(frozen=True)
+class Timing:
+    """How long a slide takes, and which words that came from."""
+
+    seconds:     int
+    words:       int
+    from_script: bool
+
+
+def slide_timing(notes_md: str, body_md: str = "", wpm: int = 110) -> Timing:
     """
-    How long one slide takes to deliver.
+    How long one slide takes to deliver, and what the estimate counted.
 
     Measured from the script where the writer wrote one, because what
     takes time is what you say, not the words standing behind you.  A
     slide with no script falls back to its own text — the only estimate
-    left, and the one the thumbnail strip already shows.
+    left.
+
+    The word count comes back with the duration so a caller showing both
+    shows the same two numbers: a count that did not feed the estimate
+    would contradict it on every slide carrying a script.
     """
     words = script_words(notes_md)
-    if words == 0:
+    from_script = words > 0
+    if not from_script:
         words = len(re.findall(r'\S+', body_md or ""))
-    return speaking_seconds(words, wpm)
+    return Timing(speaking_seconds(words, wpm), words, from_script)
+
+
+def slide_seconds(notes_md: str, body_md: str = "", wpm: int = 110) -> int:
+    """Seconds one slide takes to deliver; see :func:`slide_timing`."""
+    return slide_timing(notes_md, body_md, wpm).seconds
+
+
+def document_timing(markdown_text: str, wpm: int = 110) -> Timing:
+    """
+    How long a whole document takes to deliver, slide by slide.
+
+    The header counted every non-space token in the file, which made the
+    separators, the frontmatter and each ``#`` a word the speaker would
+    say.  Summing the per-slide estimates instead means the header, the
+    thumbnail strip and the presenter's pace all quote one number.
+
+    ``from_script`` is true when any slide in the deck carries one, since
+    that is what the total is mostly made of.
+    """
+    from .frontmatter import parse_frontmatter
+    from .splitter import extract_images, extract_speaker_notes, split_slides
+
+    _, body_text = parse_frontmatter(markdown_text)
+    per = []
+    for slide_md in split_slides(body_text):
+        body, notes = extract_speaker_notes(slide_md)
+        # Images out, as the strip's own body count has them: a picture is
+        # not read aloud, and "![A chart](chart.png)" is not three words.
+        cleaned, _images = extract_images(body)
+        per.append(slide_timing(notes, cleaned, wpm))
+    return Timing(
+        sum(t.seconds for t in per),
+        sum(t.words for t in per),
+        any(t.from_script for t in per),
+    )
 
 
 def deck_schedule(slide_info: list[dict], wpm: int = 110,

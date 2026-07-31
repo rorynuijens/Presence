@@ -12,6 +12,7 @@ from gi.repository import Gtk, Adw, GObject, GLib, GdkPixbuf, Gdk, Pango
 log = logging.getLogger(__name__)
 
 from .app_utils import png_bytes_to_texture
+from .slides.script import Timing, slide_timing
 
 
 _css_provider_registered = False
@@ -154,17 +155,26 @@ class Sidebar(Gtk.Box):
             len(_re.findall(r'\S+', s.get('body', '')))
             for s in slide_info
         ]
-        # Overflow is measured from the laid-out page, not guessed from a
-        # word count: the converter reports the line where each slide runs
-        # out of room, and None when it fits.  Fall back to the old >120-word
-        # heuristic only when no measurement is available.
+        # A slide takes as long as its script takes to say, so that is what
+        # the strip times it by — the same measure, and the same function,
+        # the presenter view paces against.  Only a slide with no script is
+        # timed by the words standing behind the speaker.
+        timings = [
+            slide_timing(n, s.get('body', ''), wpm)
+            for s, n in zip(slide_info, notes)
+        ]
+        # Overflow stays a fact about the slide, not about the talk, so it
+        # keeps counting the body.  It is measured from the laid-out page
+        # rather than guessed: the converter reports the line where each
+        # slide runs out of room, and None when it fits.  Fall back to the
+        # old >120-word heuristic only when no measurement is available.
         overflows = [
             (s["fold_line"] is not None) if s.get("fold_line", "missing") != "missing"
             else w > 120
             for s, w in zip(slide_info, word_counts)
         ]
         self._rebuild(titles, notes, thumbnails, has_notes,
-                      word_counts, wpm, overflows)
+                      timings, overflows)
 
     def select_slide(self, index: int) -> None:
         if 0 <= index < len(self._rows):
@@ -226,8 +236,7 @@ class Sidebar(Gtk.Box):
 
     def _rebuild(self, titles, notes_list, thumbnails,
                  has_notes: list | None = None,
-                 word_counts: list | None = None,
-                 wpm: int = 110,
+                 timings: list | None = None,
                  overflows: list | None = None) -> int:
         for row in self._rows:
             self._list.remove(row)
@@ -243,8 +252,8 @@ class Sidebar(Gtk.Box):
             self._rows.append(row)
             if has_notes is not None and i < len(has_notes):
                 row.set_has_notes(has_notes[i])
-            if word_counts is not None and i < len(word_counts):
-                row.set_stats(word_counts[i], wpm)
+            if timings is not None and i < len(timings):
+                row.set_stats(timings[i])
             if overflows is not None and i < len(overflows):
                 row.set_overflow(overflows[i])
 
@@ -431,28 +440,25 @@ class _SlideRow(Gtk.ListBoxRow):
         """Show/hide the FULL overflow warning badge."""
         self._overflow_badge.set_visible(overflow)
 
-    def set_stats(self, words: int, wpm: int) -> None:
-        """Show word count and estimated speaking time below the title."""
-        if words == 0:
+    def set_stats(self, timing: Timing) -> None:
+        """
+        Show how long the slide takes, and the words that estimate counted.
+
+        The count is named when it comes from the script, because a slide
+        holding six words and ninety seconds of talking otherwise reads as
+        a mistake in the arithmetic rather than as a long slide.
+        """
+        if timing.words == 0:
             self._stats_label.set_visible(False)
             return
-        secs = max(1, round(words / wpm * 60))
-        if secs < 60:
-            time_str = f"{secs}s"
+        if timing.seconds < 60:
+            time_str = f"{timing.seconds}s"
         else:
-            m, s = divmod(secs, 60)
+            m, s = divmod(timing.seconds, 60)
             time_str = f"{m}m {s:02d}s"
-        # Warn visually if slide is very dense (>80 words)
-        self._stats_label.set_label(f"{words} words · ~{time_str}")
+        noun = "script words" if timing.from_script else "words"
+        self._stats_label.set_label(f"{timing.words} {noun} · ~{time_str}")
         self._stats_label.set_visible(True)
-        if words > 80:
-            self._stats_label.add_css_class("warning")
-            self._stats_label.set_tooltip_text(
-                "This slide has a lot of text — consider splitting it"
-            )
-        else:
-            self._stats_label.remove_css_class("warning")
-            self._stats_label.set_tooltip_text("")
 
     def set_has_notes(self, has_notes: bool) -> None:
         """Show/hide the no-notes warning indicator."""

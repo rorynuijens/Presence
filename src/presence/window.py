@@ -38,6 +38,7 @@ from .session    import (save_last_file, load_window_state, save_window_state,
 from .session    import recovery_path_for, recovery_dir
 from .slides.themes import ASPECT_RATIOS
 from .slides.splitter import split_slides
+from .slides.script import document_timing
 from .slides.frontmatter import parse_frontmatter, raw_frontmatter
 
 UNTITLED = "Untitled"
@@ -2093,9 +2094,14 @@ class MainWindow(Adw.ApplicationWindow):
     # ── Word count ────────────────────────────────────────────────────────────
 
     def _update_word_count(self, text: str) -> None:
-        words   = len(re.findall(r'\S+', text))
+        # Counted the way the strip and the presenter count it: what each
+        # slide's script says, or its own text where there is no script.
+        # Counting the file's tokens instead made "---", "^^^" and every
+        # "#" a word somebody was going to say out loud.
         # Speaking rate is user-configurable (default 110 WPM)
-        minutes = max(1, round(words / self._speaking_rate))
+        timing  = document_timing(text, self._speaking_rate)
+        words   = timing.words
+        minutes = max(1, round(timing.seconds / 60))
         time_str = (f"{minutes} min to present" if minutes < 60
                     else f"{minutes // 60}h {minutes % 60}m")
         self._title_label.set_subtitle(f"{words} words · ~{time_str}")

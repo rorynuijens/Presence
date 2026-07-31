@@ -8,8 +8,8 @@ what the pace readout accuses the speaker of, so it is worth pinning too.
 
 from presence.slides.script import (
     BOLD, BULLET, CODE, HEADING, ITALIC, MONO, PARA, QUOTE,
-    Span, deck_schedule, parse_inline, parse_script, script_words,
-    slide_seconds, speaking_seconds,
+    Span, deck_schedule, document_timing, parse_inline, parse_script,
+    script_words, slide_seconds, slide_timing, speaking_seconds,
 )
 
 
@@ -163,6 +163,74 @@ def test_a_slide_is_timed_by_its_script_not_by_its_bullets():
 def test_a_slide_without_a_script_falls_back_to_its_own_text():
     body = " ".join(["word"] * 55)
     assert slide_seconds("", body, 110) == 30
+
+
+def test_the_timing_reports_the_words_its_estimate_counted():
+    # The thumbnail strip prints both numbers, so they have to be the
+    # same two numbers: a script's words with a script's duration.
+    notes = " ".join(["word"] * 110)
+    t = slide_timing(notes, "Three short bullets", 110)
+    assert (t.words, t.seconds, t.from_script) == (110, 60, True)
+
+
+def test_a_scriptless_slide_reports_its_own_words_as_its_own():
+    t = slide_timing("", " ".join(["word"] * 55), 110)
+    assert (t.words, t.seconds, t.from_script) == (55, 30, False)
+
+
+def test_markup_is_not_counted_as_words_the_strip_shows():
+    # "See **the docs**" is three words said, not four tokens typed.
+    t = slide_timing("See **the docs**", "", 110)
+    assert (t.words, t.from_script) == (3, True)
+
+
+def test_a_slide_with_neither_script_nor_body_has_nothing_to_show():
+    # The strip hides its stats line on a zero count, so this is the
+    # difference between a blank line and "0 words · ~0s".
+    t = slide_timing("", "", 110)
+    assert (t.words, t.seconds, t.from_script) == (0, 0, False)
+
+
+def test_a_picture_slide_with_a_script_is_still_timed():
+    # No body words at all: the old body-only count hid the stats line on
+    # exactly the slides a script has the most to say about.
+    t = slide_timing(" ".join(["word"] * 55), "", 110)
+    assert (t.words, t.seconds, t.from_script) == (55, 30, True)
+
+
+def test_a_document_totals_its_slides_and_nothing_else():
+    # The separators, the frontmatter, the "#" and the bullet markers are
+    # not words anyone says; the header used to count all of them.
+    doc = (
+        "---\n"
+        "title: A talk\n"
+        "---\n\n"
+        "# Heading\n\n"
+        "- One\n"
+        "- Two\n\n"
+        "^^^\n"
+        + " ".join(["word"] * 110) + "\n\n"
+        "---\n\n"
+        "# Second\n\n"
+        + " ".join(["word"] * 53) + "\n"
+    )
+    t = document_timing(doc, 110)
+    # 110 script words, then 55 body words: "Second" and the "#" that
+    # heads it are on the slide, so they count where there is no script.
+    assert (t.words, t.seconds, t.from_script) == (165, 90, True)
+
+
+def test_a_documents_total_is_the_sum_the_strip_shows():
+    doc = ("# One\n\n^^^\n" + " ".join(["w"] * 110) + "\n\n"
+           "---\n\n# Two\n\n^^^\n" + " ".join(["w"] * 55))
+    per = [slide_timing(" ".join(["w"] * 110), "", 110),
+           slide_timing(" ".join(["w"] * 55), "", 110)]
+    assert document_timing(doc, 110).seconds == sum(t.seconds for t in per)
+
+
+def test_a_picture_is_not_words_in_the_document_total():
+    doc = "![A chart of the results](chart.png)\n"
+    assert document_timing(doc, 110).words == 0
 
 
 def test_the_schedule_is_cumulative():
