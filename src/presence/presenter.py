@@ -13,12 +13,10 @@ log = logging.getLogger(__name__)
 
 from .app_utils import png_bytes_to_texture
 
-# Imported at module level so _set_notes does not pay import overhead
-# on every slide navigation keystroke.
-try:
-    from .slides.renderer import render_slide_content as _render_slide_content
-except ImportError:
-    _render_slide_content = None
+from .slides.script import (
+    BOLD, BULLET, CODE, HEADING, ITALIC, MONO, PARA, QUOTE,
+    deck_schedule, parse_script,
+)
 
 try:
     gi.require_version("WebKit", "6.0")
@@ -444,6 +442,18 @@ class PresenterWindow(Adw.Window):
         )
         self._parent_window = parent_window
 
+        # Speaking rate the sidebar's estimates already use, so the pace
+        # readout and the thumbnail strip do not disagree about the deck.
+        self._wpm: int = getattr(parent_window, '_speaking_rate', 110)
+        # Second each slide is due to end, cumulative from the start.
+        self._schedule: list[int] = deck_schedule(
+            slide_info, self._wpm, self._target_secs
+        )
+        # (start, end) character offsets of each slide's section of the
+        # script, and a mark at each section's first line to scroll to.
+        self._script_ranges: list[tuple[int, int]] = []
+        self._script_marks:  list = []
+
         self._build_ui()
 
         self._slideshow = SlideshowWindow(
@@ -497,30 +507,41 @@ class PresenterWindow(Adw.Window):
         two thumbnails and the slide counter.  The entire window background
         is forced dark so the presenter's eyes are not strained.
         """
-        # ── Force dark background on this window only ────────────────────────
-        # Use add_provider_for_display ONLY for classes that must be dark
-        # (presenter-left, presenter-topbar etc.) — NOT for 'window' which
-        # would darken every other window on the display.
-        # The window background is set via a name-scoped rule instead.
+        # ── Force dark colours on this window only ───────────────────────────
+        # Installed for the whole display, with every selector scoped under
+        # #presenter-window so nothing outside this window can match.
+        #
+        # It used to be added to the window's own style context, which is
+        # why every class rule below was dead: in GTK 4 a provider on a
+        # widget's style context styles that widget and not its children, so
+        # only the #presenter-window rule ever applied.  The window looked
+        # right anyway — its background covers everything and its colour is
+        # inherited — which is what hid it.  Verified by asking the widgets:
+        # the counter, the thumbnail captions and the pace readout all
+        # reported the inherited #e8e8e8 rather than their own greys.
         self.set_name("presenter-window")
-        css = Gtk.CssProvider()
+        self._window_css = Gtk.CssProvider()
         _dark = (
             "#presenter-window { background: #111111; color: #e8e8e8; }"
-            ".presenter-left { background: #1a1a1a; border-right: 1px solid #333; }"
-            ".notes-title { color: #ffffff; font-weight: bold; }"
-            ".notes-hint { color: #666666; }"
-            ".thumb-label { color: #888888; font-size: 11px; }"
-            ".counter-label { color: #aaaaaa; }"
-            ".presenter-topbar { background: #0d0d0d; "
-            "  border-bottom: 1px solid #2a2a2a; }"
+            "#presenter-window .presenter-left "
+            "  { background: #1a1a1a; border-right: 1px solid #333; }"
+            "#presenter-window .notes-title { color: #ffffff; font-weight: bold; }"
+            "#presenter-window .notes-hint { color: #666666; }"
+            "#presenter-window .thumb-label { color: #888888; font-size: 11px; }"
+            "#presenter-window .counter-label { color: #aaaaaa; }"
+            "#presenter-window .presenter-topbar "
+            "  { background: #0d0d0d; border-bottom: 1px solid #2a2a2a; }"
+            "#presenter-window .pace-label { color: #8a8a8a; }"
+            "#presenter-window .pace-label.ahead  { color: #78c078; }"
+            "#presenter-window .pace-label.behind { color: #e0a45c; }"
         )
         try:
-            css.load_from_string(_dark)
+            self._window_css.load_from_string(_dark)
         except AttributeError:
-            css.load_from_data(_dark.encode())
-        # Scope to this widget only — never pollute other windows
-        self.get_style_context().add_provider(
-            css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+            self._window_css.load_from_data(_dark.encode())
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(), self._window_css,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
         )
 
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -599,6 +620,17 @@ class PresenterWindow(Adw.Window):
         reset_btn.add_css_class("flat")
         reset_btn.connect("clicked", self._reset_timer)
         topbar.append(reset_btn)
+
+        # Pace: the clock says how long you have been talking, this says
+        # whether that is the right amount for where you have got to.
+        self._pace_label = Gtk.Label(label="")
+        self._pace_label.add_css_class("pace-label")
+        self._pace_label.add_css_class("monospace")
+        self._pace_label.set_margin_start(12)
+        self._pace_label.set_tooltip_text(
+            "How your elapsed time compares with the script up to this slide"
+        )
+        topbar.append(self._pace_label)
 
         spacer_r = Gtk.Box()
         spacer_r.set_hexpand(True)
@@ -695,6 +727,16 @@ class PresenterWindow(Adw.Window):
         self._current_picture.add_css_class("card")
         left.append(self._current_picture)
 
+        # What this slide is scheduled to take, so the pace figure above can
+        # be read as "and this slide still owes me a minute".
+        self._slide_time_label = Gtk.Label(label="")
+        self._slide_time_label.add_css_class("thumb-label")
+        self._slide_time_label.set_xalign(0)
+        self._slide_time_label.set_margin_start(12)
+        self._slide_time_label.set_margin_top(6)
+        self._slide_time_label.set_margin_bottom(10)
+        left.append(self._slide_time_label)
+
         # Separator
         left.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
 
@@ -722,7 +764,7 @@ class PresenterWindow(Adw.Window):
 
         left.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
 
-        # ── Notes area: title + large scrollable notes ────────────────────────
+        # ── Script area: title + the running script of the whole talk ─────────
         notes_area = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         notes_area.set_hexpand(True)
         notes_area.set_vexpand(True)
@@ -743,39 +785,45 @@ class PresenterWindow(Adw.Window):
 
         notes_area.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
 
-        # Notes — WebKit for Markdown rendering, falls back to TextView
-        notes_scroll = Gtk.ScrolledWindow()
-        notes_scroll.set_vexpand(True)
-        notes_scroll.set_hexpand(True)
-        notes_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        # The script — a GtkTextView rather than the WebKit view this pane
+        # used to be.  A teleprompter has to scroll itself to the section
+        # being spoken and take the contrast out of the rest, and a WebView
+        # can do neither without JavaScript, which the app switches off
+        # everywhere it renders the user's own document.  A text buffer does
+        # both natively: a mark to scroll to, and a tag to dim with.
+        self._script_scroll = Gtk.ScrolledWindow()
+        self._script_scroll.set_vexpand(True)
+        self._script_scroll.set_hexpand(True)
+        self._script_scroll.set_policy(Gtk.PolicyType.NEVER,
+                                       Gtk.PolicyType.AUTOMATIC)
 
-        if _WEBKIT:
-            notes_settings = WebKit.Settings()
-            notes_settings.set_enable_javascript(False)
-            notes_settings.set_allow_file_access_from_file_urls(False)
-            if _WEBKIT_VERSION == 6:
-                ns = WebKit.NetworkSession.new_ephemeral()
-                self._notes_view = WebKit.WebView(
-                    settings=notes_settings, network_session=ns
-                )
-            else:
-                ctx = WebKit.WebContext.new_ephemeral()
-                self._notes_view = WebKit.WebView.new_with_context(ctx)
-                self._notes_view.set_settings(notes_settings)
-            self._notes_view.set_vexpand(True)
-            self._notes_view.set_hexpand(True)
-            notes_scroll.set_child(self._notes_view)
-        else:
-            self._notes_view = Gtk.TextView()
-            self._notes_view.set_editable(False)
-            self._notes_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
-            self._notes_view.set_top_margin(20)
-            self._notes_view.set_left_margin(28)
-            self._notes_view.set_right_margin(28)
-            self._notes_view.add_css_class("body")
-            notes_scroll.set_child(self._notes_view)
+        self._notes_view = Gtk.TextView()
+        self._notes_view.set_name("presenter-script")
+        self._notes_view.set_editable(False)
+        self._notes_view.set_cursor_visible(False)
+        self._notes_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        self._notes_view.set_top_margin(24)
+        self._notes_view.set_bottom_margin(240)   # let the last slide scroll up
+        self._notes_view.set_left_margin(28)
+        self._notes_view.set_right_margin(28)
+        # Space between the wrapped lines of one block, kept smaller than
+        # the space each block's tag puts above itself — otherwise every
+        # gap is the same size and the blocks stop being visible as blocks.
+        self._notes_view.set_pixels_inside_wrap(4)
+        self._notes_view.set_vexpand(True)
+        self._notes_view.set_hexpand(True)
+        self._script_scroll.set_child(self._notes_view)
 
-        notes_area.append(notes_scroll)
+        self._script_css = Gtk.CssProvider()
+        self._notes_view.get_style_context().add_provider(
+            self._script_css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+        self._apply_script_font()
+
+        self._build_script_tags()
+        self._build_script_buffer()
+
+        notes_area.append(self._script_scroll)
 
         GLib.idle_add(self._update_monitor_indicator)
 
@@ -830,13 +878,14 @@ class PresenterWindow(Adw.Window):
         else:
             self._next_picture.set_paintable(None)
 
-        # Slide title above notes
+        # Slide title above the script — the section heading says the same
+        # thing, but it scrolls away and this does not.
         title = self._slide_info[index].get("title", f"Slide {index + 1}")
         self._slide_title_label.set_label(title)
 
-        # Render speaker notes as Markdown HTML (#73)
-        notes_md = self._slide_info[index].get("notes", "")
-        self._set_notes(notes_md)
+        self._focus_script(index)
+        self._update_slide_time()
+        self._update_pace()
 
         self._counter_label.set_text(f"{index + 1} / {self._n_slides}")
         # Guard against drawing before the widget has been allocated
@@ -908,58 +957,197 @@ class PresenterWindow(Adw.Window):
                 cr.set_line_width(1.0)
                 cr.stroke()
 
-    def _set_notes(self, notes_md: str) -> None:
-        """Render *notes_md* as Markdown HTML into the notes view (#73)."""
-        import html as _html
-        fs = self._notes_font_size
-        if _WEBKIT and hasattr(self._notes_view, "load_html"):
-            try:
-                if notes_md.strip() and _render_slide_content is not None:
-                    html_body = _render_slide_content(notes_md)
-                elif notes_md.strip():
-                    # Escape raw notes so a slide containing </pre><script>…
-                    # cannot inject HTML into the notes WebKit view.
-                    html_body = f"<pre>{_html.escape(notes_md)}</pre>"
-                else:
-                    html_body = (
-                        "<p style='color:#555555;font-style:italic'>"
-                        "No speaker notes for this slide.</p>"
-                    )
-                html = (
-                    "<!DOCTYPE html><html><head><meta charset='UTF-8'>"
-                    f"<style>"
-                    f"body{{font-family:sans-serif;font-size:{fs}px;"
-                    f"line-height:1.65;padding:20px 28px;margin:0;"
-                    f"color:#e8e8e8;background:#111111}}"
-                    f"h1,h2,h3{{color:#ffffff;margin-top:0.8em}}"
-                    f"strong{{color:#ffffff}}"
-                    f"em{{color:#aaaaaa}}"
-                    f"code{{background:#2a2a2a;color:#88ccff;"
-                    f"padding:2px 6px;border-radius:3px}}"
-                    f"ul,ol{{padding-left:1.4em}}"
-                    f"li{{margin-bottom:0.3em}}"
-                    f"blockquote{{border-left:3px solid #444;"
-                    f"margin-left:0;padding-left:1em;color:#aaaaaa}}"
-                    f"</style></head>"
-                    f"<body>{html_body}</body></html>"
-                )
-                self._notes_view.load_html(html, "about:blank")
-            except Exception:
-                # Exception fallback: also escape to be safe.
-                self._notes_view.load_html(
-                    f"<html><body style='background:#111;color:#e8e8e8;"
-                    f"font-family:sans-serif;font-size:{fs}px;padding:20px'>"
-                    f"<pre style='white-space:pre-wrap'>"
-                    f"{_html.escape(notes_md)}</pre>"
-                    f"</body></html>",
-                    "about:blank",
-                )
-        else:
-            buf = self._notes_view.get_buffer()
-            buf.set_text(
-                notes_md if notes_md.strip()
-                else "No speaker notes for this slide."
+    # ── The script ────────────────────────────────────────────────────────────
+
+    def _apply_script_font(self) -> None:
+        """
+        Colour and size the script pane; its tags scale relative to this.
+
+        Carried by the pane's own provider rather than the window-wide one
+        that dresses the rest of this window.  A GtkTextView paints its
+        text on a child "text" node whose background comes from the theme,
+        and reaching that node from a provider hung on the window left the
+        pane white — with white headings on it, which is to say no
+        headings at all.
+        """
+        css = (
+            f"#presenter-script, #presenter-script text {{"
+            f"  background-color: #111111; color: #e8e8e8;"
+            f"  font-size: {self._notes_font_size}px; }}"
+        )
+        try:
+            self._script_css.load_from_string(css)
+        except AttributeError:
+            self._script_css.load_from_data(css.encode())
+
+    def _build_script_tags(self) -> None:
+        """
+        The tags the script is painted with.
+
+        Order matters: between two tags on the same characters the higher
+        priority wins, and priority follows the order tags were added to the
+        table.  "dim" is created last so that it beats every colour above
+        it — a dimmed heading has to actually go grey.
+        """
+        buf = self._notes_view.get_buffer()
+
+        buf.create_tag("heading", weight=Pango.Weight.BOLD, scale=1.12,
+                       foreground="#ffffff",
+                       pixels_above_lines=28, pixels_below_lines=10)
+        buf.create_tag("para", pixels_above_lines=18)
+        # Negative indent hangs the marker to the left of the text, so a
+        # wrapped item lines up under its own first word, not under the dot.
+        buf.create_tag("bullet", left_margin=76, indent=-24,
+                       pixels_above_lines=12)
+        buf.create_tag("quote", left_margin=60, style=Pango.Style.ITALIC,
+                       foreground="#b4b4b4", pixels_above_lines=18)
+        buf.create_tag("code", family="monospace", scale=0.88,
+                       foreground="#88ccff", left_margin=60,
+                       pixels_above_lines=18)
+        buf.create_tag("placeholder", style=Pango.Style.ITALIC,
+                       foreground="#5a5a5a", pixels_above_lines=18)
+
+        buf.create_tag(BOLD,   weight=Pango.Weight.BOLD, foreground="#ffffff")
+        buf.create_tag(ITALIC, style=Pango.Style.ITALIC)
+        buf.create_tag(MONO,   family="monospace", foreground="#88ccff")
+
+        # Last, and therefore top of the pile.  Dark enough to drop out of
+        # the way, light enough to read on purpose — a speaker glancing at
+        # what is coming next should not have to lean in.
+        buf.create_tag("dim", foreground="#606060")
+
+    _BLOCK_TAGS = {
+        HEADING: "heading",
+        PARA:    "para",
+        BULLET:  "bullet",
+        QUOTE:   "quote",
+        CODE:    "code",
+    }
+
+    def _build_script_buffer(self) -> None:
+        """
+        Lay the whole talk out as one document, section by section.
+
+        Built once rather than per slide: the point of a running script is
+        that the words either side of the current section stay on screen,
+        and rebuilding the buffer on every keypress would throw away the
+        scroll position that makes it readable.
+        """
+        buf = self._notes_view.get_buffer()
+        buf.set_text("")
+        self._script_ranges = []
+        self._script_marks  = []
+
+        for i, info in enumerate(self._slide_info):
+            start = buf.get_end_iter().get_offset()
+            title = info.get("title") or f"Slide {i + 1}"
+            self._insert_block(buf, f"{i + 1} · {title}", "heading")
+            self._script_marks.append(
+                buf.create_mark(None, buf.get_iter_at_offset(start), True)
             )
+
+            blocks = parse_script(info.get("notes", ""))
+            if not blocks:
+                # Named, not left blank.  A slide with nothing to say is a
+                # fact about the talk, and in a running script it reads as
+                # one line rather than as an empty pane.
+                self._insert_block(buf, "— nothing scripted —", "placeholder")
+            for block in blocks:
+                self._insert_block(buf, block.text,
+                                   self._BLOCK_TAGS.get(block.kind, "para"),
+                                   block.spans)
+
+            self._script_ranges.append(
+                (start, buf.get_end_iter().get_offset())
+            )
+
+    def _insert_block(self, buf, text: str, tag: str, spans=()) -> None:
+        """Append one block, tagged as itself and under its emphasis spans."""
+        off = buf.get_end_iter().get_offset()
+        buf.insert(buf.get_end_iter(), text + "\n")
+        buf.apply_tag_by_name(
+            tag, buf.get_iter_at_offset(off),
+            buf.get_iter_at_offset(off + len(text)),
+        )
+        for span in spans:
+            buf.apply_tag_by_name(
+                span.style,
+                buf.get_iter_at_offset(off + span.start),
+                buf.get_iter_at_offset(off + span.end),
+            )
+
+    def _focus_script(self, index: int) -> None:
+        """Light this slide's section of the script and dim the rest."""
+        if not self._script_ranges or not (0 <= index < len(self._script_ranges)):
+            return
+        buf = self._notes_view.get_buffer()
+        dim = buf.get_tag_table().lookup("dim")
+        buf.remove_tag(dim, buf.get_start_iter(), buf.get_end_iter())
+
+        lo, hi = self._script_ranges[index]
+        if lo > 0:
+            buf.apply_tag(dim, buf.get_start_iter(),
+                          buf.get_iter_at_offset(lo))
+        end = buf.get_end_iter()
+        if hi < end.get_offset():
+            buf.apply_tag(dim, buf.get_iter_at_offset(hi), end)
+
+        # Near the top, but not at it: a line or two of what was just said
+        # is the cheapest way to know you are in the right place.
+        self._notes_view.scroll_to_mark(
+            self._script_marks[index], 0.0, True, 0.0, 0.10
+        )
+
+    # ── Pace ──────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _mmss(secs: int) -> str:
+        m, s = divmod(max(0, int(secs)), 60)
+        return f"{m}:{s:02d}"
+
+    def _update_pace(self) -> None:
+        """
+        Say whether the clock and the script agree about where you are.
+
+        Compared against a window rather than a point: a slide is due to
+        run from one second to another, and anywhere inside that is on
+        pace.  Being told you are four seconds adrift is noise.
+        """
+        self._pace_label.remove_css_class("ahead")
+        self._pace_label.remove_css_class("behind")
+
+        if not self._schedule or self._schedule[-1] <= 0:
+            self._pace_label.set_text("")     # nothing to be measured against
+            return
+
+        i         = self._current
+        due_end   = self._schedule[i]
+        due_start = self._schedule[i - 1] if i > 0 else 0
+
+        if self._elapsed < due_start:
+            self._pace_label.set_text(f"{self._mmss(due_start - self._elapsed)} ahead")
+            self._pace_label.add_css_class("ahead")
+        elif self._elapsed > due_end:
+            self._pace_label.set_text(f"{self._mmss(self._elapsed - due_end)} behind")
+            self._pace_label.add_css_class("behind")
+        else:
+            self._pace_label.set_text("on pace")
+
+    def _update_slide_time(self) -> None:
+        """Show what this slide is scheduled to take."""
+        i = self._current
+        if not self._schedule or not (0 <= i < len(self._schedule)):
+            self._slide_time_label.set_text("")
+            return
+        secs = self._schedule[i] - (self._schedule[i - 1] if i > 0 else 0)
+        if secs <= 0:
+            self._slide_time_label.set_text("")
+            return
+        scripted = bool(self._slide_info[i].get("notes", "").strip())
+        self._slide_time_label.set_text(
+            f"{self._mmss(secs)} of script" if scripted
+            else f"{self._mmss(secs)} estimated"
+        )
 
     def _next(self) -> None:
         self._go_to(self._current + 1)
@@ -1035,6 +1223,8 @@ class PresenterWindow(Adw.Window):
             self._timer_label.remove_css_class("warning")
             self._timer_label.remove_css_class("error")
 
+        self._update_pace()
+
         # Notify MainWindow so it can show the timer in its status bar
         self.emit("timer-tick", self._elapsed, self._target_secs)
         return GLib.SOURCE_CONTINUE
@@ -1055,9 +1245,15 @@ class PresenterWindow(Adw.Window):
         self._rerender_notes()
 
     def _rerender_notes(self) -> None:
-        """Re-render the current slide's notes at the current font size."""
-        if self._slide_info:
-            self._set_notes(self._slide_info[self._current].get("notes", ""))
+        """
+        Resize the script pane, keeping the reader's place.
+
+        Only the CSS changes — the buffer is the same text at a different
+        size — but the section that was at the top has moved, so scroll
+        back to it rather than leaving the speaker to find their line.
+        """
+        self._apply_script_font()
+        self._focus_script(self._current)
 
     def _persist_notes_font(self) -> None:
         """Save the notes font size to the window and to session.json."""
@@ -1076,6 +1272,7 @@ class PresenterWindow(Adw.Window):
         self._timer_label.set_text("00:00")
         self._timer_label.remove_css_class("warning")
         self._timer_label.remove_css_class("error")
+        self._update_pace()
         self.emit("timer-tick", 0, self._target_secs)
 
     def _on_key(self, ctrl, keyval, keycode, state) -> bool:
@@ -1121,14 +1318,18 @@ class PresenterWindow(Adw.Window):
             except Exception:
                 pass
             self._monitors_handler = None
-        # Release WebKit notes view
-        if _WEBKIT:
-            for view in (self._notes_view,):
-                if view is not None and hasattr(view, "try_close"):
-                    try:
-                        view.try_close()
-                    except AttributeError:
-                        pass
+        # The window's stylesheet lives on the display, so take it back down
+        # with the window rather than leaving it behind for the next one.
+        if getattr(self, "_window_css", None) is not None:
+            try:
+                Gtk.StyleContext.remove_provider_for_display(
+                    Gdk.Display.get_default(), self._window_css
+                )
+            except Exception:
+                pass
+            self._window_css = None
+        # The script pane is a GtkTextView now, so there is no WebKit view
+        # left on this window to close — only the slideshow holds one.
         # Fully destroy the slideshow window via the controlled path
         self._slideshow.close_by_presenter()
         return False
