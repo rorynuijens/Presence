@@ -23,12 +23,6 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-mock"]
-ai  = [
-    "anthropic>=0.25",
-    "google-genai>=1.0",
-    "pdfminer.six",
-    "python-docx",
-]
 
 [project.scripts]
 # GTK4 GUI application

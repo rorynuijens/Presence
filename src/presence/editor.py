@@ -681,25 +681,9 @@ class ImageLayoutControls(Gtk.Box):
         self._insert_btn.add_css_class("suggested-action")
         self._insert_btn.set_margin_start(10)
         self._insert_btn.set_margin_end(10)
-        self._insert_btn.set_margin_bottom(6)
+        self._insert_btn.set_margin_bottom(10)
         self._insert_btn.connect("clicked", self._on_insert_clicked)
         root.append(self._insert_btn)
-
-        self._ai_btn = Gtk.Button(label="Make an image for this slide")
-        self._ai_btn.set_margin_start(10)
-        self._ai_btn.set_margin_end(10)
-        self._ai_btn.set_margin_bottom(6)
-        self._ai_btn.connect("clicked", self._on_generate_ai_clicked)
-        self._ai_btn.set_visible(False)
-        root.append(self._ai_btn)
-
-        self._infographic_btn = Gtk.Button(label="Make an infographic for this slide")
-        self._infographic_btn.set_margin_start(10)
-        self._infographic_btn.set_margin_end(10)
-        self._infographic_btn.set_margin_bottom(10)
-        self._infographic_btn.connect("clicked", self._on_infographic_clicked)
-        self._infographic_btn.set_visible(False)
-        root.append(self._infographic_btn)
 
         # Wrap in a ScrolledWindow so the popover never exceeds screen height.
         scroll = Gtk.ScrolledWindow()
@@ -959,16 +943,6 @@ class ImageLayoutControls(Gtk.Box):
         self._insert_btn.set_label("Choose image…")
         self._insert_btn.set_visible(True)
 
-        # Show AI generation button only when a Gemini key is configured.
-        try:
-            from .session import load_api_keys as _load_api_keys
-            _claude_key, _gemini_key = _load_api_keys()
-            self._ai_btn.set_visible(bool(_gemini_key))
-            self._infographic_btn.set_visible(bool(_claude_key))
-        except Exception:
-            self._ai_btn.set_visible(False)
-            self._infographic_btn.set_visible(False)
-
         # Capture the parent window now, while the controls are still
         # attached to the widget tree.  In the popover host, autohide fires
         # when the file dialog steals focus and get_root() then returns None.
@@ -1018,8 +992,6 @@ class ImageLayoutControls(Gtk.Box):
         self._refresh_zoom_scale()
 
         self._insert_btn.set_visible(False)
-        self._ai_btn.set_visible(False)
-        self._infographic_btn.set_visible(False)
         self._parent_window = self.get_root()
 
     # ── Signal helpers ────────────────────────────────────────────────────────
@@ -1198,65 +1170,6 @@ class ImageLayoutControls(Gtk.Box):
                 insert_cb(alt, path)
 
         dialog.open(parent_window, None, _on_done)
-
-    def _on_generate_ai_clicked(self, *_) -> None:
-        """Close the popover and open the AI image generation dialog."""
-        layout        = self._current_layout()
-        scene         = self._alt_entry.get_text().strip()
-        parent_window = self._parent_window
-        insert_cb     = self._insert_cb
-
-        # When the alt-text entry is empty, derive a scene hint from the slide
-        # the cursor is currently on (headline + first sentence(s) of notes).
-        if not scene and parent_window is not None:
-            editor = getattr(parent_window, "_editor", None)
-            if editor is not None:
-                scene = editor.get_current_slide_scene_hint()
-
-        # Validate prerequisites before opening the dialog.
-        if parent_window and not getattr(parent_window, "_file_path", None):
-            if hasattr(parent_window, "_show_toast"):
-                parent_window._show_toast(
-                    "Save the document first — AI images are written to "
-                    "assets/ next to the .md file."
-                )
-            return
-
-        self._dismiss()
-
-        from .ai_image_dialog import AIImageDialog
-        dlg = AIImageDialog(
-            parent_window, layout, insert_cb, initial_scene=scene
-        )
-        dlg.present(parent_window)
-
-    def _on_infographic_clicked(self, *_) -> None:
-        """Close the popover and open the AI infographic generation dialog."""
-        layout        = self._current_layout()
-        parent_window = self._parent_window
-        insert_cb     = self._insert_cb
-
-        if parent_window and not getattr(parent_window, "_file_path", None):
-            if hasattr(parent_window, "_show_toast"):
-                parent_window._show_toast(
-                    "Save the document first — infographics are written to "
-                    "assets/ next to the .md file."
-                )
-            return
-
-        slide_md = ""
-        if parent_window is not None:
-            editor = getattr(parent_window, "_editor", None)
-            if editor is not None:
-                slide_md = editor.get_current_slide_markdown()
-
-        self._dismiss()
-
-        from .ai_infographic_dialog import AIInfographicDialog
-        dlg = AIInfographicDialog(
-            parent_window, layout, insert_cb, initial_slide_md=slide_md
-        )
-        dlg.present(parent_window)
 
 
 class ImageLayoutPopover(Gtk.Popover):
@@ -1841,35 +1754,6 @@ class Editor(Gtk.Box):
                 slide_end = sep
                 break
         return "\n".join(lines[slide_start:slide_end])
-
-    def get_current_slide_scene_hint(self) -> str:
-        """
-        Return a scene-description hint for the slide at the current cursor.
-
-        Finds the slide boundaries by locating the nearest '---' separator
-        lines above and below the cursor, then delegates to
-        slides.image_gen.scene_hint_from_slide() to combine the heading with
-        the first sentence or two of speaker notes.
-        """
-        from .slides.image_gen import scene_hint_from_slide
-
-        buf = self._buffer
-        full_text = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False)
-        cursor_line = buf.get_iter_at_mark(buf.get_insert()).get_line()
-
-        lines = full_text.splitlines()
-        sep_lines = [i for i, l in enumerate(lines) if l.strip() == "---"]
-
-        slide_start = 0
-        slide_end = len(lines)
-        for sep in sep_lines:
-            if sep <= cursor_line:
-                slide_start = sep + 1
-            else:
-                slide_end = sep
-                break
-
-        return scene_hint_from_slide("\n".join(lines[slide_start:slide_end]))
 
     def get_img_toolbar_btn(self) -> "Gtk.Button | None":
         return self._img_toolbar_btn

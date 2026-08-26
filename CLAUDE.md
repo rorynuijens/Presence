@@ -2,6 +2,24 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Scope rules
+
+Two standing constraints on what Presence is. They are decisions, not open
+questions — do not propose work that reverses them.
+
+1. **No AI features.** Presence converts Markdown to slides. It does not
+   generate images, infographics, or slides from documents, and it stores no
+   API keys.
+2. **Image layout is automatic only.** Alt text is a description, not a
+   token string: `![a red barn](assets/barn.jpg)`. `slides/layout.py` decides
+   placement, size and fit from the slide's own content. There are no manual
+   position, size, fit, focal, gradient, opacity, fade, grayscale, blur,
+   tint, flip or zoom controls.
+
+Note that `splitter.py::parse_image_layout()` is mode `444` and still parses
+the old tokens; they are simply not honoured downstream, so documents written
+against the old syntax keep opening and lay themselves out.
+
 ## Running the app
 
 ```bash

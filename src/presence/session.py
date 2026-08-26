@@ -9,21 +9,14 @@ per-process lock so that multiple windows cannot corrupt each other's
 session data (fixes #95 / #96).
 """
 
-import configparser
-import logging
-
-log = logging.getLogger(__name__)
 import json
+import logging
 import os
 import tempfile
 import threading
 from pathlib import Path
 
-try:
-    import gi
-    gi.require_version("Secret", "1")
-except Exception:
-    pass
+log = logging.getLogger(__name__)
 
 # Process-level lock for all session reads and writes.
 # This serialises concurrent access from multiple MainWindow instances
@@ -261,162 +254,6 @@ def load_presentation_prefs() -> dict:
     except (OSError, json.JSONDecodeError, TypeError, ValueError):
         return {"timer_minutes": 0, "auto_convert": False,
                 "presenter_notes_font": 22, "speaking_rate": 110}
-
-
-# ── AI preferences ───────────────────────────────────────────────────────────
-
-def save_ai_prefs(prefs: dict) -> None:
-    _update({
-        "ai_image_style": str(prefs.get("image_style", "Photorealistic")),
-        "ai_gemini_model": str(prefs.get("gemini_model", "gemini-2.5-flash-image")),
-    })
-
-
-def load_ai_prefs() -> dict:
-    try:
-        data = _load_raw()
-        return {
-            "image_style":  str(data.get("ai_image_style", "Photorealistic")),
-            "gemini_model": str(data.get("ai_gemini_model", "gemini-2.5-flash-image")),
-        }
-    except (OSError, json.JSONDecodeError, TypeError, ValueError):
-        return {"image_style": "Photorealistic", "gemini_model": "gemini-2.5-flash-image"}
-
-
-# ── API keys ──────────────────────────────────────────────────────────────────
-
-def _config_ini_file() -> Path:
-    return _config_dir() / "config.ini"
-
-
-_SECRET_SCHEMA = None
-
-
-def _get_secret_schema():
-    global _SECRET_SCHEMA
-    if _SECRET_SCHEMA is None:
-        from gi.repository import Secret
-        _SECRET_SCHEMA = Secret.Schema.new(
-            "io.gitlab.gtk4_apps1.Presence",
-            Secret.SchemaFlags.NONE,
-            {"key_name": Secret.SchemaAttributeType.STRING},
-        )
-    return _SECRET_SCHEMA
-
-
-def save_api_keys(claude_key: str, gemini_key: str) -> bool:
-    """Store API keys in GNOME Keyring (called from Settings — user-initiated).
-
-    Falls back to config.ini if the keyring is unavailable.  Any brief block
-    here is expected UX: the user just clicked Save, so a keyring-unlock
-    dialog is appropriate.
-
-    Returns True if the keys were stored in the keyring, False if the plaintext
-    config.ini fallback was used (caller should warn the user).
-    """
-    try:
-        from gi.repository import Secret
-        schema = _get_secret_schema()
-        Secret.password_store_sync(
-            schema, {"key_name": "claude_api_key"},
-            Secret.COLLECTION_DEFAULT, "Presence Claude API Key", claude_key, None,
-        )
-        Secret.password_store_sync(
-            schema, {"key_name": "gemini_api_key"},
-            Secret.COLLECTION_DEFAULT, "Presence Gemini API Key", gemini_key, None,
-        )
-        _remove_api_keys_ini()
-        return True
-    except Exception as e:
-        log.warning("Keyring unavailable, falling back to config.ini: %s", e)
-        _save_api_keys_ini(claude_key, gemini_key)
-        return False
-
-
-def load_api_keys() -> tuple[str, str]:
-    """Return (claude_key, gemini_key) from GNOME Keyring, falling back to config.ini.
-
-    Reads only — never writes.  In a normal logged-in GNOME session the
-    default keyring is already unlocked so password_lookup_sync returns in
-    milliseconds without showing any dialog.
-    """
-    try:
-        from gi.repository import Secret
-        schema = _get_secret_schema()
-        claude_key = Secret.password_lookup_sync(
-            schema, {"key_name": "claude_api_key"}, None)
-        gemini_key = Secret.password_lookup_sync(
-            schema, {"key_name": "gemini_api_key"}, None)
-        if claude_key is not None or gemini_key is not None:
-            return claude_key or "", gemini_key or ""
-    except Exception as e:
-        log.warning("Keyring unavailable, falling back to config.ini: %s", e)
-    return _load_api_keys_ini()
-
-
-def _remove_api_keys_ini() -> None:
-    """Remove the [api_keys] section from config.ini after a successful keyring save."""
-    config = configparser.ConfigParser()
-    ini_path = _config_ini_file()
-    if not ini_path.exists():
-        return
-    try:
-        config.read(str(ini_path), encoding="utf-8")
-        if config.has_section("api_keys"):
-            config.remove_section("api_keys")
-            with open(ini_path, "w", encoding="utf-8") as f:
-                config.write(f)
-    except OSError as e:
-        log.warning("Failed to clean up config.ini after keyring save: %s", e)
-
-
-def _save_api_keys_ini(claude_key: str, gemini_key: str) -> None:
-    config = configparser.ConfigParser()
-    ini_path = _config_ini_file()
-    if ini_path.exists():
-        try:
-            config.read(str(ini_path), encoding="utf-8")
-        except Exception:
-            pass
-    if not config.has_section("api_keys"):
-        config.add_section("api_keys")
-    config.set("api_keys", "claude_api_key", claude_key)
-    config.set("api_keys", "gemini_api_key", gemini_key)
-    try:
-        cfg_dir = _config_dir()
-        cfg_dir.mkdir(parents=True, exist_ok=True)
-        # Write atomically to a temp file, set restrictive permissions, then
-        # rename — prevents a partial write being read and keeps the file
-        # owner-readable only (0o600) since it contains plaintext API keys.
-        fd, tmp_path = tempfile.mkstemp(dir=cfg_dir, suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                config.write(f)
-        except Exception:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-            raise
-        os.chmod(tmp_path, 0o600)
-        os.replace(tmp_path, ini_path)
-    except OSError as e:
-        log.warning("Failed to save API keys to config.ini: %s", e)
-
-
-def _load_api_keys_ini() -> tuple[str, str]:
-    config = configparser.ConfigParser()
-    ini_path = _config_ini_file()
-    if ini_path.exists():
-        try:
-            config.read(str(ini_path), encoding="utf-8")
-        except Exception:
-            pass
-    return (
-        config.get("api_keys", "claude_api_key", fallback=""),
-        config.get("api_keys", "gemini_api_key", fallback=""),
-    )
-
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────

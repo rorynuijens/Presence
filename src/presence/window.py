@@ -25,7 +25,6 @@ from .theme_panel    import ThemePanel
 from .inspector      import Inspector
 from .settings_dialog import SettingsDialog
 from .app_utils        import png_bytes_to_texture, make_file_filter, make_filter_store
-from .ai_import_dialog import AIImportDialog, generate_missing_images
 
 log = logging.getLogger(__name__)
 from .converter  import Converter
@@ -569,12 +568,6 @@ class MainWindow(Adw.ApplicationWindow):
         s1b.append("Focus mode", "win.focus-mode")
         menu.append_section(None, s1b)
 
-        # Named for what comes out, not for the machinery.
-        s2 = Gio.Menu()
-        s2.append("Turn a document into slides…", "win.ai-import")
-        s2.append("Fill in missing images",       "win.ai-missing-images")
-        menu.append_section(None, s2)
-
         export_menu = Gio.Menu()
         export_menu.append("PDF…",    "win.export")
         export_menu.append("HTML…",   "win.export-html")
@@ -662,8 +655,6 @@ class MainWindow(Adw.ApplicationWindow):
             ("toggle-sidebar",       self._on_toggle_sidebar,       "F9"),
             ("toggle-canvas",        self._on_toggle_canvas,        "F8"),
             ("toggle-theme-panel",   self._on_toggle_theme_panel,   "F10"),
-            ("ai-import",            self._on_ai_import,            None),
-            ("ai-missing-images",    self._on_ai_missing_images,    None),
         ]
         for name, cb, accel in actions:
             action = Gio.SimpleAction.new(name, None)
@@ -1683,13 +1674,6 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_save_as(self, *_) -> None:
         self._save_as_dialog()
-
-    def _on_ai_import(self, *_) -> None:
-        dlg = AIImportDialog(self)
-        dlg.present(self)
-
-    def _on_ai_missing_images(self, *_) -> None:
-        generate_missing_images(self)
 
     def _on_settings(self, *_) -> None:
         dlg = SettingsDialog(self)
