@@ -7,35 +7,46 @@ back to "first image only", so a slide with three pictures silently showed
 one. This module decides instead, and the decision is a pure function of the
 slide's content so it can be tested without rendering anything.
 
-The rule that governs everything here: **an explicit choice always wins.**
-Auto layout is what happens when the writer did not say, never a correction
-of what they did say.
+The rule that governs everything here: **the slide decides.** There is no
+longer any way for a writer to place an image by hand, so there is no
+explicit choice to defer to and no need to work out whether one was made.
+Alt text is a description, and nothing but a description.
 
-Knowing whether they said anything is harder than it looks. The parser seeds
-``position`` with "right" before anyone sees the image, so a layout dict
-cannot distinguish "the writer typed |right|" from "the writer typed
-nothing". positions_specified() recovers that by asking the same question of
-the same markdown, using the parser's own regex and vocabulary rather than a
-second copy of either.
+``parse_image_layout()`` in splitter.py still parses the old tokens — that
+file is read-only — so a document written against the old syntax keeps
+opening. Its tokens simply never reach the renderer: everything an image
+looks like now comes from AUTO_IMAGE_LAYOUT and the plan chosen here.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-import re
-
-from .splitter import _IMAGE_RE, IMAGE_POSITIONS
-
-_SIZE_TOKEN = re.compile(r"^(\d{1,3})%?$")
-
-__all__ = ["LayoutPlan", "positions_specified", "sizes_specified",
-           "choose_layout", "gallery_columns", "auto_size", "cell_fit"]
+__all__ = ["LayoutPlan", "AUTO_IMAGE_LAYOUT", "choose_layout",
+           "gallery_columns", "auto_size", "cell_fit"]
 
 
-# Position pairs the two-image renderer understands. Anything else used to
-# drop an image on the floor.
-_KNOWN_PAIRS = frozenset({("left", "right"), ("right", "left"),
-                          ("top", "bottom"), ("bottom", "top")})
+# What an automatically placed image looks like. These are the values the
+# token parser used as its defaults, kept exactly so that a deck written
+# before the tokens went away still renders the way it always did wherever
+# its author never overrode them.
+#
+# This dict is the single owner of the answer. Nothing else in the renderer
+# may read a treatment value off a parsed image.
+AUTO_IMAGE_LAYOUT: dict = {
+    "position":  "right",
+    "size":      "50",
+    "gradient":  True,
+    "opacity":   75,
+    "fade":      None,
+    "fit":       "cover",
+    "focal":     "focal-center",
+    "grayscale": 0,
+    "blur":      0,
+    "tint":      None,
+    "flip_h":    False,
+    "flip_v":    False,
+    "zoom":      100,
+}
 
 
 @dataclass(frozen=True)
@@ -54,30 +65,6 @@ class LayoutPlan:
     columns: int = 0          # gallery only
     spans:   tuple = field(default_factory=tuple)   # gallery: cells spanning 2
     size:    str | None = None   # single: chosen width, when none was written
-
-
-def positions_specified(slide_md: str) -> list[bool]:
-    """
-    Whether each image in *slide_md* carries a position token, in order.
-
-    Uses the parser's regex and position vocabulary, so this cannot drift
-    from what parse_image_layout() accepts.
-    """
-    return [
-        any(token.strip().lower() in IMAGE_POSITIONS
-            for token in match.group(1).split("|"))
-        for match in _IMAGE_RE.finditer(slide_md)
-    ]
-
-
-def sizes_specified(slide_md: str) -> list[bool]:
-    """Whether each image carries a size token, in order."""
-    return [
-        any(_SIZE_TOKEN.match(token.strip()) and
-            1 <= int(_SIZE_TOKEN.match(token.strip()).group(1)) <= 100
-            for token in match.group(1).split("|"))
-        for match in _IMAGE_RE.finditer(slide_md)
-    ]
 
 
 def auto_size(word_count: int) -> str:
@@ -135,47 +122,25 @@ def gallery_columns(count: int) -> tuple[int, tuple]:
     return 3, ()
 
 
-def choose_layout(has_text: bool, images: list, specified: list,
-                  word_count: int = 0,
-                  sized: "list | None" = None) -> LayoutPlan:
+def choose_layout(has_text: bool, images: list,
+                  word_count: int = 0) -> LayoutPlan:
     """
     Pick a layout for a slide.
 
-    *images* is the list extract_images() returned; *specified* is the
-    matching list from positions_specified(). A short *specified* is treated
-    as "not specified", which is the safe direction: it can only route a
-    slide to the gallery, which shows everything.
+    *images* is the list extract_images() returned. Nothing about the images
+    themselves is consulted yet — only how many there are and whether text
+    shares the slide with them.
     """
     count = len(images)
     if count == 0:
         return LayoutPlan("text")
 
-    def was_specified(i: int) -> bool:
-        return specified[i] if i < len(specified) else False
-
-    def was_sized(i: int) -> bool:
-        return bool(sized) and i < len(sized) and sized[i]
-
     if count == 1:
-        # An image alone on a slide should fill it. With text present, or
-        # with a position the writer chose, leave today's behaviour alone.
-        if not has_text and not was_specified(0):
+        # An image alone on a slide should fill it; there is no text for it
+        # to sit beside.
+        if not has_text:
             return LayoutPlan("bleed")
-        # Only choose a width where none was written; a size the writer typed
-        # is a choice like any other.
-        size = None if was_sized(0) else auto_size(word_count)
-        return LayoutPlan("single", size=size)
-
-    if count == 2:
-        pair = (images[0]["layout"].get("position"),
-                images[1]["layout"].get("position"))
-        # Only honour the flanking layout when the writer actually asked for
-        # it. Two seeded defaults look like ("right", "right") — not a pair,
-        # and previously the second image simply vanished.
-        if was_specified(0) and was_specified(1) and pair in _KNOWN_PAIRS:
-            return LayoutPlan("pair")
-        columns, spans = gallery_columns(2)
-        return LayoutPlan("gallery", columns, spans)
+        return LayoutPlan("single", size=auto_size(word_count))
 
     columns, spans = gallery_columns(count)
     return LayoutPlan("gallery", columns, spans)

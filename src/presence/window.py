@@ -18,7 +18,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, Gio, GLib, Gdk, Pango
 
-from .editor     import Editor, ImageLayoutControls
+from .editor     import Editor
 from .preview    import SlideCanvas
 from .sidebar    import Sidebar
 from .theme_panel    import ThemePanel
@@ -219,12 +219,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._editor      = Editor()
         self._canvas      = SlideCanvas()
         self._theme_panel = ThemePanel()
-        # The panel follows the cursor: slide settings in body text, image
-        # layout on an image line.  The controls are the same ones the
-        # toolbar's insert popover uses.
-        self._image_controls = ImageLayoutControls(self._on_insert_image_from_panel)
-        self._image_controls.set_header_visible(False)
-        self._inspector = Inspector(self._theme_panel, self._image_controls)
+        self._inspector = Inspector(self._theme_panel)
 
         self._sidebar.connect("slide-selected",       self._on_slide_selected)
         self._sidebar.connect("slide-insert-after",   self._on_slide_insert_after)
@@ -234,7 +229,6 @@ class MainWindow(Adw.ApplicationWindow):
         self._editor.set_insert_image_callback(self._on_insert_image)
         self._editor.connect("changed",               self._on_editor_changed)
         self._editor.connect("live-changed",          self._on_editor_live_changed)
-        self._editor.set_image_context_callback(self._on_image_context)
         self._theme_panel.connect("rebuild-needed",   self._on_theme_panel_rebuild)
         self._theme_panel.connect("theme-changed",    self._on_panel_theme_changed)
         self._theme_panel.connect("ratio-changed",    self._on_panel_ratio_changed)
@@ -1132,26 +1126,6 @@ class MainWindow(Adw.ApplicationWindow):
         self._canvas_open = visible
         self._save_window_state()
 
-    def _on_image_context(self, layout, description, edit_cb) -> bool:
-        """
-        The cursor moved onto (or off) an image.
-
-        Returns True when the inspector took it, which tells the editor not to
-        open its popover.  With the panel closed nothing is taken, so the
-        popover still serves people who work without it.
-        """
-        if not self._theme_panel_btn.get_active():
-            return False
-        if layout is None:
-            self._inspector.show_slide_context()
-            return True
-        self._inspector.show_image_context(layout, description, edit_cb)
-        return True
-
-    def _on_insert_image_from_panel(self, alt: str, rel_path: str) -> None:
-        """Insert-mode callback for the panel's copy of the image controls."""
-        self._editor.insert_image_markdown(alt, rel_path)
-
     def _on_canvas_visibility(self, canvas: SlideCanvas, _param) -> None:
         """Re-render whenever the canvas becomes visible again."""
         if canvas.get_visible():
@@ -1215,13 +1189,6 @@ class MainWindow(Adw.ApplicationWindow):
                 self._refresh_canvas(text)
         except Exception:
             log.debug("Cursor sync error", exc_info=True)
-
-        # Check whether the cursor is on an image tag and open/update
-        # the contextual image-edit popover accordingly.
-        try:
-            self._editor.check_cursor_for_image()
-        except Exception:
-            log.debug("Image cursor check error", exc_info=True)
         return GLib.SOURCE_CONTINUE
 
     def _on_undo_state_changed(self, can_undo: bool, can_redo: bool) -> None:

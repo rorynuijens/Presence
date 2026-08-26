@@ -92,8 +92,7 @@ def _apply_img_effects(
 from .splitter import (is_title_slide, extract_speaker_notes,
                           extract_images, infer_slide_title, split_two_columns)
 from .renderer    import render_slide_content
-from .layout      import (choose_layout, positions_specified,
-                          sizes_specified, cell_fit)
+from .layout      import AUTO_IMAGE_LAYOUT, choose_layout, cell_fit
 from .utils       import image_aspect
 from .frontmatter import extract_slide_directives
 from .utils       import logo_img_tag, progress_bar_html
@@ -170,9 +169,7 @@ def md_to_html_slides(
             # images it happens to have; see layout.py for the rules.
             plan = choose_layout(
                 bool(cleaned_md.strip()), images,
-                positions_specified(slide_body),
                 word_count=len(cleaned_md.split()),
-                sized=sizes_specified(slide_body),
             )
             if plan.kind == "gallery":
                 html_frag = _render_gallery_slide(
@@ -189,15 +186,16 @@ def md_to_html_slides(
                     line_offset=line_offset,
                 )
             else:
-                layout = images[0]["layout"]
+                # Never read the parsed tokens: what the picture looks like
+                # is AUTO_IMAGE_LAYOUT's business, and where it goes is the
+                # plan's.
+                layout = dict(AUTO_IMAGE_LAYOUT)
                 if plan.size is not None:
-                    layout = {**layout, "size": plan.size}
+                    layout["size"] = plan.size
                 if plan.kind == "bleed":
-                    # An image alone on a slide fills it; the writer chose no
-                    # position, so the seeded "right at 50%" is not a choice
-                    # to respect.
-                    layout = {**layout, "position": "background",
-                              "size": "100", "gradient": False}
+                    # An image alone on a slide fills it.
+                    layout.update(position="background",
+                                  size="100", gradient=False)
                 html_frag = _render_image_slide(
                     cleaned_md, images[0]["src"], layout,
                     page_num, total_numbered, logo_b64, theme_override,
@@ -510,12 +508,9 @@ def _render_gallery_slide(
         raw_src = image.get("src", "")
         if _urlparse(raw_src).scheme.lower() in _UNSAFE_IMG_SCHEMES:
             raw_src = ""
-        layout = image.get("layout", {}) or {}
-        # Per-image effects still apply inside a cell; only the arrangement
-        # is being decided for the writer, not the treatment.
         effective = _apply_img_effects(raw_src, base_url,
-                                       layout.get("grayscale", 0),
-                                       layout.get("blur", 0))
+                                       AUTO_IMAGE_LAYOUT["grayscale"],
+                                       AUTO_IMAGE_LAYOUT["blur"])
         src = _html.escape(_urlquote(effective, safe="+/=:;,"))
         spans_two = (index + 1) in plan.spans
         span = ' data-span="2"' if spans_two else ""

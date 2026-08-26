@@ -2,109 +2,97 @@
 test_layout.py — Which layout a slide gets.
 
 The decision is a pure function, so it is tested directly rather than through
-a render. The invariant that matters most: a slide never loses an image, and
-an explicit choice is never overridden.
+a render. Two invariants matter: a slide never loses an image, and the layout
+depends on the slide's content alone — never on tokens someone typed into an
+image's alt text, which no longer mean anything.
 """
 
 import pytest
 
-from presence.slides.layout import (LayoutPlan, auto_size, cell_fit,
-                                    choose_layout, gallery_columns,
-                                    positions_specified, sizes_specified)
-from presence.slides.splitter import extract_images
+from presence.slides.layout import (AUTO_IMAGE_LAYOUT, LayoutPlan, auto_size,
+                                    cell_fit, choose_layout, gallery_columns)
 
 
 def _img(position="right"):
+    """An image as extract_images() hands it over.
+
+    *position* is deliberately still settable: these tests exist partly to
+    prove that setting it changes nothing.
+    """
     return {"src": "x.png", "layout": {"position": position}}
-
-
-# ── Recovering "the writer did not say" ───────────────────────────────────────
-
-def test_no_token_reads_as_unspecified():
-    assert positions_specified("![a](x.png)") == [False]
-
-
-def test_a_position_token_reads_as_specified():
-    assert positions_specified("![a|left](x.png)") == [True]
-
-
-def test_other_tokens_do_not_count_as_a_position():
-    assert positions_specified("![a|50|nogradient|blur5](x.png)") == [False]
-
-
-def test_one_answer_per_image_in_order():
-    md = "![a|left](x.png)\n\n![b](y.png)\n\n![c|top](z.png)"
-    assert positions_specified(md) == [True, False, True]
-
-
-def test_it_agrees_with_the_parser_about_what_an_image_is():
-    md = "![a|left](x.png)\n\n![b](y.png)"
-    _cleaned, images = extract_images(md)
-    assert len(positions_specified(md)) == len(images)
 
 
 # ── The decision ──────────────────────────────────────────────────────────────
 
 def test_no_images_is_a_text_slide():
-    assert choose_layout(True, [], []).kind == "text"
+    assert choose_layout(True, []).kind == "text"
 
 
-def test_one_image_with_text_keeps_todays_layout():
-    assert choose_layout(True, [_img()], [False]).kind == "single"
+def test_one_image_with_text_shares_the_slide():
+    assert choose_layout(True, [_img()]).kind == "single"
 
 
 def test_one_image_alone_fills_the_slide():
-    assert choose_layout(False, [_img()], [False]).kind == "bleed"
+    assert choose_layout(False, [_img()]).kind == "bleed"
 
 
-def test_a_chosen_position_is_never_overridden_by_bleed():
-    """Phase 2 must not seize a slide where the writer positioned the image."""
-    assert choose_layout(False, [_img("left")], [True]).kind == "single"
-
-
-def test_two_images_the_writer_arranged_keep_the_flanking_layout():
-    plan = choose_layout(True, [_img("left"), _img("right")], [True, True])
-    assert plan.kind == "pair"
-
-
-def test_top_and_bottom_is_also_an_arrangement():
-    plan = choose_layout(True, [_img("top"), _img("bottom")], [True, True])
-    assert plan.kind == "pair"
-
-
-def test_two_untokened_images_go_to_the_gallery_rather_than_vanishing():
-    """The reported defect: both default to 'right' and one used to be lost."""
-    plan = choose_layout(True, [_img(), _img()], [False, False])
+def test_two_images_go_to_the_gallery():
+    plan = choose_layout(True, [_img(), _img()])
     assert plan.kind == "gallery"
     assert plan.columns == 2
 
 
-def test_two_images_in_an_unusable_pair_still_show_both():
-    plan = choose_layout(True, [_img("left"), _img("top")], [True, True])
-    assert plan.kind == "gallery"
-
-
-def test_half_specified_pairs_are_not_treated_as_arranged():
-    plan = choose_layout(True, [_img("left"), _img("right")], [True, False])
-    assert plan.kind == "gallery"
-
-
 @pytest.mark.parametrize("count", [3, 4, 5, 6, 9, 12])
 def test_more_than_two_images_always_reaches_the_gallery(count):
-    images = [_img() for _ in range(count)]
-    plan = choose_layout(True, images, [False] * count)
-    assert plan.kind == "gallery"
+    assert choose_layout(True, [_img() for _ in range(count)]).kind == "gallery"
 
 
-def test_explicit_positions_cannot_shrink_a_large_set():
-    """Three images cannot be a 'pair' however they are tokened."""
-    images = [_img("left"), _img("right"), _img("top")]
-    assert choose_layout(True, images, [True, True, True]).kind == "gallery"
+# ── Tokens no longer decide anything ─────────────────────────────────────────
+
+@pytest.mark.parametrize("position",
+                         ["left", "right", "top", "bottom", "background"])
+def test_a_position_on_the_image_does_not_change_the_plan(position):
+    """An old document's tokens survive parsing but must not reach the plan."""
+    assert choose_layout(False, [_img(position)]).kind == "bleed"
+    assert choose_layout(True, [_img(position)]).kind == "single"
 
 
-def test_a_short_specified_list_is_safe():
-    plan = choose_layout(True, [_img(), _img()], [])
-    assert plan.kind == "gallery"
+def test_a_flanking_pair_is_no_longer_special():
+    """left+right used to mean "put these either side of the text"."""
+    assert choose_layout(True, [_img("left"), _img("right")]).kind == "gallery"
+
+
+def test_top_and_bottom_is_no_longer_special_either():
+    assert choose_layout(True, [_img("top"), _img("bottom")]).kind == "gallery"
+
+
+def test_the_plan_ignores_the_layout_dict_entirely():
+    """Whatever the parser produced, the same content gets the same plan."""
+    tokened = [{"src": "x.png", "layout": {"position": "background",
+                                           "size": "20", "blur": 9,
+                                           "grayscale": 80, "zoom": 300}}]
+    bare    = [{"src": "x.png", "layout": {}}]
+    assert choose_layout(True, tokened, 30) == choose_layout(True, bare, 30)
+
+
+# ── One owner for what an auto-placed image looks like ───────────────────────
+
+def test_auto_layout_covers_every_key_the_renderer_reads():
+    """A missing key would silently fall back to a .get() default elsewhere,
+    which is exactly the drift this dict exists to prevent."""
+    assert set(AUTO_IMAGE_LAYOUT) == {
+        "position", "size", "gradient", "opacity", "fade", "fit", "focal",
+        "grayscale", "blur", "tint", "flip_h", "flip_v", "zoom",
+    }
+
+
+def test_auto_layout_applies_no_treatment():
+    assert AUTO_IMAGE_LAYOUT["grayscale"] == 0
+    assert AUTO_IMAGE_LAYOUT["blur"] == 0
+    assert AUTO_IMAGE_LAYOUT["zoom"] == 100
+    assert AUTO_IMAGE_LAYOUT["tint"] is None
+    assert AUTO_IMAGE_LAYOUT["flip_h"] is False
+    assert AUTO_IMAGE_LAYOUT["flip_v"] is False
 
 
 # ── Grid shape ────────────────────────────────────────────────────────────────
@@ -146,23 +134,10 @@ def test_the_middle_case_is_the_old_fixed_half():
     assert auto_size(25) == "50"
 
 
-def test_width_is_only_chosen_when_none_was_written():
-    chosen = choose_layout(True, [_img()], [False], word_count=6,
-                           sized=[False])
-    written = choose_layout(True, [_img()], [False], word_count=6,
-                            sized=[True])
-    assert chosen.size == "60"
-    assert written.size is None      # leave the writer's number alone
-
-
-def test_sizes_specified_reads_size_tokens():
-    assert sizes_specified("![a|30](x.png)") == [True]
-    assert sizes_specified("![a|left](x.png)") == [False]
-    assert sizes_specified("![a](x.png)") == [False]
-
-
-def test_an_out_of_range_size_is_not_a_size():
-    assert sizes_specified("![a|400](x.png)") == [False]
+def test_the_width_always_comes_from_the_word_count():
+    """There is no longer a written size that could suppress this."""
+    assert choose_layout(True, [_img()], word_count=6).size == "60"
+    assert choose_layout(True, [_img()], word_count=90).size == "40"
 
 
 # ── Cropping versus letterboxing ─────────────────────────────────────────────

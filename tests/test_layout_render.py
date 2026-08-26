@@ -2,9 +2,9 @@
 test_layout_render.py — Auto layout as it reaches the page.
 
 Two things are being defended. A slide must never lose an image, which is the
-defect auto layout exists to fix. And a slide the writer arranged must render
-exactly as it did before, which is the promise that makes the change safe to
-ship.
+defect auto layout exists to fix. And the tokens an older document may still
+carry in its alt text must not reach the page — splitter.py goes on parsing
+them, so "ignored" has to be proved rather than assumed.
 """
 
 import re
@@ -56,33 +56,45 @@ def test_a_third_image_is_not_silently_discarded():
     assert _srcs(html) == ["a.png", "b.png", "c.png"]
 
 
-# ── What the writer arranged is left alone ───────────────────────────────────
+# ── Old tokens do not reach the page ─────────────────────────────────────────
 
-def test_left_and_right_still_flank_the_text():
-    html = _render("## T\n\n![a|left|30](a.png)\n\n![b|right|30](b.png)")
-    assert _kind(html) == "pair"
-
-
-def test_top_and_bottom_still_split_vertically():
-    html = _render("## T\n\n![a|top](a.png)\n\n![b|bottom](b.png)")
-    assert _kind(html) == "pair"
-
-
-def test_a_positioned_single_image_keeps_its_position():
+def test_a_position_token_no_longer_places_the_image():
     html = _render("## T\n\ntext\n\n![a|left|30](a.png)")
-    assert 'data-img-pos="left"' in html
-    assert "30%" in html
+    assert 'data-img-pos="right"' in html
+    assert 'data-img-pos="left"' not in html
 
 
-def test_a_positioned_image_alone_is_not_forced_to_fill():
-    """Phase 2 must not seize a slide the writer positioned."""
-    html = _render("![a|left|30](a.png)")
-    assert 'data-img-pos="left"' in html
+def test_a_size_token_no_longer_sets_the_width():
+    """30 was the written size; 60 is what this much text earns."""
+    html = _render("## T\n\ntext\n\n![a|left|30](a.png)")
+    assert "60%" in html
+    assert "30%" not in html
 
 
-def test_per_image_effects_survive_the_gallery():
-    html = _render("## T\n\n![a|nogradient](a.png)\n\n![b](b.png)")
-    assert len(_srcs(html)) == 2
+def test_background_no_longer_makes_a_backdrop_behind_text():
+    html = _render("## T\n\nsome words\n\n![a|background](a.png)")
+    assert 'data-img-pos="right"' in html
+
+
+def test_a_flanking_pair_becomes_a_gallery():
+    html = _render("## T\n\n![a|left|30](a.png)\n\n![b|right|30](b.png)")
+    assert _kind(html) == "gallery"
+    assert _srcs(html) == ["a.png", "b.png"]
+
+
+def test_treatment_tokens_leave_no_trace_in_the_markup():
+    html = _render("## T\n\ntext\n\n![a|tint-#204080|zoom150|flip-h](a.png)")
+    assert "slide-image-tint" not in html
+    assert "scale(1.5" not in html
+    assert "scaleX(-1)" not in html
+
+
+def test_a_tokened_slide_renders_the_same_as_an_untokened_one():
+    """The strongest form of "ignored": identical markup either way."""
+    tokened = _render("## T\n\nsome words\n\n"
+                      "![a|left|30|nogradient|opacity20|blur4](a.png)")
+    bare    = _render("## T\n\nsome words\n\n![a](a.png)")
+    assert tokened == bare
 
 
 # ── An image alone fills the slide ───────────────────────────────────────────
@@ -92,7 +104,7 @@ def test_an_unpositioned_image_alone_fills_the_slide():
     assert 'data-img-pos="background"' in html
 
 
-def test_an_image_with_text_still_shares_the_slide():
+def test_an_image_with_text_shares_the_slide():
     html = _render("## T\n\nsome words\n\n![a](a.png)")
     assert 'data-img-pos="right"' in html
 

@@ -50,30 +50,6 @@ _IMAGE_RE = re.compile(
     r'\)',
 )
 
-_IMAGE_POSITIONS = frozenset(("left", "right", "top", "bottom", "background"))
-_IMAGE_FIT       = frozenset(("cover", "contain"))
-_IMAGE_FOCAL     = frozenset(("focal-top", "focal-center", "focal-bottom"))
-
-_OPACITY_TOKEN_RE   = re.compile(r'^opacity(\d{1,3})$')
-_FADE_TOKEN_RE      = re.compile(r'^fade-(?:left|right|top|bottom)$')
-_SIZE_TOKEN_RE      = re.compile(r'^(\d{1,3})$')
-_GRAYSCALE_TOKEN_RE = re.compile(r'^grayscale(\d{1,3})$')
-_BLUR_TOKEN_RE      = re.compile(r'^blur(\d{1,2})$')
-_TINT_TOKEN_RE      = re.compile(r'^tint-(#[0-9a-f]{3,8}|[a-z]{2,30})$')
-_ZOOM_TOKEN_RE      = re.compile(r'^zoom(\d{1,3})$')
-
-
-# Default fade direction when position changes — the gradient always points
-# inward (from the text side toward the image).
-_POSITION_DEFAULT_FADE: dict[str, str] = {
-    "left":       "right",
-    "right":      "left",
-    "top":        "bottom",
-    "bottom":     "top",
-    "background": "left",
-}
-
-
 # Same heading rule the sidebar's titles use, so a band and its
 # thumbnail never disagree about what a slide is called.
 from .slides.splitter import _strip_inline_markdown
@@ -84,1123 +60,6 @@ _HEADING_RE = re.compile(r'^#{1,3}\s+(.+)$')
 # real answer (the cursor is in no slide), and comparing a stale None against
 # a fresh one would skip the repaint that clears the previous marking.
 _NO_BLOCK: tuple[int, int] = (-1, -1)
-
-
-def _parse_alt(alt: str) -> tuple[str, dict]:
-    """
-    Split an alt string into (description, layout_dict).
-
-    Format: "Human description|position|size|gradient|opacityN|fade-dir|fit|focal"
-    Tokens are order-insensitive and separated by |.
-    """
-    # position starts unset: "the writer did not say" is a state the panel
-    # has to be able to show, and seeding "right" here is what made it look
-    # like a choice had been made.
-    layout: dict = {
-        "position": None, "size": "50", "gradient": True,
-        "opacity": 75, "fade": None,
-        "fit": "cover", "focal": "focal-center",
-        "grayscale": 0, "blur": 0, "tint": None,
-        "flip_h": False, "flip_v": False, "zoom": 100,
-    }
-    desc_parts: list[str] = []
-    for token in (t.strip() for t in alt.split("|")):
-        tl = token.lower()
-        if tl in _IMAGE_POSITIONS:
-            layout["position"] = tl
-        elif m2 := _SIZE_TOKEN_RE.match(tl):
-            size_val = int(m2.group(1))
-            if 1 <= size_val <= 100:
-                layout["size"] = tl
-        elif tl == "gradient":
-            layout["gradient"] = True
-        elif tl == "nogradient":
-            layout["gradient"] = False
-        elif m := _OPACITY_TOKEN_RE.match(tl):
-            layout["opacity"] = max(0, min(100, int(m.group(1))))
-        elif tl.startswith("fade-") and tl[5:] in ("left", "right", "top", "bottom"):
-            layout["fade"] = tl[5:]
-        elif tl in _IMAGE_FIT:
-            layout["fit"] = tl
-        elif tl in _IMAGE_FOCAL:
-            layout["focal"] = tl
-        elif m := _GRAYSCALE_TOKEN_RE.match(tl):
-            layout["grayscale"] = max(0, min(100, int(m.group(1))))
-        elif m := _BLUR_TOKEN_RE.match(tl):
-            layout["blur"] = max(0, min(20, int(m.group(1))))
-        elif m := _TINT_TOKEN_RE.match(tl):
-            layout["tint"] = m.group(1)
-        elif tl == "flip-h":
-            layout["flip_h"] = True
-        elif tl == "flip-v":
-            layout["flip_v"] = True
-        elif m := _ZOOM_TOKEN_RE.match(tl):
-            zoom_val = int(m.group(1))
-            if 100 <= zoom_val <= 300:
-                layout["zoom"] = zoom_val
-        elif token:
-            desc_parts.append(token)
-    return " ".join(desc_parts), layout
-
-
-def _build_alt(desc: str, layout: dict) -> str:
-    """Reconstruct the alt string from description + layout dict."""
-    tokens = []
-    if desc.strip():
-        tokens.append(desc.strip())
-    position = layout.get("position")
-    if position:
-        tokens.append(position)
-    tokens.append(layout.get("size", "50"))
-    tokens.append("gradient" if layout.get("gradient", True) else "nogradient")
-    opacity = layout.get("opacity", 75)
-    tokens.append(f"opacity{opacity}")
-    fade = layout.get("fade")
-    if fade:
-        tokens.append(f"fade-{fade}")
-    fit = layout.get("fit", "cover")
-    if fit != "cover":
-        tokens.append(fit)
-    focal = layout.get("focal", "focal-center")
-    if focal != "focal-center" and fit == "cover":
-        tokens.append(focal)
-    grayscale = layout.get("grayscale", 0)
-    if grayscale > 0:
-        tokens.append(f"grayscale{grayscale}")
-    blur = layout.get("blur", 0)
-    if blur > 0:
-        tokens.append(f"blur{blur}")
-    tint = layout.get("tint")
-    if tint:
-        tokens.append(f"tint-{tint}")
-    if layout.get("flip_h", False):
-        tokens.append("flip-h")
-    if layout.get("flip_v", False):
-        tokens.append("flip-v")
-    zoom = layout.get("zoom", 100)
-    if zoom != 100:
-        tokens.append(f"zoom{zoom}")
-    return "|".join(tokens)
-
-
-# ── ImageLayoutPopover ────────────────────────────────────────────────────────
-
-class ImageLayoutControls(Gtk.Box):
-    """
-    The image layout controls: position, size, filters, alt text.
-
-    Container-agnostic so the same controls serve two hosts — the inspector
-    panel, where they edit the image the cursor is on, and
-    ImageLayoutPopover, which anchors them to the toolbar's insert button.
-    A host supplies *dismiss_cb* if it needs to close itself when the
-    controls finish an action.
-
-    Insert mode — "Choose image…" action, used by the popover host.
-    Edit mode   — changes write back immediately (no Apply button needed).
-
-    GNOME HIG compliance:
-      • Flat toggle buttons for position — each shows a small SVG icon that
-        illustrates the image/content split, so the choice is self-explaining.
-        Selected state uses the accent colour border + tinted background.
-      • Linked ToggleButtons for the three size options.
-      • Adw.SwitchRow-style row (manual, no libadwaita dep) for gradient.
-      • Single primary action button in insert mode only.
-      • All controls keyboard-navigable via Tab.
-      • No spatial diagram of checkboxes — replaced by icon buttons laid in
-        a 2×2 + 1 full-width grid that is both compact and self-documenting.
-    """
-
-    # CSS injected once per display — scoped to .img-layout-popover so it
-    # cannot bleed into other parts of the UI.
-    _CSS_INSTALLED = False
-
-    # Icon SVGs for each position — two rectangles showing image (filled)
-    # and content (outline) side so the user sees the layout at a glance.
-    _POS_ICONS: dict[str, str] = {
-        "left": (
-            '<svg width="18" height="14" viewBox="0 0 18 14" fill="none"'
-            ' xmlns="http://www.w3.org/2000/svg">'
-            '<rect x="0.5" y="0.5" width="7" height="13" rx="1.5"'
-            ' fill="currentColor" opacity="0.85"/>'
-            '<rect x="9.5" y="0.5" width="8" height="13" rx="1.5"'
-            ' fill="currentColor" opacity="0.2"/>'
-            '</svg>'
-        ),
-        "right": (
-            '<svg width="18" height="14" viewBox="0 0 18 14" fill="none"'
-            ' xmlns="http://www.w3.org/2000/svg">'
-            '<rect x="0.5" y="0.5" width="8" height="13" rx="1.5"'
-            ' fill="currentColor" opacity="0.2"/>'
-            '<rect x="10.5" y="0.5" width="7" height="13" rx="1.5"'
-            ' fill="currentColor" opacity="0.85"/>'
-            '</svg>'
-        ),
-        "top": (
-            '<svg width="18" height="14" viewBox="0 0 18 14" fill="none"'
-            ' xmlns="http://www.w3.org/2000/svg">'
-            '<rect x="0.5" y="0.5" width="17" height="5" rx="1.5"'
-            ' fill="currentColor" opacity="0.85"/>'
-            '<rect x="0.5" y="7.5" width="17" height="6" rx="1.5"'
-            ' fill="currentColor" opacity="0.2"/>'
-            '</svg>'
-        ),
-        "bottom": (
-            '<svg width="18" height="14" viewBox="0 0 18 14" fill="none"'
-            ' xmlns="http://www.w3.org/2000/svg">'
-            '<rect x="0.5" y="0.5" width="17" height="6" rx="1.5"'
-            ' fill="currentColor" opacity="0.2"/>'
-            '<rect x="0.5" y="8.5" width="17" height="5" rx="1.5"'
-            ' fill="currentColor" opacity="0.85"/>'
-            '</svg>'
-        ),
-        "background": (
-            '<svg width="18" height="14" viewBox="0 0 18 14" fill="none"'
-            ' xmlns="http://www.w3.org/2000/svg">'
-            '<rect x="0.5" y="0.5" width="17" height="13" rx="2"'
-            ' fill="currentColor" opacity="0.85"/>'
-            '<rect x="4" y="4" width="10" height="6" rx="1"'
-            ' fill="currentColor" opacity="0.0" stroke="white"'
-            ' stroke-width="1" stroke-dasharray="2 1.5"/>'
-            '</svg>'
-        ),
-    }
-
-    _POS_LABELS: dict[str, str] = {
-        "left":       "Left",
-        "right":      "Right",
-        "top":        "Top",
-        "bottom":     "Bottom",
-        "background": "Background",
-        "auto":       "Auto",
-    }
-
-    def __init__(self, insert_cb: Callable[[str, str], None],
-                 dismiss_cb: Callable[[], None] | None = None) -> None:
-        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        self._insert_cb  = insert_cb
-        self._dismiss_cb = dismiss_cb
-        self._edit_cb: Callable[[dict, str], None] | None = None
-        self._edit_mode  = False
-        self._active_pos       = None
-        self._active_size      = "50"
-        self._active_opacity   = 75
-        self._active_fade      = "left"   # default for "right" position
-        self._active_fit       = "cover"
-        self._active_focal     = "focal-center"
-        self._active_grayscale = 0
-        self._active_blur      = 0
-        self._active_tint: str | None = None
-        self._active_flip_h    = False
-        self._active_flip_v    = False
-        self._active_zoom      = 100
-        self._writeback_source: int | None = None
-        # Holds a reference to the active Gtk.FileDialog so it is not garbage-
-        # collected before the user selects a file (cleared in _on_file_chosen).
-        self._active_file_dialog = None
-        # The Gtk.Window that owns this popover — captured when the popover is
-        # opened so that _on_insert_clicked has a valid parent for the FileDialog
-        # even after popdown() has unparented the popover from the widget tree.
-        self._parent_window: "Gtk.Window | None" = None
-
-        # Install scoped CSS once per process
-        self._ensure_css()
-
-        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        root.add_css_class("img-layout-popover")
-        root.set_size_request(300, -1)
-
-        def _inline_slider(lbl_text: str, scale: Gtk.Scale) -> Gtk.Box:
-            """Return a compact hbox: fixed-width label + expanding scale."""
-            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-            row.set_margin_start(10)
-            row.set_margin_end(10)
-            row.set_margin_bottom(6)
-            lbl = Gtk.Label(label=lbl_text)
-            lbl.set_xalign(0.0)
-            lbl.set_width_chars(9)
-            lbl.add_css_class("caption")
-            lbl.add_css_class("dim-label")
-            scale.set_hexpand(True)
-            scale.set_draw_value(True)
-            scale.set_value_pos(Gtk.PositionType.RIGHT)
-            row.append(lbl)
-            row.append(scale)
-            return row
-
-        # ── Header ────────────────────────────────────────────────────────────
-        self._header = header = Gtk.Label(label="Image layout")
-        header.set_xalign(0.0)
-        header.add_css_class("ilp-header")
-        header.set_margin_top(10)
-        header.set_margin_bottom(10)
-        header.set_margin_start(10)
-        header.set_margin_end(10)
-        root.append(header)
-        root.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
-
-        # ── Position section ──────────────────────────────────────────────────
-        pos_lbl = Gtk.Label(label="Position")
-        pos_lbl.set_xalign(0.0)
-        pos_lbl.add_css_class("ilp-section-label")
-        pos_lbl.set_margin_top(6)
-        pos_lbl.set_margin_bottom(4)
-        pos_lbl.set_margin_start(10)
-        pos_lbl.set_margin_end(10)
-        root.append(pos_lbl)
-
-        # 2×2 grid for left/right/top/bottom + full-width background button
-        self._pos_buttons: dict[str, Gtk.Button] = {}
-        pos_grid = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        pos_grid.set_margin_start(10)
-        pos_grid.set_margin_end(10)
-        pos_grid.set_margin_bottom(6)
-
-        top_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        bot_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-
-        for token, row in (("left", top_row), ("right", top_row),
-                            ("top", bot_row), ("bottom", bot_row)):
-            btn = self._make_pos_button(token)
-            btn.set_hexpand(True)
-            row.append(btn)
-
-        bg_btn = self._make_pos_button("background")
-        bg_btn.set_hexpand(True)
-
-        # Auto is a real option, not the absence of one: it leaves the
-        # position out of the document so the slide arranges the image, which
-        # is also what happens to every image nobody has positioned.
-        auto_btn = self._make_pos_button("auto")
-        auto_btn.set_hexpand(True)
-
-        pos_grid.append(auto_btn)
-        pos_grid.append(top_row)
-        pos_grid.append(bot_row)
-        pos_grid.append(bg_btn)
-        root.append(pos_grid)
-
-        root.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
-
-        # ── Size section ──────────────────────────────────────────────────────
-        self._size_scale = Gtk.Scale.new_with_range(
-            Gtk.Orientation.HORIZONTAL, 1, 100, 1
-        )
-        for _v in (30, 50, 70, 100):
-            self._size_scale.add_mark(_v, Gtk.PositionType.BOTTOM, None)
-        self._size_scale.set_value(50)
-        self._size_scale.connect("value-changed", self._on_size_changed)
-        root.append(_inline_slider("Size", self._size_scale))
-        root.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
-
-        # ── Opacity section ───────────────────────────────────────────────────
-        opacity_lbl = Gtk.Label(label="Opacity")
-        opacity_lbl.set_xalign(0.0)
-        opacity_lbl.add_css_class("ilp-section-label")
-        opacity_lbl.set_margin_top(6)
-        opacity_lbl.set_margin_bottom(4)
-        opacity_lbl.set_margin_start(10)
-        opacity_lbl.set_margin_end(10)
-        root.append(opacity_lbl)
-
-        opacity_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        opacity_row.set_margin_start(10)
-        opacity_row.set_margin_end(10)
-        opacity_row.set_margin_bottom(6)
-        self._opacity_buttons: dict[str, Gtk.Button] = {}
-
-        for _lbl, _tok in (("25%", "25"), ("50%", "50"), ("75%", "75"), ("Full", "100")):
-            _btn = Gtk.Button(label=_lbl)
-            _btn.set_hexpand(True)
-            _btn.add_css_class("ilp-btn")
-            _btn.set_tooltip_text(f"{_tok}% image opacity")
-            _btn.connect("clicked", self._on_opacity_clicked, _tok)
-            self._opacity_buttons[_tok] = _btn
-            opacity_row.append(_btn)
-
-        root.append(opacity_row)
-        root.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
-
-        # ── Gradient row ──────────────────────────────────────────────────────
-        grad_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        grad_row.set_margin_top(6)
-        grad_row.set_margin_bottom(6)
-        grad_row.set_margin_start(10)
-        grad_row.set_margin_end(10)
-
-        grad_text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
-        grad_text.set_hexpand(True)
-        grad_title = Gtk.Label(label="Fade to background")
-        grad_title.set_xalign(0.0)
-        grad_sub = Gtk.Label(label="Gradient blend at the image edge")
-        grad_sub.set_xalign(0.0)
-        grad_sub.add_css_class("caption")
-        grad_sub.add_css_class("dim-label")
-        grad_text.append(grad_title)
-        grad_text.append(grad_sub)
-
-        self._grad_switch = Gtk.Switch()
-        self._grad_switch.set_active(True)
-        self._grad_switch.set_valign(Gtk.Align.CENTER)
-        self._grad_switch.update_property(
-            [Gtk.AccessibleProperty.LABEL], ["Fade to background"]
-        )
-        self._grad_switch.connect("state-set", self._on_grad_changed)
-
-        grad_row.append(grad_text)
-        grad_row.append(self._grad_switch)
-        root.append(grad_row)
-
-        # ── Fade direction section (visible only when gradient is ON) ─────────
-        # Includes its own top separator so hiding the box also hides the divider.
-        self._fade_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        self._fade_box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
-
-        fade_lbl = Gtk.Label(label="Gradient direction")
-        fade_lbl.set_xalign(0.0)
-        fade_lbl.add_css_class("ilp-section-label")
-        fade_lbl.set_margin_top(6)
-        fade_lbl.set_margin_bottom(4)
-        fade_lbl.set_margin_start(10)
-        fade_lbl.set_margin_end(10)
-        self._fade_box.append(fade_lbl)
-
-        fade_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        fade_row.set_margin_start(10)
-        fade_row.set_margin_end(10)
-        fade_row.set_margin_bottom(6)
-        self._fade_buttons: dict[str, Gtk.Button] = {}
-
-        for _lbl, _tok, _tip in (
-            ("←", "left",   "Gradient from the left"),
-            ("→", "right",  "Gradient from the right"),
-            ("↑", "top",    "Gradient from the top"),
-            ("↓", "bottom", "Gradient from the bottom"),
-        ):
-            _btn = Gtk.Button(label=_lbl)
-            _btn.set_hexpand(True)
-            _btn.add_css_class("ilp-btn")
-            _btn.set_tooltip_text(_tip)
-            _btn.connect("clicked", self._on_fade_clicked, _tok)
-            self._fade_buttons[_tok] = _btn
-            fade_row.append(_btn)
-
-        self._fade_box.append(fade_row)
-        root.append(self._fade_box)
-
-        root.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
-
-        # ── Fit section ───────────────────────────────────────────────────────
-        fit_lbl = Gtk.Label(label="Fit")
-        fit_lbl.set_xalign(0.0)
-        fit_lbl.add_css_class("ilp-section-label")
-        fit_lbl.set_margin_top(6)
-        fit_lbl.set_margin_bottom(4)
-        fit_lbl.set_margin_start(10)
-        fit_lbl.set_margin_end(10)
-        root.append(fit_lbl)
-
-        fit_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        fit_row.set_margin_start(10)
-        fit_row.set_margin_end(10)
-        fit_row.set_margin_bottom(6)
-        self._fit_buttons: dict[str, Gtk.Button] = {}
-
-        for _lbl, _tok, _tip in (
-            ("Cover",   "cover",   "Crop image to fill the panel"),
-            ("Contain", "contain", "Letterbox image inside the panel"),
-        ):
-            _btn = Gtk.Button(label=_lbl)
-            _btn.set_hexpand(True)
-            _btn.add_css_class("ilp-btn")
-            _btn.set_tooltip_text(_tip)
-            _btn.connect("clicked", self._on_fit_clicked, _tok)
-            self._fit_buttons[_tok] = _btn
-            fit_row.append(_btn)
-
-        root.append(fit_row)
-
-        # ── Focal point section (visible only when fit=cover, pos≠background) ─
-        self._focal_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        self._focal_box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
-
-        focal_lbl = Gtk.Label(label="Focal point")
-        focal_lbl.set_xalign(0.0)
-        focal_lbl.add_css_class("ilp-section-label")
-        focal_lbl.set_margin_top(6)
-        focal_lbl.set_margin_bottom(4)
-        focal_lbl.set_margin_start(10)
-        focal_lbl.set_margin_end(10)
-        self._focal_box.append(focal_lbl)
-
-        focal_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        focal_row.set_margin_start(10)
-        focal_row.set_margin_end(10)
-        focal_row.set_margin_bottom(6)
-        self._focal_buttons: dict[str, Gtk.Button] = {}
-
-        for _lbl, _tok, _tip in (
-            ("Top",    "focal-top",    "Frame the top of the image"),
-            ("Center", "focal-center", "Frame the center of the image"),
-            ("Bottom", "focal-bottom", "Frame the bottom of the image"),
-        ):
-            _btn = Gtk.Button(label=_lbl)
-            _btn.set_hexpand(True)
-            _btn.add_css_class("ilp-btn")
-            _btn.set_tooltip_text(_tip)
-            _btn.connect("clicked", self._on_focal_clicked, _tok)
-            self._focal_buttons[_tok] = _btn
-            focal_row.append(_btn)
-
-        self._focal_box.append(focal_row)
-        root.append(self._focal_box)
-
-        root.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
-
-        # ── Filters section: Grayscale + Blur ─────────────────────────────────
-        filt_lbl = Gtk.Label(label="Filters")
-        filt_lbl.set_xalign(0.0)
-        filt_lbl.add_css_class("ilp-section-label")
-        filt_lbl.set_margin_top(6)
-        filt_lbl.set_margin_bottom(4)
-        filt_lbl.set_margin_start(10)
-        filt_lbl.set_margin_end(10)
-        root.append(filt_lbl)
-
-        for _attr, _label, _lo, _hi, _handler in (
-            ("_grayscale_scale", "Grayscale", 0, 100, "_on_grayscale_changed"),
-            ("_blur_scale",      "Blur px",   0,  20, "_on_blur_changed"),
-        ):
-            _sc = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, _lo, _hi, 1)
-            _sc.set_value(_lo)
-            _sc.connect("value-changed", getattr(self, _handler))
-            setattr(self, _attr, _sc)
-            root.append(_inline_slider(_label, _sc))
-
-        root.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
-
-        # ── Tint section ──────────────────────────────────────────────────────
-        tint_lbl = Gtk.Label(label="Tint")
-        tint_lbl.set_xalign(0.0)
-        tint_lbl.add_css_class("ilp-section-label")
-        tint_lbl.set_margin_top(6)
-        tint_lbl.set_margin_bottom(4)
-        tint_lbl.set_margin_start(10)
-        tint_lbl.set_margin_end(10)
-        root.append(tint_lbl)
-
-        tint_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        tint_row.set_margin_start(10)
-        tint_row.set_margin_end(10)
-        tint_row.set_margin_bottom(6)
-
-        self._tint_none_btn = Gtk.Button(label="None")
-        self._tint_none_btn.set_hexpand(True)
-        self._tint_none_btn.add_css_class("ilp-btn")
-        self._tint_none_btn.set_tooltip_text("No colour overlay")
-        self._tint_none_btn.connect("clicked", self._on_tint_none_clicked)
-        tint_row.append(self._tint_none_btn)
-
-        self._tint_color_btn = Gtk.ColorButton()
-        self._tint_color_btn.set_hexpand(True)
-        self._tint_color_btn.set_use_alpha(False)
-        self._tint_color_btn.set_tooltip_text("Pick a tint colour")
-        self._tint_color_btn.connect("color-set", self._on_tint_color_set)
-        tint_row.append(self._tint_color_btn)
-
-        root.append(tint_row)
-        root.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
-
-        # ── Flip section ──────────────────────────────────────────────────────
-        flip_lbl = Gtk.Label(label="Flip")
-        flip_lbl.set_xalign(0.0)
-        flip_lbl.add_css_class("ilp-section-label")
-        flip_lbl.set_margin_top(6)
-        flip_lbl.set_margin_bottom(4)
-        flip_lbl.set_margin_start(10)
-        flip_lbl.set_margin_end(10)
-        root.append(flip_lbl)
-
-        flip_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        flip_row.set_margin_start(10)
-        flip_row.set_margin_end(10)
-        flip_row.set_margin_bottom(6)
-
-        self._flip_h_btn = Gtk.Button(label="Horizontal")
-        self._flip_h_btn.set_hexpand(True)
-        self._flip_h_btn.add_css_class("ilp-btn")
-        self._flip_h_btn.set_tooltip_text("Mirror left↔right")
-        self._flip_h_btn.connect("clicked", self._on_flip_h_clicked)
-        flip_row.append(self._flip_h_btn)
-
-        self._flip_v_btn = Gtk.Button(label="Vertical")
-        self._flip_v_btn.set_hexpand(True)
-        self._flip_v_btn.add_css_class("ilp-btn")
-        self._flip_v_btn.set_tooltip_text("Mirror top↔bottom")
-        self._flip_v_btn.connect("clicked", self._on_flip_v_clicked)
-        flip_row.append(self._flip_v_btn)
-
-        root.append(flip_row)
-        root.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
-
-        # ── Zoom section ──────────────────────────────────────────────────────
-        zoom_sep_lbl = Gtk.Label(label="Zoom")
-        zoom_sep_lbl.set_xalign(0.0)
-        zoom_sep_lbl.add_css_class("ilp-section-label")
-        zoom_sep_lbl.set_margin_top(6)
-        zoom_sep_lbl.set_margin_bottom(4)
-        zoom_sep_lbl.set_margin_start(10)
-        zoom_sep_lbl.set_margin_end(10)
-        root.append(zoom_sep_lbl)
-
-        self._zoom_scale = Gtk.Scale.new_with_range(
-            Gtk.Orientation.HORIZONTAL, 100, 300, 5
-        )
-        for _v in (100, 200, 300):
-            self._zoom_scale.add_mark(_v, Gtk.PositionType.BOTTOM, None)
-        self._zoom_scale.set_value(100)
-        self._zoom_scale.connect("value-changed", self._on_zoom_changed)
-        root.append(_inline_slider("Zoom %", self._zoom_scale))
-
-        root.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
-
-        # ── Alt text ──────────────────────────────────────────────────────────
-        alt_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        alt_box.set_margin_top(6)
-        alt_box.set_margin_bottom(6)
-        alt_box.set_margin_start(10)
-        alt_box.set_margin_end(10)
-
-        self._alt_entry = Gtk.Entry()
-        self._alt_entry.set_placeholder_text("Alt text / description…")
-        self._alt_entry.connect("changed", self._on_alt_changed)
-        alt_box.append(self._alt_entry)
-        root.append(alt_box)
-
-        # ── Primary action (insert mode only) ─────────────────────────────────
-        self._insert_btn = Gtk.Button(label="Choose image…")
-        self._insert_btn.add_css_class("suggested-action")
-        self._insert_btn.set_margin_start(10)
-        self._insert_btn.set_margin_end(10)
-        self._insert_btn.set_margin_bottom(10)
-        self._insert_btn.connect("clicked", self._on_insert_clicked)
-        root.append(self._insert_btn)
-
-        # Wrap in a ScrolledWindow so the popover never exceeds screen height.
-        scroll = Gtk.ScrolledWindow()
-        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        scroll.set_max_content_height(560)
-        scroll.set_propagate_natural_height(True)
-        scroll.set_child(root)
-        scroll.set_vexpand(True)
-        self.append(scroll)
-
-        # Initialise visual state
-        self._refresh_pos_buttons()
-        self._refresh_size_scale()
-        self._refresh_fit_buttons()
-        self._refresh_focal_buttons()
-
-    def set_header_visible(self, visible: bool) -> None:
-        """Hide the internal title where the host already provides one."""
-        self._header.set_visible(visible)
-
-    def _dismiss(self) -> None:
-        """Ask the host to close, if it is the kind of host that closes."""
-        if self._dismiss_cb is not None:
-            self._dismiss_cb()
-
-    # ── CSS ───────────────────────────────────────────────────────────────────
-
-    @classmethod
-    def _ensure_css(cls) -> None:
-        """Install scoped CSS for the controls once per process."""
-        if cls._CSS_INSTALLED:
-            return
-        css = Gtk.CssProvider()
-        rules = (
-            # Section labels: small caps, muted
-            ".ilp-section-label {"
-            "  font-size: 11px;"
-            "  font-weight: 600;"
-            "  text-transform: uppercase;"
-            "  letter-spacing: 0.06em;"
-            "  color: alpha(@window_fg_color, 0.55);"
-            "}"
-            # Header: bold title
-            ".ilp-header { font-weight: 600; font-size: 13px; }"
-            # Generic icon button base
-            ".ilp-btn {"
-            "  padding: 7px 6px;"
-            "  border-radius: 6px;"
-            "  font-size: 12px;"
-            "}"
-            # Position button: icon stacked above label
-            ".ilp-pos-btn {"
-            "  padding: 8px 6px 7px;"
-            "  border-radius: 6px;"
-            "  font-size: 12px;"
-            "}"
-            # Selected state — accent border + tinted background
-            ".ilp-selected {"
-            "  background: alpha(@accent_bg_color, 0.15);"
-            "  border-color: @accent_color;"
-            "  color: @accent_color;"
-            "  border-width: 2px;"
-            "}"
-        )
-        try:
-            css.load_from_string(rules)
-        except AttributeError:
-            css.load_from_data(rules.encode())
-        display = Gdk.Display.get_default()
-        if display is not None:
-            Gtk.StyleContext.add_provider_for_display(
-                display, css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
-            )
-        cls._CSS_INSTALLED = True
-
-    # ── Position button factory ───────────────────────────────────────────────
-
-    def _make_pos_button(self, token: str) -> Gtk.Button:
-        """Build one position button: SVG icon + label stacked vertically."""
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        box.set_halign(Gtk.Align.CENTER)
-
-        # SVG icon via GtkImage + Gdk.Paintable from SVG bytes
-        # Fall back to a text-only button when SVG loading is unavailable.
-        icon_svg = self._POS_ICONS.get(token, "")
-        try:
-            from gi.repository import GdkPixbuf
-            loader = GdkPixbuf.PixbufLoader.new_with_type("svg")
-            loader.write(icon_svg.encode())
-            loader.close()
-            pb = loader.get_pixbuf()
-            if pb is not None:
-                from gi.repository import Gdk as _Gdk
-                tex = _Gdk.Texture.new_for_pixbuf(pb)
-                img = Gtk.Image.new_from_paintable(tex)
-                img.set_pixel_size(18)
-                box.append(img)
-        except Exception:
-            pass  # icon skipped gracefully — label still identifies the button
-
-        lbl = Gtk.Label(label=self._POS_LABELS[token])
-        lbl.add_css_class("caption")
-        box.append(lbl)
-
-        btn = Gtk.Button()
-        btn.set_child(box)
-        btn.add_css_class("flat")
-        btn.add_css_class("ilp-pos-btn")
-        btn.set_tooltip_text(self._POS_LABELS[token])
-        btn.update_property(
-            [Gtk.AccessibleProperty.LABEL], [self._POS_LABELS[token]]
-        )
-        btn.connect("clicked", self._on_pos_clicked, token)
-        self._pos_buttons[token] = btn
-        return btn
-
-    # ── Visual state refresh ──────────────────────────────────────────────────
-
-    def _refresh_pos_buttons(self) -> None:
-        """Update selected/unselected styling on all position buttons."""
-        is_bg = self._active_pos == "background"
-        active = self._active_pos or "auto"
-        for token, btn in self._pos_buttons.items():
-            if token == active:
-                btn.add_css_class("ilp-selected")
-            else:
-                btn.remove_css_class("ilp-selected")
-        # Disable size/gradient when background is chosen — not applicable
-        self._size_scale.set_sensitive(not is_bg)
-        self._grad_switch.set_sensitive(not is_bg)
-        # Fade section: only visible when gradient is ON and not background
-        if hasattr(self, "_fade_box"):
-            grad_on = self._grad_switch.get_active()
-            self._fade_box.set_visible(not is_bg and grad_on)
-        # Focal section: visible only when fit=cover and not background
-        if hasattr(self, "_focal_box"):
-            self._focal_box.set_visible(
-                not is_bg and self._active_fit == "cover"
-            )
-
-    def _refresh_size_scale(self) -> None:
-        """Sync the size scale to _active_size without triggering writeback."""
-        self._size_scale.handler_block_by_func(self._on_size_changed)
-        try:
-            self._size_scale.set_value(int(self._active_size))
-        finally:
-            self._size_scale.handler_unblock_by_func(self._on_size_changed)
-
-    def _refresh_opacity_buttons(self) -> None:
-        """Update selected/unselected styling on all opacity buttons."""
-        for token, btn in self._opacity_buttons.items():
-            if int(token) == self._active_opacity:
-                btn.add_css_class("ilp-selected")
-            else:
-                btn.remove_css_class("ilp-selected")
-
-    def _refresh_fade_buttons(self) -> None:
-        """Update selected/unselected styling on all fade-direction buttons."""
-        for token, btn in self._fade_buttons.items():
-            if token == self._active_fade:
-                btn.add_css_class("ilp-selected")
-            else:
-                btn.remove_css_class("ilp-selected")
-
-    def _refresh_fit_buttons(self) -> None:
-        for token, btn in self._fit_buttons.items():
-            if token == self._active_fit:
-                btn.add_css_class("ilp-selected")
-            else:
-                btn.remove_css_class("ilp-selected")
-
-    def _refresh_focal_buttons(self) -> None:
-        for token, btn in self._focal_buttons.items():
-            if token == self._active_focal:
-                btn.add_css_class("ilp-selected")
-            else:
-                btn.remove_css_class("ilp-selected")
-
-    def _refresh_grayscale_scale(self) -> None:
-        self._grayscale_scale.handler_block_by_func(self._on_grayscale_changed)
-        try:
-            self._grayscale_scale.set_value(self._active_grayscale)
-        finally:
-            self._grayscale_scale.handler_unblock_by_func(self._on_grayscale_changed)
-
-    def _refresh_blur_scale(self) -> None:
-        self._blur_scale.handler_block_by_func(self._on_blur_changed)
-        try:
-            self._blur_scale.set_value(self._active_blur)
-        finally:
-            self._blur_scale.handler_unblock_by_func(self._on_blur_changed)
-
-    def _refresh_tint_ui(self) -> None:
-        if self._active_tint is None:
-            self._tint_none_btn.add_css_class("ilp-selected")
-            self._tint_color_btn.remove_css_class("ilp-selected")
-        else:
-            self._tint_none_btn.remove_css_class("ilp-selected")
-            self._tint_color_btn.add_css_class("ilp-selected")
-            rgba = Gdk.RGBA()
-            if rgba.parse(self._active_tint):
-                self._tint_color_btn.set_rgba(rgba)
-
-    def _refresh_flip_buttons(self) -> None:
-        if self._active_flip_h:
-            self._flip_h_btn.add_css_class("ilp-selected")
-        else:
-            self._flip_h_btn.remove_css_class("ilp-selected")
-        if self._active_flip_v:
-            self._flip_v_btn.add_css_class("ilp-selected")
-        else:
-            self._flip_v_btn.remove_css_class("ilp-selected")
-
-    def _refresh_zoom_scale(self) -> None:
-        self._zoom_scale.handler_block_by_func(self._on_zoom_changed)
-        try:
-            self._zoom_scale.set_value(self._active_zoom)
-        finally:
-            self._zoom_scale.handler_unblock_by_func(self._on_zoom_changed)
-
-    # ── Public API ────────────────────────────────────────────────────────────
-
-    def open_insert_mode(self) -> None:
-        """Reset to defaults and open for inserting a new image."""
-        self._edit_mode        = False
-        self._edit_cb          = None
-        self._active_pos       = None
-        self._active_size      = "50"
-        self._active_opacity   = 75
-        self._active_fade      = _POSITION_DEFAULT_FADE["right"]
-        self._active_fit       = "cover"
-        self._active_focal     = "focal-center"
-        self._active_grayscale = 0
-        self._active_blur      = 0
-        self._active_tint      = None
-        self._active_flip_h    = False
-        self._active_flip_v    = False
-        self._active_zoom      = 100
-
-        self._block_signals(True)
-        self._grad_switch.set_active(True)
-        self._alt_entry.set_text("")
-        self._block_signals(False)
-
-        self._refresh_pos_buttons()
-        self._refresh_size_scale()
-        self._refresh_opacity_buttons()
-        self._refresh_fade_buttons()
-        self._refresh_fit_buttons()
-        self._refresh_focal_buttons()
-        self._refresh_grayscale_scale()
-        self._refresh_blur_scale()
-        self._refresh_tint_ui()
-        self._refresh_flip_buttons()
-        self._refresh_zoom_scale()
-
-        self._insert_btn.set_label("Choose image…")
-        self._insert_btn.set_visible(True)
-
-        # Capture the parent window now, while the controls are still
-        # attached to the widget tree.  In the popover host, autohide fires
-        # when the file dialog steals focus and get_root() then returns None.
-        self._parent_window = self.get_root()
-
-    def open_edit_mode(self, layout: dict, description: str,
-                       edit_cb: Callable[[dict, str], None]) -> None:
-        """
-        Pre-populate from *layout* + *description* and open in edit mode.
-
-        *edit_cb(layout, description)* is called immediately on every change.
-        """
-        self._edit_mode        = True
-        self._edit_cb          = edit_cb
-        self._active_pos       = layout.get("position")
-        self._active_size      = layout.get("size", "50")
-        self._active_opacity   = layout.get("opacity", 75)
-        # Fall back to the position default when the document has no fade token.
-        self._active_fade = (
-            layout.get("fade")
-            or _POSITION_DEFAULT_FADE.get(self._active_pos, "left")
-        )
-        self._active_fit       = layout.get("fit", "cover")
-        self._active_focal     = layout.get("focal", "focal-center")
-        self._active_grayscale = layout.get("grayscale", 0)
-        self._active_blur      = layout.get("blur", 0)
-        self._active_tint      = layout.get("tint", None)
-        self._active_flip_h    = layout.get("flip_h", False)
-        self._active_flip_v    = layout.get("flip_v", False)
-        self._active_zoom      = layout.get("zoom", 100)
-
-        self._block_signals(True)
-        self._grad_switch.set_active(layout.get("gradient", True))
-        self._alt_entry.set_text(description)
-        self._block_signals(False)
-
-        self._refresh_pos_buttons()
-        self._refresh_size_scale()
-        self._refresh_opacity_buttons()
-        self._refresh_fade_buttons()
-        self._refresh_fit_buttons()
-        self._refresh_focal_buttons()
-        self._refresh_grayscale_scale()
-        self._refresh_blur_scale()
-        self._refresh_tint_ui()
-        self._refresh_flip_buttons()
-        self._refresh_zoom_scale()
-
-        self._insert_btn.set_visible(False)
-        self._parent_window = self.get_root()
-
-    # ── Signal helpers ────────────────────────────────────────────────────────
-
-    def _block_signals(self, block: bool) -> None:
-        fn = "handler_block_by_func" if block else "handler_unblock_by_func"
-        getattr(self._grad_switch,      fn)(self._on_grad_changed)
-        getattr(self._alt_entry,        fn)(self._on_alt_changed)
-        getattr(self._size_scale,       fn)(self._on_size_changed)
-        getattr(self._grayscale_scale,  fn)(self._on_grayscale_changed)
-        getattr(self._blur_scale,       fn)(self._on_blur_changed)
-        getattr(self._zoom_scale,       fn)(self._on_zoom_changed)
-
-    def _current_layout(self) -> dict:
-        grad_on = self._grad_switch.get_active()
-        is_bg   = self._active_pos == "background"
-        fit     = self._active_fit
-        focal   = self._active_focal if (fit == "cover" and not is_bg) else "focal-center"
-        return {
-            "position":  self._active_pos,
-            "size":      self._active_size,
-            "gradient":  grad_on,
-            "opacity":   self._active_opacity,
-            "fade":      self._active_fade if (grad_on and not is_bg) else None,
-            "fit":       fit,
-            "focal":     focal,
-            "grayscale": self._active_grayscale,
-            "blur":      self._active_blur,
-            "tint":      self._active_tint,
-            "flip_h":    self._active_flip_h,
-            "flip_v":    self._active_flip_v,
-            "zoom":      self._active_zoom,
-        }
-
-    def _schedule_writeback(self) -> None:
-        """Debounce write-back 150 ms so rapid clicks don't spam the buffer."""
-        if not self._edit_mode or self._edit_cb is None:
-            return
-        if self._writeback_source is not None:
-            GLib.source_remove(self._writeback_source)
-        self._writeback_source = GLib.timeout_add(150, self._do_writeback)
-
-    def _do_writeback(self) -> bool:
-        self._writeback_source = None
-        if self._edit_mode and self._edit_cb is not None:
-            self._edit_cb(self._current_layout(), self._alt_entry.get_text())
-        return GLib.SOURCE_REMOVE
-
-    # ── Control signal handlers ───────────────────────────────────────────────
-
-    def _on_pos_clicked(self, btn: Gtk.Button, token: str) -> None:
-        # "auto" is stored as no position at all; everything downstream keys
-        # off its absence.
-        self._active_pos  = None if token == "auto" else token
-        self._active_fade = _POSITION_DEFAULT_FADE.get(token, "left")
-        self._refresh_pos_buttons()
-        self._refresh_fade_buttons()
-        self._schedule_writeback()
-
-    def _on_size_changed(self, scale: Gtk.Scale) -> None:
-        self._active_size = str(int(scale.get_value()))
-        self._schedule_writeback()
-
-    def _on_opacity_clicked(self, btn: Gtk.Button, token: str) -> None:
-        self._active_opacity = int(token)
-        self._refresh_opacity_buttons()
-        self._schedule_writeback()
-
-    def _on_fade_clicked(self, btn: Gtk.Button, token: str) -> None:
-        self._active_fade = token
-        self._refresh_fade_buttons()
-        self._schedule_writeback()
-
-    def _on_fit_clicked(self, btn: Gtk.Button, token: str) -> None:
-        self._active_fit = token
-        self._refresh_fit_buttons()
-        if hasattr(self, "_focal_box"):
-            is_bg = self._active_pos == "background"
-            self._focal_box.set_visible(not is_bg and token == "cover")
-        self._schedule_writeback()
-
-    def _on_focal_clicked(self, btn: Gtk.Button, token: str) -> None:
-        self._active_focal = token
-        self._refresh_focal_buttons()
-        self._schedule_writeback()
-
-    def _on_grayscale_changed(self, scale: Gtk.Scale) -> None:
-        self._active_grayscale = int(scale.get_value())
-        self._schedule_writeback()
-
-    def _on_blur_changed(self, scale: Gtk.Scale) -> None:
-        self._active_blur = int(scale.get_value())
-        self._schedule_writeback()
-
-    def _on_tint_none_clicked(self, btn: Gtk.Button) -> None:
-        self._active_tint = None
-        self._refresh_tint_ui()
-        self._schedule_writeback()
-
-    def _on_tint_color_set(self, btn: Gtk.ColorButton) -> None:
-        rgba = btn.get_rgba()
-        r = int(rgba.red   * 255)
-        g = int(rgba.green * 255)
-        b = int(rgba.blue  * 255)
-        self._active_tint = f"#{r:02x}{g:02x}{b:02x}"
-        self._refresh_tint_ui()
-        self._schedule_writeback()
-
-    def _on_flip_h_clicked(self, btn: Gtk.Button) -> None:
-        self._active_flip_h = not self._active_flip_h
-        self._refresh_flip_buttons()
-        self._schedule_writeback()
-
-    def _on_flip_v_clicked(self, btn: Gtk.Button) -> None:
-        self._active_flip_v = not self._active_flip_v
-        self._refresh_flip_buttons()
-        self._schedule_writeback()
-
-    def _on_zoom_changed(self, scale: Gtk.Scale) -> None:
-        self._active_zoom = int(scale.get_value())
-        self._schedule_writeback()
-
-    def _on_grad_changed(self, switch: Gtk.Switch, state: bool) -> bool:
-        if hasattr(self, "_fade_box"):
-            is_bg = self._active_pos == "background"
-            self._fade_box.set_visible(not is_bg and state)
-        self._schedule_writeback()
-        return False   # allow GTK to apply the visual state
-
-    def _on_alt_changed(self, entry: Gtk.Entry) -> None:
-        self._schedule_writeback()
-
-    # ── Insert mode action ────────────────────────────────────────────────────
-
-    def _on_insert_clicked(self, *_) -> None:
-        """Build alt token string, close popover, open file dialog."""
-        layout = self._current_layout()
-        desc   = self._alt_entry.get_text()
-        alt    = _build_alt(desc, layout)
-
-        # Use the window reference captured in open_insert_mode() — by the time
-        # this button is clicked autohide may have already unparented the popover,
-        # making get_root() return None.
-        parent_window = self._parent_window
-
-        self._dismiss()
-
-        dialog = Gtk.FileDialog.new()
-        dialog.set_title("Choose image")
-        img_filter = Gtk.FileFilter()
-        img_filter.set_name("Images")
-        for pat in ("*.png", "*.jpg", "*.jpeg", "*.gif",
-                    "*.svg", "*.webp", "*.bmp", "*.tiff"):
-            img_filter.add_pattern(pat)
-        store = Gio.ListStore.new(Gtk.FileFilter)
-        store.append(img_filter)
-        dialog.set_filters(store)
-
-        # Keep a strong reference so the GC cannot collect the dialog before
-        # the async callback fires.  Cleared in the callback.
-        self._active_file_dialog = dialog
-
-        # Capture alt and insert_cb in a closure — Gtk.FileDialog.open() in
-        # PyGObject does NOT support a user_data argument; the callback receives
-        # only (dialog, result).  Passing extra arguments silently breaks the call.
-        insert_cb = self._insert_cb
-
-        def _on_done(dlg, result):
-            self._active_file_dialog = None
-            try:
-                gfile = dlg.open_finish(result)
-            except GLib.Error:
-                return
-            path = gfile.get_path() or gfile.get_uri()
-            if path:
-                insert_cb(alt, path)
-
-        dialog.open(parent_window, None, _on_done)
-
-
-class ImageLayoutPopover(Gtk.Popover):
-    """
-    Anchors ImageLayoutControls to a button, for the toolbar insert flow.
-
-    Editing an existing image happens in the inspector panel instead, where
-    the controls do not sit on top of the text being edited.
-    """
-
-    def __init__(self, parent_widget: Gtk.Widget,
-                 insert_cb: Callable[[str, str], None]) -> None:
-        super().__init__()
-        self.set_parent(parent_widget)
-        self.set_has_arrow(True)
-        self.set_autohide(True)
-        self.controls = ImageLayoutControls(insert_cb, dismiss_cb=self.popdown)
-        self.set_child(self.controls)
-
-    def open_insert_mode(self) -> None:
-        self.set_autohide(True)
-        self.popup()
-        self.controls.open_insert_mode()
-
-    def open_edit_mode(self, layout: dict, description: str,
-                       edit_cb: "Callable[[dict, str], None]") -> None:
-        # Autohide off: the click on the text view that opened this must not
-        # immediately dismiss it.
-        self.set_autohide(False)
-        self.popup()
-        self.controls.open_edit_mode(layout, description, edit_cb)
 
 
 class _TableInsertPopover(Gtk.Popover):
@@ -1366,21 +225,12 @@ class Editor(Gtk.Box):
         self._live_debounce_source: int | None = None
         self._base_path:        Path | None = None
         self._insert_image_cb = None
-        # Lazily constructed (created on first use, reused thereafter).
-        # _image_layout_popover is ONLY used for the contextual edit popover
-        # that appears when the cursor is on an image tag (parented to the
-        # invisible overlay anchor).  It must never be re-parented.
-        self._image_layout_popover: ImageLayoutPopover | None = None
-        # Separate popover instance exclusively for the toolbar insert button.
-        # Keeping them separate avoids the re-parenting that caused the popover
-        # to be parented to the invisible anchor and dismissed instantly.
-        self._insert_image_popover: ImageLayoutPopover | None = None
+        self._active_file_dialog = None
         # The toolbar insert-image button — used as popover anchor
         self._img_toolbar_btn:  Gtk.Button | None = None
         # Set by the window: (layout, description, edit_cb) -> bool.  Returns
         # True when the inspector took the image, in which case no popover
         # opens.  Falls back to the popover whenever the panel is closed.
-        self._image_context_cb = None
         # Text marks at the lines where slides run out of room.  Marks rather
         # than line numbers so the rules stay attached to the content they
         # describe while the writer edits above them.
@@ -1409,9 +259,7 @@ class Editor(Gtk.Box):
         # Image-edit popover state
         # Last line number that had an image tag — avoids re-scanning if
         # the cursor stays on the same line.
-        self._last_img_line:    int = -1
         # The full match (src, alt) of the currently-tracked image tag
-        self._current_img_match: tuple[str, str] | None = None  # (alt, src)
 
         if _GTKSOURCE_AVAILABLE:
             self._init_source_view()
@@ -1505,14 +353,6 @@ class Editor(Gtk.Box):
         self._drop_target.connect("motion", self._on_drop_motion)
         # "leave" signal not connected — no visual feedback needed on drag leave
         self._view.add_controller(self._drop_target)
-
-        # Click handler: open the image-layout popover when the user clicks
-        # on a line that contains an image tag.  Use button=1, released signal
-        # so it fires after the cursor has moved to the clicked position.
-        _img_click = Gtk.GestureClick()
-        _img_click.set_button(1)
-        _img_click.connect("released", self._on_view_click_for_image)
-        self._view.add_controller(_img_click)
 
     # ── View initialisation ───────────────────────────────────────────────────
 
@@ -1610,9 +450,7 @@ class Editor(Gtk.Box):
             self._buffer.set_text(text)
         finally:
             self._buffer.handler_unblock_by_func(self._on_buffer_changed)
-        # Reset image-edit and slide state when document is replaced
-        self._last_img_line     = -1
-        self._current_img_match = None
+        # Reset slide state when the document is replaced
         self._badge_starts      = []
         self._slide_ranges      = []
         # Schedule badge and image-tag scan now that the buffer has content
@@ -1758,212 +596,8 @@ class Editor(Gtk.Box):
     def get_img_toolbar_btn(self) -> "Gtk.Button | None":
         return self._img_toolbar_btn
 
-    def open_image_layout_popover(self, anchor: "Gtk.Widget") -> None:
-        self._open_image_layout_popover(anchor)
-
-    # ── Contextual image editing ──────────────────────────────────────────────
-
-    def check_cursor_for_image(self) -> None:
-        """
-        Called by the window's 300ms cursor-polling timer.
-
-        With an inspector attached this both opens and closes the image
-        context: the panel sits beside the text, so following the cursor onto
-        an image costs the writer nothing.
-
-        Without one, it is only responsible for DISMISSAL — opening is left to
-        _on_view_click_for_image() on an explicit click, because a popover
-        appearing on every cursor movement would cover the text and fight
-        scrolling.
-        """
-        cursor  = self._buffer.get_iter_at_mark(self._buffer.get_insert())
-        line_no = cursor.get_line()
-
-        if self._image_context_cb is not None:
-            on_image = bool(_IMAGE_RE.search(self._get_line_text(line_no) or ""))
-            if on_image:
-                if line_no != self._last_img_line:
-                    self._open_img_edit_popover_for_line(line_no)
-            elif self._last_img_line != -1:
-                self._current_img_match = None
-                self._last_img_line     = -1
-                self._image_context_cb(None, "", None)
-            return
-
-        if self._image_layout_popover is None:
-            return
-        if not self._image_layout_popover.get_visible():
-            return   # nothing to dismiss
-
-        # Fast path: cursor is still on the image line — keep popover open.
-        if line_no == self._last_img_line:
-            return
-
-        # Cursor moved off the image line — dismiss.
-        self._dismiss_img_popover()
-
-    def _dismiss_img_popover(self) -> None:
-        """Close the image-edit popover and reset line tracking."""
-        self._current_img_match = None
-        self._last_img_line     = -1
-        if self._image_layout_popover is not None:
-            if self._image_layout_popover.get_visible():
-                self._image_layout_popover.popdown()
-
-    def _open_img_edit_popover_for_line(self, line_no: int) -> None:
-        """
-        Open the image-edit popover for the image tag on *line_no*.
-
-        Called from the click handler when the user clicks on an image line.
-        Does nothing if the line contains no image tag.
-        """
-        ok, line_start = self._buffer.get_iter_at_line(line_no)
-        if not ok:
-            return
-        line_end = line_start.copy()
-        line_end.forward_to_line_end()
-        line_text = self._buffer.get_text(line_start, line_end, True)
-
-        m = _IMAGE_RE.search(line_text)
-        if not m:
-            return
-
-        alt_raw      = m.group(1)
-        src          = m.group(2)
-        desc, layout = _parse_alt(alt_raw)
-
-        self._current_img_match = (alt_raw, src, line_no)
-        self._last_img_line     = line_no
-
-        # Prefer the inspector: the controls sit beside the text rather than
-        # on top of the line being edited.
-        if self._image_context_cb is not None:
-            if self._image_context_cb(layout, desc, self._on_img_edit):
-                # Close a popover left over from before the panel was opened,
-                # but keep the match/line tracking _dismiss_img_popover() would
-                # clear — writeback and cursor-exit both depend on it.
-                if (self._image_layout_popover is not None
-                        and self._image_layout_popover.get_visible()):
-                    self._image_layout_popover.popdown()
-                return
-
-        # Create/retrieve the popover first, then position it — set_pointing_to
-        # requires the popover to exist and be parented to the view.
-        popover = self._ensure_edit_popover()
-        self._position_img_anchor(line_start)
-        popover.open_edit_mode(layout, desc, self._on_img_edit)
-
-    def _position_img_anchor(self, line_iter) -> None:
-        """
-        Point the edit popover at the pixel rectangle of *line_iter*'s line.
-
-        Uses Gtk.Popover.set_pointing_to() with the line's bounding rectangle
-        in widget (view) coordinates.  This is the correct GTK4 approach for
-        positioning a popover at a text location — the popover is parented to
-        the view widget and the pointing rectangle is in view-local coords.
-        """
-        popover = self._image_layout_popover
-        if popover is None:
-            return
-        try:
-            buf_rect = self._view.get_iter_location(line_iter)
-            # buffer_to_window_coords with WIDGET gives view-local coords,
-            # which is what set_pointing_to expects when the popover is
-            # parented to the view.
-            tx, ty = self._view.buffer_to_window_coords(
-                Gtk.TextWindowType.WIDGET, buf_rect.x, buf_rect.y
-            )
-            rect = Gdk.Rectangle()
-            rect.x      = tx
-            rect.y      = ty
-            rect.width  = max(1, buf_rect.width)
-            rect.height = max(1, buf_rect.height)
-            popover.set_pointing_to(rect)
-        except Exception:
-            pass
-
-    def _ensure_edit_popover(self) -> ImageLayoutPopover:
-        """
-        Return (creating if needed) the shared image-edit popover.
-
-        The popover is parented to self._view (the GtkSourceView) rather than
-        to the invisible anchor label.  Position is set via set_pointing_to()
-        with the pixel rectangle of the image line so the arrow points directly
-        at the tag.  This avoids the anchor-offset problem where the popover
-        appeared at the top-left because a 1×1 hidden widget has a zero-size
-        allocation until it becomes visible.
-        """
-        if self._image_layout_popover is None:
-            self._image_layout_popover = ImageLayoutPopover(
-                self._view, self._on_layout_insert
-            )
-            # Reset line cache when popover closes so re-clicking same line works
-            self._image_layout_popover.connect(
-                "closed", lambda *_: setattr(self, "_last_img_line", -1)
-            )
-        return self._image_layout_popover
-
-    def _on_img_edit(self, layout: dict, description: str) -> None:
-        """
-        Write-back callback: called by the popover whenever any control changes.
-
-        Replaces the alt-text tokens in the existing image tag in-place,
-        preserving the src path.  Wrapped in begin/end_user_action so the
-        change appears as one undo step.
-        """
-        if self._current_img_match is None:
-            return
-        old_alt, src, line_no = self._current_img_match
-
-        new_alt = _build_alt(description, layout)
-        new_tag = f"![{new_alt}]({src})"
-
-        ok, line_start = self._buffer.get_iter_at_line(line_no)
-        if not ok:
-            return
-        line_end = line_start.copy()
-        line_end.forward_to_line_end()
-        line_text = self._buffer.get_text(line_start, line_end, True)
-
-        # Find and replace only the image tag within the line
-        m = _IMAGE_RE.search(line_text)
-        if not m:
-            return
-
-        # Compute iterators for just the tag span
-        tag_start = line_start.copy()
-        tag_start.forward_chars(m.start())
-        tag_end = line_start.copy()
-        tag_end.forward_chars(m.end())
-
-        # Block the changed signal so this write-back doesn't trigger a
-        # full re-parse and re-render cycle during live editing
-        self._buffer.handler_block_by_func(self._on_buffer_changed)
-        try:
-            # Wrap in a user action so the alt-text change is one undo step.
-            # Both Gtk.TextBuffer and GtkSource.Buffer support begin/end_user_action.
-            self._buffer.begin_user_action()
-            try:
-                self._buffer.delete(tag_start, tag_end)
-                # Re-fetch iterator after deletion — TextIters are invalidated
-                # by any buffer modification.
-                ok2, tag_start2 = self._buffer.get_iter_at_line(line_no)
-                if ok2:
-                    tag_start2.forward_chars(m.start())
-                    self._buffer.insert(tag_start2, new_tag)
-            finally:
-                self._buffer.end_user_action()
-        finally:
-            self._buffer.handler_unblock_by_func(self._on_buffer_changed)
-
-        # Update the tracked alt so the next write-back has the right old value
-        self._current_img_match = (new_alt, src, line_no)
-        # Re-arm the debounce so a full conversion eventually fires
-        if self._debounce_source is not None:
-            GLib.source_remove(self._debounce_source)
-        self._debounce_source = GLib.timeout_add(
-            self.DEBOUNCE_MS, self._emit_changed
-        )
+    def choose_image_to_insert(self) -> None:
+        self._choose_image_to_insert()
 
     # ── Find bar ──────────────────────────────────────────────────────────────
 
@@ -2292,11 +926,10 @@ class Editor(Gtk.Box):
                             "Speaker notes (^^^)", lambda *_: self._speaker_notes()))
         bar.append(sep())
 
-        # Inserts that need a popover anchored to a real button.
         self._img_toolbar_btn = icon_btn(
             "insert-image-symbolic", "Insert image",
             lambda *_: (self._insert_image_cb() if self._insert_image_cb
-                        else self._open_image_layout_popover(self._img_toolbar_btn))
+                        else self._choose_image_to_insert())
         )
         bar.append(self._img_toolbar_btn)
 
@@ -2435,24 +1068,39 @@ class Editor(Gtk.Box):
         self._replace_selection(f'\n{header}\n{sep}\n{body}')
         self._view.grab_focus()
 
-    def _open_image_layout_popover(self, anchor: Gtk.Widget) -> None:
+    def _choose_image_to_insert(self) -> None:
         """
-        Open the image-layout popover in insert mode, anchored to the toolbar
-        button.
+        Ask for an image file and insert it at the cursor.
 
-        Uses a dedicated _insert_image_popover instance that is created once
-        and permanently parented to the toolbar button.  This is intentionally
-        separate from _image_layout_popover (the contextual edit popover
-        parented to the invisible overlay anchor) — mixing the two caused the
-        insert popover to be parented to the invisible anchor, which made GTK
-        dismiss it instantly when autohide fired on the originating click event.
+        There is nothing to configure on the way in any more — the slide
+        arranges the picture from its own content — so the button opens the
+        file chooser directly instead of a popover of layout controls.
         """
-        if self._insert_image_popover is None:
-            # Create once, permanently parented to the toolbar button.
-            self._insert_image_popover = ImageLayoutPopover(
-                anchor, self._on_layout_insert
-            )
-        self._insert_image_popover.open_insert_mode()
+        dialog = Gtk.FileDialog.new()
+        dialog.set_title("Choose image")
+        img_filter = Gtk.FileFilter()
+        img_filter.set_name("Images")
+        for ext in sorted(self._IMAGE_EXTS):
+            img_filter.add_pattern(f"*{ext}")
+        store = Gio.ListStore.new(Gtk.FileFilter)
+        store.append(img_filter)
+        dialog.set_filters(store)
+
+        # Keep a strong reference: Gtk.FileDialog.open() is async and the
+        # dialog would otherwise be collected before the callback fires.
+        self._active_file_dialog = dialog
+
+        def _on_done(dlg, result):
+            self._active_file_dialog = None
+            try:
+                gfile = dlg.open_finish(result)
+            except GLib.Error:
+                return
+            path = gfile.get_path() or gfile.get_uri()
+            if path:
+                self._on_layout_insert("", path)
+
+        dialog.open(self.get_root(), None, _on_done)
 
     def _on_layout_insert(self, alt: str, rel_path: str) -> None:
         src_path = Path(rel_path)
@@ -2579,49 +1227,6 @@ class Editor(Gtk.Box):
             if self._is_slide_sep(line):
                 return line + 1
         return 0
-
-    def _on_view_click_for_image(self, gesture, n_press, x, y) -> None:
-        """
-        GestureClick released handler on the GtkSourceView.
-
-        On a single click, check whether the cursor landed on a line that
-        contains an image tag.  If so, open the image-layout edit popover.
-        If the popover is already open for that line, do nothing (the user
-        may be clicking inside the editor to adjust the cursor while editing
-        the popover).  If the cursor is on a different line, dismiss.
-
-        We use the "released" signal (not "pressed") so GTK has already
-        moved the cursor to the clicked position before we read it.
-        """
-        if n_press != 1:
-            return   # ignore double-click (handled by slide-zoom)
-
-        cursor  = self._buffer.get_iter_at_mark(self._buffer.get_insert())
-        line_no = cursor.get_line()
-
-        popover_open = (
-            self._image_layout_popover is not None
-            and self._image_layout_popover.get_visible()
-        )
-
-        if popover_open:
-            if line_no == self._last_img_line:
-                return  # user clicked within the same image line — keep popover open
-            # Cursor moved to a different line — dismiss before re-opening.
-            self._dismiss_img_popover()
-
-        # Try to open the popover for whichever line the cursor is on.
-        self._open_img_edit_popover_for_line(line_no)
-
-    def set_image_context_callback(self, cb) -> None:
-        """
-        Route the image under the cursor to *cb(layout, description, edit_cb)*.
-
-        *cb* returns True when it has taken the image, which suppresses the
-        popover.  It is called with layout=None when the cursor leaves every
-        image, so the host can go back to its default context.
-        """
-        self._image_context_cb = cb
 
     def set_insert_image_callback(self, cb) -> None:
         self._insert_image_cb = cb
@@ -3273,21 +1878,13 @@ class Editor(Gtk.Box):
         r'(\))',          # group 5: closing punctuation
     )
 
-    # Layout tokens recognised by the slide renderer — used to split the alt
-    # text into "human description" and "Presence layout tokens".
-    # Variable-length tokens (opacityN, fade-dir) are checked via regex below.
-    _LAYOUT_TOKENS = (
-        _IMAGE_POSITIONS | _IMAGE_FIT | _IMAGE_FOCAL
-        | {"gradient", "nogradient", "flip-h", "flip-v"}
-    )
-
     def _apply_image_tag(self) -> None:
         """
         Create TextTags for Presence image-layout syntax and wire them up.
 
         Three visual layers are applied to every ![alt](src) tag:
           • presence-img-punct  — muted colour for ![ ]( ) delimiters
-          • presence-img-token  — accent colour for layout tokens (right|50|…)
+          • presence-img-desc   — dim colour for the description
           • presence-img-src    — dim italic for the file path / URL
 
         These are GtkTextBuffer tags, not GtkSource language rules, so they
@@ -3310,17 +1907,8 @@ class Editor(Gtk.Box):
                 foreground="#888888",
             )
 
-        # Layout tokens (right, left, top, bottom, 50, gradient, …):
-        # accent colour + bold so they read like "settings at a glance"
-        if tag_table.lookup("presence-img-token") is None:
-            self._buffer.create_tag(
-                "presence-img-token",
-                foreground="#e17000",   # same orange as separators
-                weight=700,             # Pango.Weight.BOLD
-            )
-
-        # Description part of alt text (the human-readable words):
-        # slightly muted so the tokens stand out next to it
+        # The alt text (the human-readable description):
+        # slightly muted so the punctuation and path frame it
         if tag_table.lookup("presence-img-desc") is None:
             self._buffer.create_tag(
                 "presence-img-desc",
@@ -3354,18 +1942,17 @@ class Editor(Gtk.Box):
         """
         tag_table = self._buffer.get_tag_table()
         punct_tag = tag_table.lookup("presence-img-punct")
-        token_tag = tag_table.lookup("presence-img-token")
         desc_tag  = tag_table.lookup("presence-img-desc")
         src_tag   = tag_table.lookup("presence-img-src")
-        if not all((punct_tag, token_tag, desc_tag, src_tag)):
+        if not all((punct_tag, desc_tag, src_tag)):
             return
 
         buf_start = self._buffer.get_start_iter()
         buf_end   = self._buffer.get_end_iter()
 
-        # Clear all four tags from the entire buffer before reapplying.
+        # Clear all three tags from the entire buffer before reapplying.
         # This is simpler and safer than trying to diff old vs new ranges.
-        for tag in (punct_tag, token_tag, desc_tag, src_tag):
+        for tag in (punct_tag, desc_tag, src_tag):
             self._buffer.remove_tag(tag, buf_start, buf_end)
 
         full_text = self._buffer.get_text(buf_start, buf_end, False)
@@ -3394,30 +1981,10 @@ class Editor(Gtk.Box):
             # Colour the src path
             self._buffer.apply_tag(src_tag, _iter(src_start), _iter(src_end))
 
-            # Split alt text on | and colour each part individually:
-            # layout tokens get accent colour, description words get dim colour.
-            alt_text = full_text[alt_start:alt_end]
-            pos = alt_start
-            for part in alt_text.split("|"):
-                part_end = pos + len(part)
-                part_lower = part.strip().lower()
-                if (part_lower in self._LAYOUT_TOKENS
-                        or _OPACITY_TOKEN_RE.match(part_lower)
-                        or _FADE_TOKEN_RE.match(part_lower)
-                        or _SIZE_TOKEN_RE.match(part_lower)
-                        or _GRAYSCALE_TOKEN_RE.match(part_lower)
-                        or _BLUR_TOKEN_RE.match(part_lower)
-                        or _TINT_TOKEN_RE.match(part_lower)
-                        or _ZOOM_TOKEN_RE.match(part_lower)):
-                    self._buffer.apply_tag(
-                        token_tag, _iter(pos), _iter(part_end)
-                    )
-                elif part.strip():
-                    self._buffer.apply_tag(
-                        desc_tag, _iter(pos), _iter(part_end)
-                    )
-                # Advance past the part and the | separator
-                pos = part_end + 1   # +1 for the "|" character
+            # The alt text is a plain description now, so it colours as one
+            # span — there are no layout tokens left to tell apart from it.
+            if full_text[alt_start:alt_end].strip():
+                self._buffer.apply_tag(desc_tag, _iter(alt_start), _iter(alt_end))
 
     # ── Debounce ──────────────────────────────────────────────────────────────
 
