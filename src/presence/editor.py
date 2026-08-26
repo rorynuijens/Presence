@@ -207,6 +207,9 @@ class Editor(Gtk.Box):
         # up with typing.  Kept separate from "changed" so the heavier
         # sidebar/word-count work stays on the longer debounce.
         "live-changed": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        # Something the writer needs told about, raised from a place with no
+        # window reference of its own. The window turns it into a toast.
+        "notify-user": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
     }
 
     DEBOUNCE_MS = 400
@@ -1075,6 +1078,10 @@ class Editor(Gtk.Box):
         There is nothing to configure on the way in any more — the slide
         arranges the picture from its own content — so the button opens the
         file chooser directly instead of a popover of layout controls.
+
+        The file's own name becomes the description. It is a guess, but a
+        better starting point than an empty alt, and it is one word away
+        from being right.
         """
         dialog = Gtk.FileDialog.new()
         dialog.set_title("Choose image")
@@ -1097,8 +1104,10 @@ class Editor(Gtk.Box):
             except GLib.Error:
                 return
             path = gfile.get_path() or gfile.get_uri()
-            if path:
-                self._on_layout_insert("", path)
+            if not path:
+                return
+            desc = Path(path).stem.replace("-", " ").replace("_", " ").strip()
+            self._on_layout_insert(desc, path)
 
         dialog.open(self.get_root(), None, _on_done)
 
@@ -1136,7 +1145,8 @@ class Editor(Gtk.Box):
         files = file_list.get_files()
         if not files:
             return False
-        inserted = []
+        inserted  = []
+        unreadable = []
         for gfile in files:
             path_str = gfile.get_path()
             if not path_str:
@@ -1153,12 +1163,25 @@ class Editor(Gtk.Box):
                     if not dst.exists():
                         shutil.copy2(src, dst)
                     rel = f"assets/{src.name}"
-                except OSError:
-                    rel = str(src)
+                except OSError as exc:
+                    # Under Flatpak this is normally the sandbox: the drop
+                    # carries a real path the app is not permitted to read.
+                    # Inserting it anyway produces a tag that silently
+                    # renders nothing, which is worse than saying so.
+                    log.warning("Could not copy dropped image %s: %s", src, exc)
+                    unreadable.append(src.name)
+                    continue
             else:
                 rel = str(src)
             alt = src.stem.replace("-", " ").replace("_", " ")
             inserted.append(f"![{alt}]({rel})")
+
+        if unreadable:
+            names = ", ".join(unreadable[:3])
+            more  = f" and {len(unreadable) - 3} more" if len(unreadable) > 3 else ""
+            self.emit("notify-user",
+                      f"Could not read {names}{more}. Presence may not have "
+                      f"permission to open files in that folder.")
         if not inserted:
             return False
 

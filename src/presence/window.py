@@ -229,6 +229,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._editor.set_insert_image_callback(self._on_insert_image)
         self._editor.connect("changed",               self._on_editor_changed)
         self._editor.connect("live-changed",          self._on_editor_live_changed)
+        self._editor.connect("notify-user",           self._on_editor_notify_user)
         self._theme_panel.connect("rebuild-needed",   self._on_theme_panel_rebuild)
         self._theme_panel.connect("theme-changed",    self._on_panel_theme_changed)
         self._theme_panel.connect("ratio-changed",    self._on_panel_ratio_changed)
@@ -1700,62 +1701,20 @@ class MainWindow(Adw.ApplicationWindow):
     def _on_insert_comment(self, *_) -> None:
         self._editor.insert_comment()
 
+    def _on_editor_notify_user(self, _editor, message: str) -> None:
+        """Surface something the editor could only detect, not report."""
+        self._show_toast(message, timeout=6)
+
     def _on_insert_image(self, *_) -> None:
         """
-        Open the image layout popover anchored to the editor toolbar button.
-        The popover handles layout selection and file picking, then inserts
-        the finished Markdown tag with position/size/gradient tokens.
-        Falls back to a bare file dialog if the toolbar button is unavailable.
+        Ask the editor for an image and insert it at the cursor.
+
+        This used to anchor a popover of layout controls to the toolbar
+        button, with a bare file dialog as the fallback when that button was
+        unavailable. There are no layout controls now, so both paths were the
+        same file dialog and only one is left.
         """
-        btn = self._editor.get_img_toolbar_btn()
-        if btn is not None:
-            self._editor.open_image_layout_popover(btn)
-        else:
-            self._on_insert_image_fallback()
-
-    def _on_insert_image_fallback(self) -> None:
-        """Plain file dialog used when the toolbar button reference is unavailable."""
-        dialog = Gtk.FileDialog()
-        dialog.set_title("Choose Image")
-        dialog.set_filters(make_filter_store(
-            make_file_filter("Images",
-                             "*.png", "*.jpg", "*.jpeg",
-                             "*.gif", "*.svg", "*.webp")
-        ))
-        # Keep a strong reference so the GC cannot collect the dialog before
-        # the user has chosen a file.  Cleared in _on_image_picked_fallback.
-        self._active_file_dialog = dialog
-        dialog.open(self, None, self._on_image_picked_fallback)
-
-    def _on_image_picked_fallback(self, dialog, result) -> None:
-        """Completion handler for the fallback file dialog."""
-        self._active_file_dialog = None
-        try:
-            gfile = dialog.open_finish(result)
-        except GLib.Error:
-            return
-        path_str = gfile.get_path()
-        if not path_str:
-            return
-        src_path = Path(path_str)
-        if not src_path.is_file():
-            return
-
-        if self._file_path:
-            assets_dir = self._file_path.parent / "assets"
-            try:
-                assets_dir.mkdir(exist_ok=True)
-                dst = assets_dir / src_path.name
-                if not dst.exists():
-                    shutil.copy2(src_path, dst)
-                rel_path = f"assets/{src_path.name}"
-            except OSError:
-                rel_path = str(src_path)
-        else:
-            rel_path = str(src_path)
-
-        alt = src_path.stem.replace("-", " ").replace("_", " ")
-        self._editor.insert_image_markdown(alt, rel_path)
+        self._editor.choose_image_to_insert()
 
     def _on_shortcuts(self, *_) -> None:
         build_shortcuts_window(self).present()
