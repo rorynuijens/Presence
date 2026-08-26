@@ -36,11 +36,16 @@ def _images(count: int, tokens: str = "") -> str:
     return "\n\n".join(f"![img{i}{suffix}]({i}.png)" for i in range(count))
 
 
+# Long enough that the slide gives the words a column instead of laying them
+# over the picture. Used wherever a test is about something else.
+PROSE = "## Heading\n\n" + "word " * 30
+
+
 # ── No image is ever dropped ─────────────────────────────────────────────────
 
 @pytest.mark.parametrize("count", [1, 2, 3, 4, 5, 6, 7, 9, 12])
 def test_every_image_reaches_the_slide(count):
-    html = _render("## Title\n\n" + _images(count))
+    html = _render(PROSE + "\n\n" + _images(count))
     assert len(_srcs(html)) == count
 
 
@@ -59,31 +64,34 @@ def test_a_third_image_is_not_silently_discarded():
 # ── Old tokens do not reach the page ─────────────────────────────────────────
 
 def test_a_position_token_no_longer_places_the_image():
-    html = _render("## T\n\ntext\n\n![a|left|30](a.png)")
+    html = _render(PROSE + "\n\n![a|left|30](a.png)")
     assert 'data-img-pos="right"' in html
     assert 'data-img-pos="left"' not in html
 
 
 def test_a_size_token_no_longer_sets_the_width():
-    """30 was the written size; 60 is what this much text earns."""
-    html = _render("## T\n\ntext\n\n![a|left|30](a.png)")
-    assert "60%" in html
+    """30 was the written size; 50 is what this much prose earns."""
+    html = _render(PROSE + "\n\n![a|left|30](a.png)")
+    assert "50%" in html
     assert "30%" not in html
 
 
-def test_background_no_longer_makes_a_backdrop_behind_text():
-    html = _render("## T\n\nsome words\n\n![a|background](a.png)")
-    assert 'data-img-pos="right"' in html
+def test_background_is_now_decided_by_how_much_text_there_is():
+    """The token no longer picks it; the length of the text does."""
+    assert 'data-img-pos="right"' in _render(PROSE + "\n\n![a|background](a.png)")
+    assert 'data-img-pos="background"' in _render("## Short\n\n![a](a.png)")
 
 
-def test_a_flanking_pair_becomes_a_gallery():
+def test_a_flanking_pair_is_no_longer_chosen_by_its_tokens():
+    """These are unmeasurable .png stubs, so the shapes cannot ask for a
+    pair and the gallery shows both."""
     html = _render("## T\n\n![a|left|30](a.png)\n\n![b|right|30](b.png)")
     assert _kind(html) == "gallery"
     assert _srcs(html) == ["a.png", "b.png"]
 
 
 def test_treatment_tokens_leave_no_trace_in_the_markup():
-    html = _render("## T\n\ntext\n\n![a|tint-#204080|zoom150|flip-h](a.png)")
+    html = _render(PROSE + "\n\n![a|tint-#204080|zoom150|flip-h](a.png)")
     assert "slide-image-tint" not in html
     assert "scale(1.5" not in html
     assert "scaleX(-1)" not in html
@@ -91,9 +99,9 @@ def test_treatment_tokens_leave_no_trace_in_the_markup():
 
 def test_a_tokened_slide_renders_the_same_as_an_untokened_one():
     """The strongest form of "ignored": identical markup either way."""
-    tokened = _render("## T\n\nsome words\n\n"
+    tokened = _render(PROSE + "\n\n"
                       "![a|left|30|nogradient|opacity20|blur4](a.png)")
-    bare    = _render("## T\n\nsome words\n\n![a](a.png)")
+    bare    = _render(PROSE + "\n\n![a](a.png)")
     assert tokened == bare
 
 
@@ -104,8 +112,32 @@ def test_an_unpositioned_image_alone_fills_the_slide():
     assert 'data-img-pos="background"' in html
 
 
-def test_an_image_with_text_shares_the_slide():
-    html = _render("## T\n\nsome words\n\n![a](a.png)")
+def test_an_image_with_prose_shares_the_slide():
+    html = _render(PROSE + "\n\n![a](a.png)")
+    assert 'data-img-pos="right"' in html
+
+
+def test_a_caption_sits_on_the_picture():
+    """The arrangement that used to need |background|."""
+    html = _render("## A statement\n\n![a](a.png)")
+    assert 'data-img-pos="background"' in html
+    assert "A statement" in html
+
+
+def test_a_caption_gets_a_scrim_so_it_can_be_read():
+    """Nothing guarantees a photograph contrasts with the theme's text."""
+    html = _render("## A statement\n\n![a](a.png)")
+    assert "slide-image-gradient" in html
+    assert 'data-img-fade="left"' in html
+
+
+def test_a_wordless_bleed_gets_no_scrim():
+    """There are no words to protect, and the picture is the whole slide."""
+    assert "slide-image-gradient" not in _render("![a](a.png)")
+
+
+def test_a_list_never_sits_on_the_picture():
+    html = _render("## T\n\n- one\n- two\n\n![a](a.png)")
     assert 'data-img-pos="right"' in html
 
 

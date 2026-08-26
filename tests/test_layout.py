@@ -9,8 +9,14 @@ image's alt text, which no longer mean anything.
 
 import pytest
 
-from presence.slides.layout import (AUTO_IMAGE_LAYOUT, LayoutPlan, auto_size,
-                                    cell_fit, choose_layout, gallery_columns)
+from presence.slides.layout import (AUTO_IMAGE_LAYOUT, PAIR_SIZE, LayoutPlan,
+                                    auto_size, cell_fit, choose_layout,
+                                    gallery_columns, is_caption)
+
+# Text long enough that it wants a column of its own rather than a picture
+# to sit on. Used wherever a test is about something other than length.
+PROSE = "## Heading\n\n" + "word " * 30
+PORTRAITS = [0.6, 0.7]
 
 
 def _img(position="right"):
@@ -25,26 +31,106 @@ def _img(position="right"):
 # ── The decision ──────────────────────────────────────────────────────────────
 
 def test_no_images_is_a_text_slide():
-    assert choose_layout(True, []).kind == "text"
+    assert choose_layout(PROSE, []).kind == "text"
 
 
-def test_one_image_with_text_shares_the_slide():
-    assert choose_layout(True, [_img()]).kind == "single"
+def test_one_image_with_prose_shares_the_slide():
+    assert choose_layout(PROSE, [_img()]).kind == "single"
 
 
 def test_one_image_alone_fills_the_slide():
-    assert choose_layout(False, [_img()]).kind == "bleed"
+    assert choose_layout("", [_img()]).kind == "bleed"
 
 
 def test_two_images_go_to_the_gallery():
-    plan = choose_layout(True, [_img(), _img()])
+    plan = choose_layout(PROSE, [_img(), _img()])
     assert plan.kind == "gallery"
     assert plan.columns == 2
 
 
 @pytest.mark.parametrize("count", [3, 4, 5, 6, 9, 12])
 def test_more_than_two_images_always_reaches_the_gallery(count):
-    assert choose_layout(True, [_img() for _ in range(count)]).kind == "gallery"
+    imgs = [_img() for _ in range(count)]
+    assert choose_layout(PROSE, imgs, [0.6] * count).kind == "gallery"
+
+
+# ── A caption sits on the picture ────────────────────────────────────────────
+
+def test_a_heading_alone_is_a_caption():
+    assert is_caption("## Just a heading")
+
+
+def test_a_paragraph_is_not_a_caption():
+    assert not is_caption("## H\n\n" + "word " * 40)
+
+
+@pytest.mark.parametrize("md", [
+    "## H\n\n- a\n- b",
+    "## H\n\n1. first\n2. second",
+    "## H\n\n> quoted",
+    "## H\n\n| a | b |",
+    "## H\n\n```\ncode\n```",
+])
+def test_structure_is_never_a_caption(md):
+    """Few words, but a list or table over a photo is unreadable."""
+    assert not is_caption(md)
+
+
+def test_empty_text_is_not_a_caption():
+    """Nothing to caption with — that slide is a bleed for another reason."""
+    assert not is_caption("   ")
+
+
+def test_a_captioned_image_fills_the_slide():
+    """The automatic form of the old |background| token."""
+    assert choose_layout("## A statement", [_img()]).kind == "caption"
+
+
+def test_a_caption_is_a_different_kind_from_a_wordless_bleed():
+    """They render differently: only the caption gets a scrim under it."""
+    assert choose_layout("", [_img()]).kind == "bleed"
+    assert choose_layout("## Words", [_img()]).kind == "caption"
+
+
+def test_prose_takes_a_column_back_from_the_picture():
+    assert choose_layout(PROSE, [_img()]).kind == "single"
+
+
+# ── Two portraits flank the text ─────────────────────────────────────────────
+
+def test_two_portraits_with_text_flank_it():
+    """The automatic form of the old |left| + |right| pair."""
+    plan = choose_layout(PROSE, [_img(), _img()], PORTRAITS)
+    assert plan.kind == "pair"
+
+
+def test_two_landscapes_stay_a_gallery():
+    """Stacked wide images would leave the text nowhere to go."""
+    assert choose_layout(PROSE, [_img(), _img()], [1.8, 1.6]).kind == "gallery"
+
+
+def test_a_mixed_pair_stays_a_gallery():
+    assert choose_layout(PROSE, [_img(), _img()], [0.6, 1.8]).kind == "gallery"
+
+
+def test_two_portraits_without_text_stay_a_gallery():
+    """A pair is text with pictures either side; with no text it is a grid."""
+    assert choose_layout("", [_img(), _img()], PORTRAITS).kind == "gallery"
+
+
+def test_unmeasurable_shapes_fall_back_to_the_gallery():
+    """Which shows both images, so it is the safe direction."""
+    assert choose_layout(PROSE, [_img(), _img()], [None, None]).kind == "gallery"
+    assert choose_layout(PROSE, [_img(), _img()]).kind == "gallery"
+
+
+def test_three_portraits_are_not_a_pair():
+    imgs = [_img() for _ in range(3)]
+    assert choose_layout(PROSE, imgs, [0.6, 0.6, 0.6]).kind == "gallery"
+
+
+def test_a_pair_leaves_room_for_the_text_between_it():
+    assert 0 < int(PAIR_SIZE) * 2 < 100
 
 
 # ── Tokens no longer decide anything ─────────────────────────────────────────
@@ -53,17 +139,15 @@ def test_more_than_two_images_always_reaches_the_gallery(count):
                          ["left", "right", "top", "bottom", "background"])
 def test_a_position_on_the_image_does_not_change_the_plan(position):
     """An old document's tokens survive parsing but must not reach the plan."""
-    assert choose_layout(False, [_img(position)]).kind == "bleed"
-    assert choose_layout(True, [_img(position)]).kind == "single"
+    assert choose_layout("", [_img(position)]).kind == "bleed"
+    assert choose_layout(PROSE, [_img(position)]).kind == "single"
 
 
-def test_a_flanking_pair_is_no_longer_special():
-    """left+right used to mean "put these either side of the text"."""
-    assert choose_layout(True, [_img("left"), _img("right")]).kind == "gallery"
-
-
-def test_top_and_bottom_is_no_longer_special_either():
-    assert choose_layout(True, [_img("top"), _img("bottom")]).kind == "gallery"
+def test_a_written_pair_no_longer_decides_anything():
+    """left+right used to mean "put these either side of the text"; now the
+    shapes decide, and these two are wide."""
+    plan = choose_layout(PROSE, [_img("left"), _img("right")], [1.8, 1.6])
+    assert plan.kind == "gallery"
 
 
 def test_the_plan_ignores_the_layout_dict_entirely():
@@ -72,7 +156,7 @@ def test_the_plan_ignores_the_layout_dict_entirely():
                                            "size": "20", "blur": 9,
                                            "grayscale": 80, "zoom": 300}}]
     bare    = [{"src": "x.png", "layout": {}}]
-    assert choose_layout(True, tokened, 30) == choose_layout(True, bare, 30)
+    assert choose_layout(PROSE, tokened) == choose_layout(PROSE, bare)
 
 
 # ── One owner for what an auto-placed image looks like ───────────────────────
@@ -136,8 +220,8 @@ def test_the_middle_case_is_the_old_fixed_half():
 
 def test_the_width_always_comes_from_the_word_count():
     """There is no longer a written size that could suppress this."""
-    assert choose_layout(True, [_img()], word_count=6).size == "60"
-    assert choose_layout(True, [_img()], word_count=90).size == "40"
+    assert choose_layout("word " * 20, [_img()]).size == "50"
+    assert choose_layout("word " * 90, [_img()]).size == "40"
 
 
 # ── Cropping versus letterboxing ─────────────────────────────────────────────

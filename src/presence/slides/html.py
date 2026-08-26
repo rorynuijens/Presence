@@ -92,7 +92,8 @@ def _apply_img_effects(
 from .splitter import (is_title_slide, extract_speaker_notes,
                           extract_images, infer_slide_title, split_two_columns)
 from .renderer    import render_slide_content
-from .layout      import AUTO_IMAGE_LAYOUT, choose_layout, cell_fit
+from .layout      import (AUTO_IMAGE_LAYOUT, PAIR_SIZE, choose_layout,
+                          cell_fit)
 from .utils       import image_aspect
 from .frontmatter import extract_slide_directives
 from .utils       import logo_img_tag, progress_bar_html
@@ -167,10 +168,11 @@ def md_to_html_slides(
         elif images:
             # Ask what the slide should be rather than branching on how many
             # images it happens to have; see layout.py for the rules.
-            plan = choose_layout(
-                bool(cleaned_md.strip()), images,
-                word_count=len(cleaned_md.split()),
-            )
+            # Shapes are read from the file headers (cached on mtime), which
+            # is what lets the pair layout be chosen rather than written.
+            aspects = [image_aspect(img.get("src", ""), base_url)
+                       for img in images]
+            plan = choose_layout(cleaned_md, images, aspects)
             if plan.kind == "gallery":
                 html_frag = _render_gallery_slide(
                     cleaned_md, images, plan,
@@ -179,8 +181,15 @@ def md_to_html_slides(
                     base_url=base_url, line_offset=line_offset,
                 )
             elif plan.kind == "pair":
+                # The flanking positions are the plan's, not the document's;
+                # the gradients face inward toward the text between them.
+                layout_a = {**AUTO_IMAGE_LAYOUT, "position": "left",
+                            "size": PAIR_SIZE, "fade": "right"}
+                layout_b = {**AUTO_IMAGE_LAYOUT, "position": "right",
+                            "size": PAIR_SIZE, "fade": "left"}
                 html_frag = _render_two_image_slide(
-                    cleaned_md, images[0], images[1],
+                    cleaned_md, images[0]["src"], layout_a,
+                    images[1]["src"], layout_b,
                     page_num, total_numbered, logo_b64, theme_override,
                     height=height, theme_bg=bg, base_url=base_url,
                     line_offset=line_offset,
@@ -192,10 +201,17 @@ def md_to_html_slides(
                 layout = dict(AUTO_IMAGE_LAYOUT)
                 if plan.size is not None:
                     layout["size"] = plan.size
-                if plan.kind == "bleed":
+                if plan.kind in ("bleed", "caption"):
                     # An image alone on a slide fills it.
                     layout.update(position="background",
                                   size="100", gradient=False)
+                if plan.kind == "caption":
+                    # Words on a picture are only words if they can be read,
+                    # and nothing guarantees a photograph contrasts with the
+                    # theme's text colour. The gradient lays the theme's own
+                    # background under the caption and clears off the
+                    # picture to the right of it.
+                    layout.update(gradient=True, fade="left")
                 html_frag = _render_image_slide(
                     cleaned_md, images[0]["src"], layout,
                     page_num, total_numbered, logo_b64, theme_override,
@@ -540,8 +556,10 @@ def _render_gallery_slide(
 
 def _render_two_image_slide(
     slide_md:       str,
-    img_a:          dict,
-    img_b:          dict,
+    src_a:          str,
+    layout_a:       dict,
+    src_b:          str,
+    layout_b:       dict,
     page_num:       int,
     total:          int,
     logo_b64:       str | None,
@@ -553,36 +571,33 @@ def _render_two_image_slide(
     line_offset:    int | None = None,
 ) -> str:
     """
-    Render a slide with two images.
+    Render a slide with two images flanking the text between them.
 
-    Layout is determined by the positions of the two images:
-      left + right  → horizontal split: [img] [text] [img]
-      top  + bottom → vertical split:   [img] / [text] / [img]
-      other mix     → falls back to the first image only
+    *layout_a* and *layout_b* come from the caller, which built them from
+    AUTO_IMAGE_LAYOUT — nothing here reads a value off the document. Their
+    positions give the split:
+      left + right  → horizontal: [img] [text] [img]
+      top  + bottom → vertical:   [img] / [text] / [img]
 
-    The text content sits in the centre between the two images.
-    Each image panel uses its own size token (default 30% each,
-    leaving 40% for text).  Gradients face inward toward the text.
+    The text sits in the centre; the gradients face inward toward it.
     """
     content = render_slide_content(slide_md, line_offset)
     t_attr  = _theme_attr(theme_override)
 
-    layout_a = img_a.get("layout", {})
-    layout_b = img_b.get("layout", {})
-    pos_a     = layout_a.get("position", "left")
-    pos_b     = layout_b.get("position", "right")
-    size_a    = int(layout_a.get("size", "30"))
-    size_b    = int(layout_b.get("size", "30"))
-    grad_a    = layout_a.get("gradient", True)
-    grad_b    = layout_b.get("gradient", True)
-    opacity_a = layout_a.get("opacity", 75)
-    opacity_b = layout_b.get("opacity", 75)
-    grayscale_a = layout_a.get("grayscale", 0)
-    blur_a      = layout_a.get("blur", 0)
-    grayscale_b = layout_b.get("grayscale", 0)
-    blur_b      = layout_b.get("blur", 0)
-    raw_src_a   = img_a.get("src", "")
-    raw_src_b   = img_b.get("src", "")
+    pos_a     = layout_a["position"]
+    pos_b     = layout_b["position"]
+    size_a    = int(layout_a["size"])
+    size_b    = int(layout_b["size"])
+    grad_a    = layout_a["gradient"]
+    grad_b    = layout_b["gradient"]
+    opacity_a = layout_a["opacity"]
+    opacity_b = layout_b["opacity"]
+    grayscale_a = layout_a["grayscale"]
+    blur_a      = layout_a["blur"]
+    grayscale_b = layout_b["grayscale"]
+    blur_b      = layout_b["blur"]
+    raw_src_a   = src_a
+    raw_src_b   = src_b
     # Reject javascript: / vbscript: URIs unconditionally.
     if _urlparse(raw_src_a).scheme.lower() in _UNSAFE_IMG_SCHEMES:
         raw_src_a = ""
@@ -601,9 +616,10 @@ def _render_two_image_slide(
     vertical   = {pos_a, pos_b} == {"top",  "bottom"}
 
     if not horizontal and not vertical:
-        # Unsupported position combination — degrade to single image
+        # Unreachable while choose_layout only ever asks for left+right, but
+        # a wrong pair must still show a slide rather than raise.
         return _render_image_slide(
-            slide_md, img_a["src"], layout_a,
+            slide_md, raw_src_a, layout_a,
             page_num, total, logo_b64, theme_override,
             height=height, base_url=base_url,
         )

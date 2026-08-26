@@ -21,8 +21,31 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import re
+
 __all__ = ["LayoutPlan", "AUTO_IMAGE_LAYOUT", "choose_layout",
-           "gallery_columns", "auto_size", "cell_fit"]
+           "gallery_columns", "auto_size", "cell_fit", "is_caption",
+           "PAIR_SIZE"]
+
+
+# How wide each picture of a flanking pair is, leaving the rest for the text
+# between them.
+PAIR_SIZE = "30"
+
+# Text this short can sit on a picture without competing with it. Above it,
+# the words need a column of their own. The step matches auto_size()'s first
+# one, where a slide is already judged to be mostly picture.
+_CAPTION_WORDS = 12
+
+# Markdown that wants to be read rather than glanced at. A list or a table
+# over a photograph is a legibility problem however few words it holds.
+_STRUCTURED_MD = re.compile(
+    r"^\s*(?:[-*+]\s|\d+\.\s|>|\||```|    \S)", re.MULTILINE)
+
+# Below this, a picture is taller than it is wide by enough to want a column
+# rather than a row. Two of them either side of the text is the arrangement
+# that used to need |left| and |right|.
+_PORTRAIT_ASPECT = 0.9
 
 
 # What an automatically placed image looks like. These are the values the
@@ -65,6 +88,30 @@ class LayoutPlan:
     columns: int = 0          # gallery only
     spans:   tuple = field(default_factory=tuple)   # gallery: cells spanning 2
     size:    str | None = None   # single: chosen width, when none was written
+
+
+def is_caption(cleaned_md: str) -> bool:
+    """
+    Whether a slide's text is brief and plain enough to sit on a picture.
+
+    This is the automatic form of the old ``|background|`` token: a heading
+    and a few words over a full-bleed image is a deliberate kind of slide,
+    and the only thing that made it one was the writer saying so. What makes
+    it work is that there is little enough text to read at a glance, and that
+    the text is prose rather than a structure that needs alignment to be
+    read.
+    """
+    text = cleaned_md.strip()
+    if not text:
+        return False
+    if _STRUCTURED_MD.search(text):
+        return False
+    return len(text.split()) <= _CAPTION_WORDS
+
+
+def _is_portrait(aspect: "float | None") -> bool:
+    """Whether an image is tall enough to want a column of its own."""
+    return aspect is not None and aspect < _PORTRAIT_ASPECT
 
 
 def auto_size(word_count: int) -> str:
@@ -122,25 +169,48 @@ def gallery_columns(count: int) -> tuple[int, tuple]:
     return 3, ()
 
 
-def choose_layout(has_text: bool, images: list,
-                  word_count: int = 0) -> LayoutPlan:
+def choose_layout(cleaned_md: str, images: list,
+                  aspects: "list | None" = None) -> LayoutPlan:
     """
     Pick a layout for a slide.
 
-    *images* is the list extract_images() returned. Nothing about the images
-    themselves is consulted yet — only how many there are and whether text
-    shares the slide with them.
+    *cleaned_md* is the slide's markdown with its images removed; *images* is
+    the list extract_images() returned; *aspects* holds each image's width /
+    height where it could be read, and None where it could not.
+
+    Both arrangements that used to need a token are chosen here instead:
+    a full-bleed picture under a caption, and two portraits flanking the
+    text. Where the shapes cannot be measured the answer falls back to the
+    gallery, which shows everything.
+
+    Kinds: "text", "bleed", "caption", "single", "pair", "gallery".
     """
     count = len(images)
     if count == 0:
         return LayoutPlan("text")
 
+    aspects = list(aspects or [])
+
+    def aspect(i: int) -> "float | None":
+        return aspects[i] if i < len(aspects) else None
+
     if count == 1:
-        # An image alone on a slide should fill it; there is no text for it
-        # to sit beside.
-        if not has_text:
+        if not cleaned_md.strip():
             return LayoutPlan("bleed")
-        return LayoutPlan("single", size=auto_size(word_count))
+        # A caption sits on the picture rather than beside it. It is a
+        # separate kind from a wordless bleed because it has to be readable:
+        # the renderer lays a scrim under the words, which a picture with no
+        # words on it must not get.
+        if is_caption(cleaned_md):
+            return LayoutPlan("caption")
+        return LayoutPlan("single", size=auto_size(len(cleaned_md.split())))
+
+    if count == 2 and cleaned_md.strip():
+        # Two tall pictures with text between them is a row of three
+        # columns. Two wide ones stacked would leave the text nowhere to go,
+        # so those keep the gallery.
+        if _is_portrait(aspect(0)) and _is_portrait(aspect(1)):
+            return LayoutPlan("pair")
 
     columns, spans = gallery_columns(count)
     return LayoutPlan("gallery", columns, spans)
