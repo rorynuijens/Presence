@@ -218,6 +218,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._sidebar     = Sidebar()
         self._editor      = Editor()
         self._canvas      = SlideCanvas()
+        self._fold_lines: list = []
         self._theme_panel = ThemePanel()
         self._inspector = Inspector(self._theme_panel)
 
@@ -276,6 +277,7 @@ class MainWindow(Adw.ApplicationWindow):
         # breakpoint releasing on a wider window — so it is never restored
         # showing a slide from before the document changed.
         self._canvas.connect("notify::visible", self._on_canvas_visibility)
+        self._canvas.connect("render-size-changed", self._on_canvas_render_size)
 
         editor_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         editor_row.append(self._canvas_paned)
@@ -1089,10 +1091,12 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _refresh_canvas(self, text: str | None = None) -> None:
         """
-        Render the current slide into the canvas.
+        Ask for the current slide to be rendered into the canvas.
 
-        Does nothing while the canvas is hidden or WebKit is missing, so a
-        writer who has closed the pane pays nothing for it.
+        Does nothing while the canvas is hidden or the rasterizer is missing,
+        so a writer who has closed the pane pays nothing for it.  The render
+        itself runs on a background thread and lands in _on_canvas_frame;
+        requests coalesce, so typing quickly never queues stale frames.
         """
         if not self._canvas.get_visible() or not self._canvas.available:
             return
@@ -1100,25 +1104,58 @@ class MainWindow(Adw.ApplicationWindow):
         if text is None:
             text = self._editor.get_text()
 
-        try:
-            preview = self._converter.build_preview(
-                text, self._canvas_base_dir(), self._current_slide
-            )
-        except ValueError as exc:
-            # Expected, recoverable states — an empty or slide-less document.
-            self._canvas.show_message("Nothing to show yet", str(exc))
-            return
-        except Exception as exc:
-            log.debug("Canvas render failed", exc_info=True)
-            self._canvas.show_message(
-                "Cannot render this slide", _friendly_error(str(exc))
-            )
+        self._converter.render_slide_async(
+            text, self._canvas_base_dir(), self._current_slide,
+            self._canvas.render_width, self._on_canvas_frame,
+        )
+
+    def _on_canvas_frame(self, frame, error) -> None:
+        """Receive a rendered slide on the main thread and show it."""
+        if error is not None:
+            if isinstance(error, ValueError):
+                # Expected, recoverable states — an empty or slide-less document.
+                self._canvas.show_message("Nothing to show yet", str(error))
+            else:
+                log.debug("Canvas render failed", exc_info=error)
+                self._canvas.show_message(
+                    "Cannot render this slide", _friendly_error(str(error))
+                )
             return
 
-        self._canvas.show_slide(
-            preview.html, self._canvas_base_dir(),
-            preview.width, preview.height,
-        )
+        self._canvas.show_slide(frame.png, frame.width, frame.height)
+        # The canvas laid this slide out with the same engine the build uses,
+        # so its fold is as authoritative as the build's — and it is fresher.
+        self._set_live_fold(frame.index, frame.fold_line)
+
+    def _on_canvas_render_size(self, _canvas) -> None:
+        """The pane resized enough that the slide needs re-rasterizing."""
+        self._refresh_canvas()
+
+    # ── Fold lines ────────────────────────────────────────────────────────────
+    #
+    # Two sources agree on where a slide runs out of room, because both come
+    # from the same WeasyPrint layout: a build measures every slide at once,
+    # the canvas measures the slide being edited on every keystroke.  The
+    # canvas is always the fresher of the two for the slide it covers.
+
+    def _set_build_folds(self, folds: list) -> None:
+        """Replace every fold line from a completed build."""
+        self._fold_lines = list(folds)
+        self._editor.set_fold_lines(self._fold_lines)
+
+    def _set_live_fold(self, index: int, fold_line) -> None:
+        """Update one slide's fold line from a canvas render."""
+        if index < 0:
+            return
+        # A slide added since the last build has no slot yet.
+        if index >= len(self._fold_lines):
+            self._fold_lines.extend(
+                [None] * (index + 1 - len(self._fold_lines))
+            )
+        elif self._fold_lines[index] == fold_line:
+            return                      # nothing moved; skip the redraw
+        self._fold_lines[index] = fold_line
+        self._editor.set_fold_lines(self._fold_lines)
 
     def _on_canvas_toggled(self, btn: Gtk.ToggleButton) -> None:
         """Show or hide the live canvas (F8)."""
@@ -1438,7 +1475,7 @@ class MainWindow(Adw.ApplicationWindow):
             pending()
 
         # Draw the fold rules measured from the page that was just laid out.
-        self._editor.set_fold_lines(
+        self._set_build_folds(
             [info.get("fold_line") for info in converter.slide_info]
         )
 
@@ -1657,17 +1694,9 @@ class MainWindow(Adw.ApplicationWindow):
         if not self._html_uri or not self._slide_info:
             self._show_error("Convert the presentation first to open presenter mode.")
             return
-        # Check WebKit availability before opening — fail with a clear
-        # message rather than opening a broken presenter window.
-        from .presenter import _WEBKIT
-        if not _WEBKIT:
-            self._show_error(
-                "Presenter mode requires WebKitGTK, which is not installed. "
-                "Install gir1.2-webkit-6.0 (or webkit2gtk-4.1 on older systems)."
-            )
-            return
         win = PresenterWindow(
             html_uri=self._html_uri,
+            pdf_path=self._output_path,
             slide_info=self._slide_info,
             thumbnails=self._thumbnails,
             parent_window=self,

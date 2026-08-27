@@ -354,7 +354,7 @@ def _render_image_slide(
     # Falls back to the original path if PIL is unavailable or src is remote.
     effective_src = _apply_img_effects(img_src, base_url, grayscale, blur)
     # Only emit CSS filter for effects that weren't successfully pre-processed
-    # (i.e. PIL fallback path — still works in the WebKit live preview).
+    # (i.e. PIL fallback path — WeasyPrint applies the filter itself).
     css_grayscale = 0 if effective_src != img_src else grayscale
     css_blur      = 0 if effective_src != img_src else blur
     escaped_src   = _html.escape(_urlquote(effective_src, safe="+/=:;,"))

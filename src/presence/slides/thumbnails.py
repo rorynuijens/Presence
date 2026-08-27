@@ -30,7 +30,7 @@ def build_thumbnail_index(
     prevent injection when the theme originates from an untrusted package.
     _index.html is a standalone file opened in the user's default browser
     (with JavaScript enabled), making CSS injection more dangerous here
-    than in the WeasyPrint/WebKit-sandboxed slide HTML.
+    than in the slide HTML, which only ever reaches WeasyPrint.
     """
     deck_title = _html.escape(str(meta.get("title", output_path.stem)))
     # Accept both Theme dataclass and legacy dict

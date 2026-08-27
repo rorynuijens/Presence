@@ -206,3 +206,46 @@ def _render_page_hires(doc, page_index: int, cairo, width_px: int) -> bytes:
     buf = io.BytesIO()
     surface.write_to_png(buf)
     return buf.getvalue()
+
+
+def render_page_png(
+    pdf_bytes: bytes,
+    index:     int = 0,
+    width_px:  int = 960,
+) -> "bytes | None":
+    """
+    Render a single page of *pdf_bytes* to a PNG *width_px* pixels wide.
+
+    The live canvas needs one page at pane resolution rather than the whole
+    deck, so this is the one-page sibling of render_slides_hires(): same
+    Poppler+Cairo pipeline, one page, no list.
+
+    Returns None when Cairo or Poppler are missing, when the PDF will not
+    load, when *index* is out of range, or when the page fails to render.
+    """
+    try:
+        import cairo
+    except Exception as e:
+        log.warning("Cairo not available for page render: %s", e)
+        return None
+
+    try:
+        import gi
+        gi.require_version("Poppler", "0.18")
+    except Exception as e:
+        log.warning("Poppler not available for page render: %s", e)
+        return None
+
+    doc = _load_pdf_doc(pdf_bytes)
+    if doc is None:
+        return None
+
+    if not 0 <= index < doc.get_n_pages():
+        log.warning("Page %d out of range (%d pages)", index, doc.get_n_pages())
+        return None
+
+    try:
+        return _render_page_hires(doc, index, cairo, max(1, width_px))
+    except Exception as e:
+        log.warning("Page render failed for page %d: %s", index + 1, e)
+        return None

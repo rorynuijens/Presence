@@ -1,17 +1,23 @@
 """
 converter.py — Bridge between the GTK UI and the md_to_slides library.
 
-Two speeds
-----------
-The same document feeds two pipelines with very different costs:
+One engine, three speeds
+------------------------
+Everything the writer, the room and the reader see is laid out by WeasyPrint,
+so the canvas, the slideshow, the thumbnails and the PDF are the same picture.
+What differs is only how much of the document each pass covers:
 
-*  ``build_preview()`` — Markdown → HTML for a single slide.  Milliseconds,
-   runs synchronously on the main thread, drives the live canvas.
-*  ``convert()``       — Markdown → HTML → PDF → thumbnail bitmaps.  Seconds,
-   runs on a background thread, drives the sidebar, export and presenter.
+*  ``build_preview()``      — Markdown → HTML for a single slide.  Sub-millisecond,
+   synchronous.  No layout: this is the cheapest way to ask what a slide's
+   markup is, and whether the document has any slides at all.
+*  ``render_slide_async()`` — Markdown → HTML → PDF → PNG for a single slide.
+   Tens of milliseconds for text, a few hundred for a gallery; runs on a
+   background thread and drives the live canvas and the live fold marker.
+*  ``convert()``            — the whole deck → HTML → PDF → thumbnail bitmaps.
+   Seconds, background thread, drives the sidebar, export and presenter.
 
-Both share the theme/CSS resolution in ``_render_context()``, which is cached
-so the fast path never rebuilds a stylesheet it already has.
+All three share the theme/CSS resolution in ``_render_context()``, which is
+cached so no pass rebuilds a stylesheet it already has.
 """
 from __future__ import annotations
 
@@ -40,7 +46,7 @@ from .slides.themes import ASPECT_RATIOS
 from .slides.theme_loader import load_all_themes
 from .slides.utils import (encode_logo, safe_subpath,
                             compute_slide_start_lines)
-from .slides.thumbnails_render import render_thumbnails
+from .slides.thumbnails_render import render_thumbnails, render_page_png
 
 log = logging.getLogger(__name__)
 
@@ -62,6 +68,17 @@ class Preview:
     index:      int
     n_slides:   int
     slide_info: list
+    width:      int
+    height:     int
+
+
+@dataclasses.dataclass(frozen=True)
+class SlideFrame:
+    """One slide laid out by WeasyPrint and rasterized, ready for the canvas."""
+    png:        bytes
+    fold_line:  int | None
+    index:      int
+    n_slides:   int
     width:      int
     height:     int
 
@@ -207,6 +224,14 @@ class Converter(GObject.Object):
         self._ctx_lock:  threading.Lock       = threading.Lock()
         self._ctx_key:   tuple | None         = None
         self._ctx_value: RenderContext | None = None
+        # Canvas frames.  One worker at a time and at most one waiting
+        # request: a keystroke arriving mid-render replaces the pending
+        # request rather than queueing behind it, so the canvas can never
+        # fall a burst of stale frames behind the cursor.
+        self._frame_lock:    threading.Lock = threading.Lock()
+        self._frame_serial:  int            = 0
+        self._frame_pending: tuple | None   = None
+        self._frame_busy:    bool           = False
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -292,6 +317,113 @@ class Converter(GObject.Object):
             index=index,
             n_slides=len(slides),
             slide_info=slide_info,
+            width=ctx.width,
+            height=ctx.height,
+        )
+
+    # ── Medium path: one slide, laid out and rasterized ───────────────────────
+
+    def render_slide_async(
+        self,
+        text:      str,
+        base_dir:  Path,
+        index:     int,
+        width_px:  int,
+        callback,
+    ) -> None:
+        """
+        Lay out and rasterize a single slide, off the main thread.
+
+        This is the canvas's path, and it goes through the same WeasyPrint
+        layout the PDF does — so what the writer sees is what the deck will
+        be, down to where the slide runs out of room.
+
+        *callback* is invoked on the main thread as ``callback(frame, error)``
+        with exactly one of them set: a :class:`SlideFrame`, or the exception
+        that stopped it.  A request that is superseded before it finishes is
+        dropped silently and its callback never runs.
+        """
+        with self._frame_lock:
+            self._frame_serial += 1
+            self._frame_pending = (
+                self._frame_serial, text, base_dir, index, width_px, callback,
+            )
+            if self._frame_busy:
+                return          # the running worker will pick this up
+            self._frame_busy = True
+
+        threading.Thread(target=self._frame_worker, daemon=True).start()
+
+    def _frame_worker(self) -> None:
+        """Render pending canvas frames until none is waiting, then retire."""
+        while True:
+            with self._frame_lock:
+                request = self._frame_pending
+                self._frame_pending = None
+                if request is None:
+                    self._frame_busy = False
+                    return
+
+            serial, text, base_dir, index, width_px, callback = request
+            frame: SlideFrame | None = None
+            error: Exception | None  = None
+            try:
+                frame = self._render_frame(text, base_dir, index, width_px)
+            except Exception as exc:              # surfaced to the canvas
+                error = exc
+
+            with self._frame_lock:
+                superseded = serial != self._frame_serial
+
+            # A newer keystroke has already been asked for; this frame would
+            # only flash the wrong slide on its way to being replaced.
+            if not superseded:
+                GLib.idle_add(callback, frame, error)
+
+    def _render_frame(
+        self,
+        text:     str,
+        base_dir: Path,
+        index:    int,
+        width_px: int,
+    ) -> SlideFrame:
+        """Markdown → HTML → one-page PDF → PNG, plus the fold line."""
+        meta, body = parse_frontmatter(text)
+        slides = split_slides(body)
+        if not slides:
+            raise ValueError("No slides found — separate slides with ---")
+
+        index = max(0, min(index, len(slides) - 1))
+        ctx = self._render_context(meta, base_dir)
+
+        # line_offsets is what stamps data-src-line onto every block, and
+        # that is what turns the laid-out box tree back into a line the
+        # writer can edit.  Without it there is no fold to measure.
+        html, _info = md_to_html_slides(
+            slides, ctx.css, ctx.logo_b64, meta,
+            width=ctx.width, height=ctx.height, theme_bg=ctx.theme_bg,
+            base_url=str(base_dir),
+            only_index=index,
+            line_offsets=compute_slide_start_lines(text),
+        )
+
+        if _weasyprint is None:
+            raise ImportError("WeasyPrint is not installed — cannot render.")
+
+        document = _weasyprint.HTML(string=html, base_url=str(base_dir)).render()
+        fold = _measure_folds(document, 1)[0]
+
+        png = render_page_png(document.write_pdf(), 0, width_px)
+        if png is None:
+            raise RuntimeError(
+                "Could not rasterize the slide — Poppler or Cairo is missing."
+            )
+
+        return SlideFrame(
+            png=png,
+            fold_line=fold,
+            index=index,
+            n_slides=len(slides),
             width=ctx.width,
             height=ctx.height,
         )

@@ -3,6 +3,8 @@ presenter.py — Presenter mode window + companion slideshow window.
 """
 
 import logging
+import threading
+from pathlib import Path
 
 import gi
 gi.require_version("Gtk", "4.0")
@@ -18,73 +20,7 @@ from .slides.script import (
     deck_schedule, parse_script,
 )
 
-try:
-    gi.require_version("WebKit", "6.0")
-    from gi.repository import WebKit
-    _WEBKIT = True
-    _WEBKIT_VERSION = 6
-except (ValueError, ImportError):
-    try:
-        gi.require_version("WebKit2", "4.1")
-        from gi.repository import WebKit2 as WebKit
-        _WEBKIT = True
-        _WEBKIT_VERSION = 4
-    except (ValueError, ImportError):
-        _WEBKIT = False
-        _WEBKIT_VERSION = None
-
-
-def _make_show_slide_js(index: int) -> str:
-    return f"""
-    (function() {{
-        var slides = document.querySelectorAll('.slide');
-        var target = null;
-        slides.forEach(function(s, i) {{
-            if (i === {index}) {{
-                s.style.display = 'flex';
-                target = s;
-            }} else {{
-                s.style.display = 'none';
-            }}
-        }});
-        document.body.style.margin     = '0';
-        document.body.style.padding    = '0';
-        document.body.style.background = '#000';
-        document.documentElement.style.background = '#000';
-        document.documentElement.style.margin  = '0';
-        document.documentElement.style.padding = '0';
-        if (target) {{
-            var vw    = window.innerWidth;
-            var vh    = window.innerHeight;
-            var sw    = target.offsetWidth  || 1280;
-            var sh    = target.offsetHeight || 720;
-            var scale = Math.min(vw / sw, vh / sh);
-            target.style.transformOrigin = 'top left';
-            target.style.transform = 'scale(' + scale + ')';
-            target.style.position  = 'absolute';
-            target.style.top  = Math.max(0, (vh - sh * scale) / 2) + 'px';
-            target.style.left = Math.max(0, (vw - sw * scale) / 2) + 'px';
-        }}
-    }})();
-    """
-
-
-def _make_webkit_view(allow_local: bool = True) -> "WebKit.WebView | None":
-    if not _WEBKIT:
-        return None
-    settings = WebKit.Settings()
-    settings.set_allow_file_access_from_file_urls(allow_local)
-    # JavaScript IS required in presenter/slideshow views — slide navigation
-    # is driven by evaluate_javascript() calls from Python.
-    settings.set_enable_javascript(True)
-    if _WEBKIT_VERSION == 6:
-        ns = WebKit.NetworkSession.new_ephemeral()
-        view = WebKit.WebView(settings=settings, network_session=ns)
-    else:
-        ctx = WebKit.WebContext.new_ephemeral()
-        view = WebKit.WebView.new_with_context(ctx)
-        view.set_settings(settings)
-    return view
+from .slides.thumbnails_render import render_page_png, render_slides_hires
 
 
 # ── SlideshowWindow ───────────────────────────────────────────────────────────
@@ -112,7 +48,7 @@ class SlideshowWindow(Adw.Window):
     works reliably on most Wayland compositors (Mutter/GNOME Shell).
     """
 
-    def __init__(self, html_uri: str, n_slides: int,
+    def __init__(self, pdf_path, n_slides: int,
                  presenter_window: "PresenterWindow",
                  parent_window, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -122,31 +58,38 @@ class SlideshowWindow(Adw.Window):
         # output on some compositors, which prevents multi-monitor placement.
         # We set application instead so it still appears in the task switcher.
 
-        self._html_uri         = html_uri
+        self._pdf_path         = Path(pdf_path) if pdf_path else None
+        self._pdf_bytes: bytes | None = None
         self._n_slides         = n_slides
         self._presenter        = presenter_window
-        self._html_loaded      = False
         self._pending          = 0
         self._closing              = False   # True when close_by_presenter() called
         self._monitors_handler     = None    # GLib signal handler id
+        # One rendered page per slide, filled in by load(); None until the
+        # background pass reaches that slide.
+        self._pages: list = [None] * max(0, n_slides)
+        self._render_w: int = 1920
+        self._blanked: bool = False
 
-        if _WEBKIT:
-            self._view = _make_webkit_view()
-            self._view.set_hexpand(True)
-            self._view.set_vexpand(True)
-            self._load_id = self._view.connect(
-                "load-changed", self._on_load_changed
-            )
-            self.set_content(self._view)
-        else:
-            lbl = Gtk.Label(
-                label="WebKit not available — cannot show slideshow"
-            )
-            lbl.set_hexpand(True)
-            lbl.set_vexpand(True)
-            self.set_content(lbl)
-            self._view    = None
-            self._load_id = None
+        # The audience sees a picture of the very page the PDF holds, so the
+        # room and the handout cannot disagree.  Black surround, because a
+        # slide narrower than the screen should fall away into the dark.
+        self._picture = Gtk.Picture()
+        self._picture.set_can_shrink(True)
+        self._picture.set_content_fit(Gtk.ContentFit.CONTAIN)
+        self._picture.set_hexpand(True)
+        self._picture.set_vexpand(True)
+
+        self._surround = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self._surround.set_hexpand(True)
+        self._surround.set_vexpand(True)
+        self._surround.append(self._picture)
+        self._surround_css = Gtk.CssProvider()
+        self._apply_surround("#000000")
+        self._surround.get_style_context().add_provider(
+            self._surround_css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+        )
+        self.set_content(self._surround)
 
         # Connect to monitor list changes. Per GTK docs we need BOTH:
         #   GListModel::items-changed  — monitor added or removed from list
@@ -176,10 +119,12 @@ class SlideshowWindow(Adw.Window):
         Called when a monitor is connected or removed (GListModel::items-changed).
 
         We intentionally do NOT attempt to re-seat the slideshow window here.
-        Calling unfullscreen()/fullscreen() while a WebKit view is rendering
-        races with the GPU subprocess and causes SIGABRT — this is the root
-        cause of all hotplug crashes (LibreOffice Impress has the same bug,
-        see RHBZ #1386948/#1390607).
+        Re-fullscreening a window whose output has just changed underneath it
+        races with the compositor's surface teardown — this was the root cause
+        of the hotplug crashes (LibreOffice Impress has the same bug, see
+        RHBZ #1386948/#1390607).  The window now draws a plain texture rather
+        than hosting a browser, which removes the GPU subprocess from that
+        race, but re-seating on hotplug is still not worth the risk.
 
         What we do instead:
           - Connect GdkMonitor::invalidate on any newly added monitors.
@@ -301,11 +246,11 @@ class SlideshowWindow(Adw.Window):
         teardown, then re-fullscreens. GNOME Shell cycles the window to the
         next output on each unfullscreen/fullscreen cycle.
 
-        The 200 ms delay is intentional — it gives the WebKit GPU process
-        time to complete any in-progress frame before the surface is
-        reconfigured. 150 ms was insufficient on some hardware.
+        The 200 ms delay gives the compositor time to finish tearing the
+        surface down before it is reconfigured; re-fullscreening immediately
+        leaves the window on the original output on some hardware.
         """
-        if self._closing or self._view is None:
+        if self._closing:
             return
         log.debug("Moving slideshow to other monitor")
         try:
@@ -316,51 +261,113 @@ class SlideshowWindow(Adw.Window):
 
     # ── Load / slide control ──────────────────────────────────────────────────
 
-    def _on_load_changed(self, view, load_event) -> None:
-        finished = WebKit.LoadEvent.FINISHED if hasattr(WebKit, "LoadEvent") else 3
-        if load_event == finished:
-            self._html_loaded = True
-            if self._load_id is not None:
-                self._view.disconnect(self._load_id)
-                self._load_id = None
-            self._run_js(self._pending)
-
     def load(self) -> None:
-        if self._view is not None:
-            self._view.load_uri(self._html_uri)
+        """
+        Read the built PDF and get the first slide on screen.
+
+        Slide one is rasterized synchronously so the audience never sees an
+        empty window; the rest of the deck follows on a background thread, in
+        order, so that stepping forward normally finds the next page already
+        waiting.
+        """
+        if self._closing or self._pdf_path is None:
+            return
+        try:
+            self._pdf_bytes = self._pdf_path.read_bytes()
+        except OSError as e:
+            log.error("Could not read the built PDF for the slideshow: %s", e)
+            return
+
+        self._render_w = self._slideshow_width()
+
+        first = render_page_png(self._pdf_bytes, self._pending, self._render_w)
+        if first is not None and self._pending < len(self._pages):
+            self._pages[self._pending] = first
+        self._show_page(self._pending)
+
+        threading.Thread(target=self._prerender_deck, daemon=True).start()
+
+    def _slideshow_width(self) -> int:
+        """Pixel width to rasterize pages at: the monitor's, within reason."""
+        try:
+            monitor = self.get_display().get_monitor_at_surface(self.get_surface())
+            width = monitor.get_geometry().width * monitor.get_scale_factor()
+        except Exception:
+            width = 1920
+        return int(min(3840, max(1280, width)))
+
+    def _prerender_deck(self) -> None:
+        """Rasterize every page once, off the main thread."""
+        pdf_bytes = self._pdf_bytes
+        if pdf_bytes is None:
+            return
+        try:
+            pages = render_slides_hires(pdf_bytes, self._render_w)
+        except Exception as e:
+            log.warning("Slideshow pre-render failed: %s", e)
+            return
+        GLib.idle_add(self._store_pages, pages)
+
+    def _store_pages(self, pages: list) -> bool:
+        """Adopt the pre-rendered deck and refresh what is on screen."""
+        if self._closing:
+            return GLib.SOURCE_REMOVE
+        for i, png in enumerate(pages):
+            if i < len(self._pages) and png is not None:
+                self._pages[i] = png
+        if not self._blanked:
+            self._show_page(self._pending)
+        return GLib.SOURCE_REMOVE
 
     def show_slide(self, index: int) -> None:
+        """Show *index*, rendering it on the spot if the prefetch has not."""
         index = max(0, min(index, self._n_slides - 1))
         self._pending = index
-        if self._html_loaded and self._view is not None:
-            self._run_js(index)
+        self._blanked = False
+        self._apply_surround("#000000")
+        self._show_page(index)
 
-    def _run_js(self, index: int) -> None:
-        """Run slide-navigation JS.  Delegates to _run_js_safe."""
-        self._run_js_safe(_make_show_slide_js(index))
-
-    def _run_blank_js(self, js: str) -> None:
-        """Run arbitrary JS.  Delegates to _run_js_safe."""
-        self._run_js_safe(js)
-
-    def _run_js_safe(self, js: str) -> None:
-        """
-        Execute *js* on the WebView with full safety guards:
-          - _closing flag checked first (set synchronously by close_by_presenter)
-          - get_realized() guards against a destroyed Wayland surface
-        Only catches Exception, not BaseException, so SIGABRT propagates.
-        """
-        if self._closing or self._view is None:
+    def _show_page(self, index: int) -> None:
+        if self._closing or not 0 <= index < len(self._pages):
             return
-        try:
-            if not self._view.get_realized():
-                return
-        except Exception:
+        png = self._pages[index]
+        if png is None and self._pdf_bytes is not None:
+            # The presenter jumped ahead of the prefetch — pay for it now
+            # rather than showing the room a stale slide.
+            png = render_page_png(self._pdf_bytes, index, self._render_w)
+            self._pages[index] = png
+        if png is None:
             return
+        texture = png_bytes_to_texture(png)
+        if texture is not None:
+            self._picture.set_paintable(texture)
+
+    def set_blank(self, colour: str | None) -> None:
+        """
+        Blank the audience screen to *colour*, or restore the slide.
+
+        Passing None puts the current slide back.  This replaced injecting
+        JavaScript into the page: there is no page any more, just a picture
+        to take down and a background to leave showing.
+        """
+        if self._closing:
+            return
+        if colour is None:
+            self._blanked = False
+            self._apply_surround("#000000")
+            self._show_page(self._pending)
+            return
+        self._blanked = True
+        self._apply_surround(colour)
+        self._picture.set_paintable(None)
+
+    def _apply_surround(self, colour: str) -> None:
+        """Set the colour behind (and, when blanked, instead of) the slide."""
+        style = f"box {{ background-color: {colour}; }}"
         try:
-            self._view.evaluate_javascript(js, -1, None, None, None, None)
-        except Exception:
-            pass   # WebKit GPU subprocess may be shutting down
+            self._surround_css.load_from_string(style)
+        except AttributeError:
+            self._surround_css.load_from_data(style.encode())
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -380,14 +387,10 @@ class SlideshowWindow(Adw.Window):
             except Exception:
                 pass
             self._monitors_handler = None
-        # Give WebKit a clean shutdown — try_close() tells the GPU
-        # subprocess to exit gracefully rather than being SIGKILL'd.
-        if self._view is not None:
-            try:
-                self._view.try_close()
-            except AttributeError:
-                pass
-            self._view = None         # prevent any further _run_js calls
+        # Drop the rendered deck; a 60-slide deck at 4K is a few tens of
+        # megabytes of PNG and nothing else references it.
+        self._pages = []
+        self._pdf_bytes = None
         self.destroy()
 
     def do_close_request(self) -> bool:
@@ -417,13 +420,15 @@ class PresenterWindow(Adw.Window):
     _PROGRESS_MAX_DOTS = 60
 
     def __init__(self, html_uri: str, slide_info: list[dict],
-                 thumbnails: list, parent_window, **kwargs) -> None:
+                 thumbnails: list, parent_window, pdf_path=None,
+                 **kwargs) -> None:
         super().__init__(**kwargs)
         self.set_title("Presence — Presenter Mode")
         self.set_default_size(1280, 800)
         self.set_transient_for(parent_window)
 
         self._html_uri    = html_uri
+        self._pdf_path    = pdf_path
         self._slide_info  = slide_info
         self._thumbnails  = thumbnails
         self._current     = 0
@@ -457,7 +462,7 @@ class PresenterWindow(Adw.Window):
         self._build_ui()
 
         self._slideshow = SlideshowWindow(
-            html_uri=html_uri,
+            pdf_path=pdf_path,
             n_slides=self._n_slides,
             presenter_window=self,
             parent_window=parent_window,
@@ -467,7 +472,7 @@ class PresenterWindow(Adw.Window):
 
         key_ctrl = Gtk.EventControllerKey()
         # CAPTURE phase: intercept key events before they reach the
-        # WebKit notes view, which would otherwise consume them.
+        # script view, which would otherwise consume them.
         key_ctrl.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         key_ctrl.connect("key-pressed", self._on_key)
         self.add_controller(key_ctrl)
@@ -785,7 +790,7 @@ class PresenterWindow(Adw.Window):
 
         notes_area.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
 
-        # The script — a GtkTextView rather than the WebKit view this pane
+        # The script — a GtkTextView rather than the browser view this pane
         # used to be.  A teleprompter has to scroll itself to the section
         # being spoken and take the contrast out of the rest, and a WebView
         # can do neither without JavaScript, which the app switches off
@@ -862,7 +867,7 @@ class PresenterWindow(Adw.Window):
         self._current = index
 
         # Drive the audience screen through SlideshowWindow — the
-        # presenter screen shows thumbnails and notes, not a WebKit view.
+        # presenter screen shows thumbnails and notes, not a rendered page.
         self._slideshow.show_slide(index)
 
         # Current slide thumbnail
@@ -1165,22 +1170,14 @@ class PresenterWindow(Adw.Window):
         if self._blank_color == color:
             # Un-blank: restore current slide
             self._blank_color = ""
-            self._slideshow.show_slide(self._current)
+            self._slideshow.set_blank(None)
         else:
             self._blank_color = color
-            bg = "#000000" if color == "black" else "#ffffff"
-            # Use a lookup rather than f-string interpolation to ensure
-            # the colour value can never be anything other than a safe hex.
-            js = (
-                "(function(){"
-                "document.querySelectorAll('.slide').forEach(s=>s.style.display='none');"
-                f"document.body.style.background='{bg}';"
-                f"document.documentElement.style.background='{bg}';"
-                "})()"
+            # A lookup rather than interpolation, so the colour reaching the
+            # stylesheet can only ever be one of these two.
+            self._slideshow.set_blank(
+                "#000000" if color == "black" else "#ffffff"
             )
-            # Route through _run_blank_js which has the same safety
-            # guards as _run_js — never call evaluate_javascript directly.
-            self._slideshow._run_blank_js(js)
 
     def _start_timer(self) -> None:
         self._timer_src = GLib.timeout_add_seconds(1, self._tick)
@@ -1328,7 +1325,7 @@ class PresenterWindow(Adw.Window):
             except Exception:
                 pass
             self._window_css = None
-        # The script pane is a GtkTextView now, so there is no WebKit view
+        # The script pane is a GtkTextView now, so there is no browser view
         # left on this window to close — only the slideshow holds one.
         # Fully destroy the slideshow window via the controlled path
         self._slideshow.close_by_presenter()

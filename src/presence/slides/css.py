@@ -484,8 +484,8 @@ a {{
  *                (justify-content: flex-end)
  *
  * align-items controls the cross-axis (horizontal for a column flex container).
- * WeasyPrint's flex support is partial; text-align is the reliable fallback
- * and works for both the PDF and the WebKit preview.
+ * WeasyPrint's flex support is partial; text-align is the reliable fallback,
+ * and WeasyPrint is what lays out the canvas, the room and the PDF alike.
  *
  * Headings, paragraphs and list items inherit text-align from their container
  * via the explicit rules below (some theme CSS sets text-align on h1/p directly
@@ -670,7 +670,9 @@ a {{
 
 /* Row height is set inline, in pixels, by the renderer.  A percentage or a
    flex basis leaves the rows indefinite, and an image at height:100% inside an
-   indefinite row collapses — in WeasyPrint the whole grid renders empty. */
+   indefinite row collapses — the whole grid renders empty.  WeasyPrint lays
+   out everything the writer, the room and the reader see, so this is not a
+   workaround for a second engine: it is the grid's real requirement. */
 .slide.has-gallery .gallery {{
     display: grid;
     gap: {int(height * 0.025)}px;
