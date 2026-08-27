@@ -28,6 +28,9 @@ from .app_utils        import png_bytes_to_texture, make_file_filter, make_filte
 
 log = logging.getLogger(__name__)
 from .converter  import Converter
+from .export_controller import ExportController
+from .document_controller import DocumentController, UNTITLED
+from .build_coordinator import BuildCoordinator
 from .presenter  import PresenterWindow
 from .shortcuts  import build_shortcuts_window
 from .session    import (save_last_file, load_window_state, save_window_state,
@@ -40,7 +43,6 @@ from .slides.splitter import split_slides
 from .slides.script import document_timing
 from .slides.frontmatter import parse_frontmatter, raw_frontmatter
 
-UNTITLED = "Untitled"
 
 # Default content shown in every new untitled document (#24).
 # Uses the most important Presence syntax markers so new users discover them
@@ -218,7 +220,9 @@ class MainWindow(Adw.ApplicationWindow):
         self._sidebar     = Sidebar()
         self._editor      = Editor()
         self._canvas      = SlideCanvas()
-        self._fold_lines: list = []
+        self._exports     = ExportController(self)
+        self._documents   = DocumentController(self)
+        self._builds      = BuildCoordinator(self)
         self._theme_panel = ThemePanel()
         self._inspector = Inspector(self._theme_panel)
 
@@ -710,251 +714,36 @@ class MainWindow(Adw.ApplicationWindow):
         if not self._modified:
             return False
 
-        self._show_unsaved_dialog(
+        self._documents.show_unsaved_dialog(
             on_save=lambda: self.destroy(),
             on_discard=lambda: self.destroy(),
         )
         return True
 
     def _check_unsaved(self, action) -> None:
-        if not self._modified:
-            action()
-            return
-        self._show_unsaved_dialog(on_save=action, on_discard=action)
-
-    def _show_unsaved_dialog(self, on_save, on_discard) -> None:
-        display = self._pres_path or self._file_path
-        name = display.name if display else "Untitled"
-        dialog = Adw.AlertDialog(
-            heading=f'Save changes to "{name}"?',
-            body="Your changes will be lost if you don't save them.",
-        )
-        dialog.add_response("cancel",  "Cancel")
-        dialog.add_response("discard", "Discard")
-        dialog.add_response("save",    "Save")
-        dialog.set_response_appearance("discard", Adw.ResponseAppearance.DESTRUCTIVE)
-        dialog.set_response_appearance("save",    Adw.ResponseAppearance.SUGGESTED)
-        # HIG: default to the safe (least destructive) action (#21)
-        dialog.set_default_response("cancel")
-        dialog.set_close_response("cancel")
-
-        def _on_response(dlg, response):
-            if response == "save":
-                self._save()
-                on_save()
-            elif response == "discard":
-                self._modified = False
-                on_discard()
-
-        dialog.connect("response", _on_response)
-        dialog.present(self)
+        self._documents.check_unsaved(action)
 
     # ── File operations ───────────────────────────────────────────────────────
 
     def open_file(self, path: Path) -> None:
-        try:
-            path = path.resolve(strict=True)
-        except (OSError, RuntimeError) as e:
-            self._show_error(f"Cannot open file: {e}")
-            return
-
-        is_pres = path.suffix.lower() == ".pres"
-
-        # Warn if this file is already open in another window (#88)
-        for win in self.get_application().get_windows():
-            if win is self or not isinstance(win, MainWindow):
-                continue
-            already_open = (
-                win._pres_path == path if is_pres else win._file_path == path
-            )
-            if already_open:
-                dialog = Adw.AlertDialog(
-                    heading="File already open",
-                    body=(f"'{path.name}' is already open in another window. "
-                          "Opening it again may cause conflicts if both windows save."),
-                )
-                dialog.add_response("cancel", "Cancel")
-                dialog.add_response("open",   "Open anyway")
-                dialog.set_default_response("cancel")
-                dialog.set_close_response("cancel")
-
-                def _on_response(dlg, response, p=path, pres=is_pres):
-                    if response == "open":
-                        if pres:
-                            self._open_pres_file(p)
-                        else:
-                            self._do_open_file(p)
-                dialog.connect("response", _on_response)
-                dialog.present(self)
-                return
-
-        if is_pres:
-            self._open_pres_file(path)
-        else:
-            self._do_open_file(path)
-
-    def _do_open_file(self, path: Path) -> None:
-        """Internal: load file into editor (called after duplicate check)."""
-        try:
-            text = path.read_text(encoding="utf-8")
-        except OSError as e:
-            self._show_error(f"Could not open file: {e}")
-            return
-
-        self._file_path   = path
-        self._output_path = path.with_suffix(".pdf")
-        self._editor.set_base_path(path)
-        self._editor.set_text(text)
-        self._sidebar.update_from_text(text)
-        # set_text() suppresses the editor's change signals, so drive the
-        # canvas directly — a freshly opened file starts at slide 1.
-        self._current_slide = 0
-        self._refresh_canvas(text)
-        self._update_word_count(text)
-        self._update_build_chip()
-        display = self._pres_path or path
-        self._set_title(display.name)
-        self._modified = False
-        save_last_file(display)
-        save_recent_file(display)
-        self._refresh_recent_actions()
-
-        # Defer the initial conversion by one idle cycle so the window is
-        # fully realised before WeasyPrint starts (#25 / #69).
-        if self._initial_convert_source is not None:
-            GLib.source_remove(self._initial_convert_source)
-        self._initial_convert_source = GLib.idle_add(self._deferred_initial_convert)
-
-    def _deferred_initial_convert(self) -> bool:
-        self._initial_convert_source = None
-        self._trigger_convert()
-        return GLib.SOURCE_REMOVE
+        self._documents.open_file(path)
 
     def restore_autosave(self, text: str) -> None:
-        self._editor.set_text(text)
-        self._modified = True
-        display = self._pres_path or self._file_path
-        base = display.name if display else UNTITLED
-        self._set_title(base + " •")
-        self._refresh_canvas(text)
-        self._update_build_chip()
-        self._trigger_convert()
+        self._documents.restore_autosave(text)
 
     def _save(self) -> bool:
-        """
-        Write the document, and rebuild only if asked to on every save.
-
-        Saving used to always run a full PDF build, which put seconds between
-        Ctrl+S and being able to type again.  The live canvas already shows
-        the slide, and the status chip says when the PDF has fallen behind,
-        so the build is now something you ask for — from the chip, Ctrl+Return,
-        Present, or an export.  Settings still offers "Auto-convert on save"
-        for anyone who wants the old behaviour; that preference previously had
-        no effect, because the condition guarding it was always true in GUI
-        mode.
-        """
-        if not self._write_document():
-            return False
-        if self._auto_convert:
-            self._trigger_convert()
-        return True
+        return self._documents.save()
 
     def _write_document(self) -> bool:
-        """Write the document to disk. Never builds."""
-        if self._file_path is None:
-            return self._save_as_dialog()
-        try:
-            self._file_path.write_text(
-                self._editor.get_text(), encoding="utf-8"
-            )
-            if self._pres_path:
-                self._pack_pres()
-            self._modified = False
-            display = self._pres_path or self._file_path
-            self._set_title(display.name)
-            save_last_file(display)
-            # Delete any orphaned recovery file (fixes #59)
-            delete_recovery_file(display)
-            return True
-        except OSError as e:
-            self._show_error(f"Could not save: {e}")
-            return False
+        return self._documents.write_document()
 
     def _save_as_dialog(self) -> bool:
-        dialog = Gtk.FileDialog()
-        dialog.set_title("Save As")
-        dialog.set_filters(make_filter_store(
-            make_file_filter("Presence bundle", "*.pres"),
-            make_file_filter("Markdown files", "*.md"),
-        ))
-        if self._pres_path:
-            dialog.set_initial_file(Gio.File.new_for_path(str(self._pres_path)))
-        self._active_file_dialog = dialog
-        dialog.save(self, None, self._on_save_as_response)
-        return True
-
-    def _on_save_as_response(self, dialog, result) -> None:
-        self._active_file_dialog = None
-        try:
-            gfile = dialog.save_finish(result)
-        except GLib.Error:
-            return
-        path_str = gfile.get_path()
-        if not path_str:
-            return
-        path = Path(path_str)
-        if not path.suffix:
-            path = path.with_suffix(".pres")
-        if not os.access(path.parent, os.W_OK):
-            self._show_error(f"Cannot write to '{path.parent}' — permission denied.")
-            return
-        if path.suffix.lower() == ".pres":
-            self._setup_pres_save(path)
-        else:
-            # Saving as plain .md: copy assets out of any pres temp dir first
-            if self._pres_path and self._file_path:
-                old_assets = self._file_path.parent / "assets"
-                if old_assets.is_dir():
-                    try:
-                        shutil.copytree(old_assets, path.parent / "assets",
-                                        dirs_exist_ok=True)
-                    except OSError as e:
-                        log.warning("Could not copy assets: %s", e)
-            old_pres_temp = self._pres_temp_dir
-            self._pres_path = None
-            self._pres_temp_dir = None
-            self._file_path   = path
-            self._output_path = path.with_suffix(".pdf")
-            self._editor.set_base_path(path)
-            self._save()
-            if old_pres_temp and old_pres_temp.exists():
-                shutil.rmtree(old_pres_temp, ignore_errors=True)
+        return self._documents.save_as_dialog()
 
     # ── Conversion ────────────────────────────────────────────────────────────
 
     def _trigger_convert(self, *_) -> None:
-        if self._file_path is None:
-            self._cleanup_temp_files()
-            fd, tmp_str = tempfile.mkstemp(suffix=".md")
-            try:
-                os.write(fd, self._editor.get_text().encode("utf-8"))
-            finally:
-                os.close(fd)
-            self._temp_md  = Path(tmp_str)
-            self._temp_pdf = self._temp_md.with_suffix(".pdf")
-            input_path  = self._temp_md
-            output_path = self._temp_pdf
-        else:
-            # The converter reads from disk, so pending edits must land first.
-            # _write_document() rather than _save() so auto-convert cannot
-            # recurse back into here.
-            if self._modified and not self._write_document():
-                return
-            self._cleanup_temp_files()
-            input_path  = self._file_path
-            output_path = self._output_path
-
-        self._converter.convert(input_path, output_path)
+        self._builds.trigger()
 
     def _cleanup_temp_files(self) -> None:
         for attr in ("_temp_md", "_temp_pdf"):
@@ -998,7 +787,7 @@ class MainWindow(Adw.ApplicationWindow):
             self._cleanup_pres_temp()
             return
         self._pres_path = pres_path
-        self._do_open_file(md_path)
+        self._documents.load_into_editor(md_path)
 
     def _pack_pres(self) -> None:
         """Re-pack the temp dir into the .pres ZIP bundle atomically."""
@@ -1131,31 +920,11 @@ class MainWindow(Adw.ApplicationWindow):
         """The pane resized enough that the slide needs re-rasterizing."""
         self._refresh_canvas()
 
-    # ── Fold lines ────────────────────────────────────────────────────────────
-    #
-    # Two sources agree on where a slide runs out of room, because both come
-    # from the same WeasyPrint layout: a build measures every slide at once,
-    # the canvas measures the slide being edited on every keystroke.  The
-    # canvas is always the fresher of the two for the slide it covers.
-
     def _set_build_folds(self, folds: list) -> None:
-        """Replace every fold line from a completed build."""
-        self._fold_lines = list(folds)
-        self._editor.set_fold_lines(self._fold_lines)
+        self._builds.set_build_folds(folds)
 
     def _set_live_fold(self, index: int, fold_line) -> None:
-        """Update one slide's fold line from a canvas render."""
-        if index < 0:
-            return
-        # A slide added since the last build has no slot yet.
-        if index >= len(self._fold_lines):
-            self._fold_lines.extend(
-                [None] * (index + 1 - len(self._fold_lines))
-            )
-        elif self._fold_lines[index] == fold_line:
-            return                      # nothing moved; skip the redraw
-        self._fold_lines[index] = fold_line
-        self._editor.set_fold_lines(self._fold_lines)
+        self._builds.set_live_fold(index, fold_line)
 
     def _on_canvas_toggled(self, btn: Gtk.ToggleButton) -> None:
         """Show or hide the live canvas (F8)."""
@@ -1303,17 +1072,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._update_build_chip()
 
     def _with_current_build(self, action) -> None:
-        """
-        Run *action* against a build that matches the document.
-
-        Anything consuming the PDF or HTML goes through here, so no export
-        or presentation can quietly ship the previous version of the deck.
-        """
-        if self._build_state() == "current" and self._html_uri:
-            action()
-            return
-        self._after_build = action
-        self._trigger_convert()
+        self._builds.with_current_build(action)
 
     def _on_present_clicked(self, *_) -> None:
         """Build if the deck has moved on, then open presenter mode."""
@@ -1393,129 +1152,28 @@ class MainWindow(Adw.ApplicationWindow):
 
     # ── Build status ──────────────────────────────────────────────────────────
 
+    # ── Build state ───────────────────────────────────────────────────────────
+    #
+    # BuildCoordinator owns all of this; the window keeps the names the
+    # actions and converter signals are wired to.
+
     def _build_state(self) -> str:
-        """One of 'building', 'stale' or 'current'."""
-        if self._converting:
-            return "building"
-        if self._built_text is None:
-            return "stale"
-        return "current" if self._editor.get_text() == self._built_text else "stale"
+        return self._builds.state()
 
     def _update_build_chip(self) -> None:
-        """Reflect the build state; safe to call as often as convenient."""
-        state = self._build_state()
-
-        if state == "building":
-            self._chip_visual.set_visible_child_name("spinner")
-            self._chip_spinner.start()
-            self._chip_label.set_label("Building…")
-            self._chip_label.add_css_class("dim-label")
-            self._build_chip.set_sensitive(False)
-            self._build_chip.set_tooltip_text("Building the PDF…")
-        else:
-            self._chip_spinner.stop()
-            self._chip_visual.set_visible_child_name("icon")
-            self._build_chip.set_sensitive(True)
-            self._build_chip.set_tooltip_text("Rebuild now (Ctrl+Return)")
-            if state == "current":
-                self._chip_icon.set_from_icon_name("object-select-symbolic")
-                self._chip_label.set_label("Up to date")
-                self._chip_label.add_css_class("dim-label")
-            else:
-                self._chip_icon.set_from_icon_name("view-refresh-symbolic")
-                self._chip_label.set_label("Rebuild needed")
-                self._chip_label.remove_css_class("dim-label")
-
-        self._build_chip.update_property(
-            [Gtk.AccessibleProperty.LABEL],
-            [f"{self._chip_label.get_label()} — rebuild"],
-        )
-
-    # ── Converter signal handlers ─────────────────────────────────────────────
+        self._builds.update_chip()
 
     def _on_conversion_started(self, converter: Converter) -> None:
-        self._converting = True
-        # The document as it stands is what this build will contain; on
-        # success it becomes the baseline the chip compares against.
-        self._building_text = self._editor.get_text()
-        self._present_btn.set_sensitive(False)
-        self._banner.set_revealed(False)
-        self._update_build_chip()
-        # Show per-thumbnail spinners so users know thumbnails are updating (#71)
-        self._sidebar.set_converting(True)
+        self._builds.on_started(converter)
 
-    def _on_conversion_complete(
-        self,
-        converter: Converter,
-        n_slides:  int,
-        duration:  float,
-        pdf_path:  str,
-        html_uri:  str,
-    ) -> None:
-        self._converting = False
-        self._built_text = self._building_text
-        self._update_build_chip()
-        self._present_btn.set_sensitive(True)
-        self._share_btn.set_sensitive(True)
-        self._output_path = Path(pdf_path)
-
-        # No toast: a routine build that succeeded is what the chip is for.
-        log.debug("Built %d slides in %.2fs", n_slides, duration)
-        self._slide_info = converter.slide_info
-        self._thumbnails = converter.thumbnails
-        self._html_uri   = html_uri
-
-        # Enable presenter mode now that a conversion exists (#27)
-        if self._presenter_action:
-            self._presenter_action.set_enabled(True)
-
-        # Anything that was waiting for a current build can run now.
-        if self._after_build is not None:
-            pending, self._after_build = self._after_build, None
-            pending()
-
-        # Draw the fold rules measured from the page that was just laid out.
-        self._set_build_folds(
-            [info.get("fold_line") for info in converter.slide_info]
-        )
-
-        # Stop thumbnail spinners before replacing content (#71)
-        self._sidebar.set_converting(False)
-        overflow_count = self._sidebar.update_from_conversion(
-            converter.slide_info, converter.thumbnails,
-            wpm=self._speaking_rate,
-        ) or 0
-        if overflow_count:
-            s = "slide" if overflow_count == 1 else "slides"
-            self._banner.set_title(
-                f"{overflow_count} {s} may have too much text "
-                f"— content could be clipped in the PDF."
-            )
-            self._banner.set_revealed(True)
-
-        w, h = ASPECT_RATIOS.get(self._converter.ratio, (1280, 720))
-        self._slide_w, self._slide_h = w, h
-
-        if self._file_path is not None:
-            self._cleanup_temp_files()
-
-        if self._pres_path:
-            self._pack_pres()
+    def _on_conversion_complete(self, converter: Converter, n_slides: int,
+                                duration: float, pdf_path: str,
+                                html_uri: str) -> None:
+        self._builds.on_complete(converter, n_slides, duration,
+                                 pdf_path, html_uri)
 
     def _on_conversion_failed(self, converter: Converter, message: str) -> None:
-        self._converting = False
-        # Leave _built_text alone: a failed build did not change what is on
-        # disk, so the chip correctly keeps saying a rebuild is needed.
-        self._update_build_chip()
-        self._present_btn.set_sensitive(True)
-        # Whatever was queued cannot run against a failed build.
-        self._after_build = None
-        # Stop thumbnail spinners on failure too (#71)
-        self._sidebar.set_converting(False)
-        # Show a user-friendly message rather than a raw exception string (#87)
-        friendly = _friendly_error(message)
-        self._banner.set_title(friendly)
-        self._banner.set_revealed(True)
+        self._builds.on_failed(converter, message)
 
     # ── Panel toggles ─────────────────────────────────────────────────────────
 
@@ -1748,233 +1406,22 @@ class MainWindow(Adw.ApplicationWindow):
     def _on_shortcuts(self, *_) -> None:
         build_shortcuts_window(self).present()
 
-    def _on_export(self, *_) -> None:
-        dialog = Gtk.FileDialog()
-        dialog.set_title("Export PDF")
-        if self._pres_path:
-            dialog.set_initial_folder(Gio.File.new_for_path(str(self._pres_path.parent)))
-            dialog.set_initial_name(self._pres_path.stem + ".pdf")
-        elif self._output_path:
-            dialog.set_initial_file(
-                Gio.File.new_for_path(str(self._output_path))
-            )
-        dialog.set_filters(make_filter_store(
-            make_file_filter("PDF files", "*.pdf")
-        ))
-        self._active_file_dialog = dialog
-        dialog.save(self, None, self._on_export_response)
+    # ── Export ────────────────────────────────────────────────────────────────
+    #
+    # The four flows live in ExportController; the window keeps only the names
+    # the actions are wired to.
 
-    def _on_export_response(self, dialog, result) -> None:
-        self._active_file_dialog = None
-        try:
-            gfile = dialog.save_finish(result)
-        except GLib.Error:
-            return
-        path_str = gfile.get_path()
-        if not path_str:
-            return
-        path = Path(path_str)
-        if not path.suffix:
-            path = path.with_suffix(".pdf")
-        # Verify the directory is writable before starting conversion (#67)
-        if not os.access(path.parent, os.W_OK):
-            self._show_error(f"Cannot write to '{path.parent}' — permission denied.")
-            return
-        self._output_path = path
-        self._trigger_convert()
+    def _on_export(self, *_) -> None:
+        self._exports.export_pdf()
 
     def _on_export_html(self, *_) -> None:
-        """Save a self-contained copy of the generated HTML file."""
-        dialog = Gtk.FileDialog()
-        dialog.set_title("Export HTML")
-        if self._pres_path:
-            dialog.set_initial_folder(Gio.File.new_for_path(str(self._pres_path.parent)))
-            dialog.set_initial_name(self._pres_path.stem + ".html")
-        elif self._output_path:
-            dialog.set_initial_file(
-                Gio.File.new_for_path(str(self._output_path.with_suffix(".html")))
-            )
-        dialog.set_filters(make_filter_store(
-            make_file_filter("HTML files", "*.html")
-        ))
-        self._active_file_dialog = dialog
-        dialog.save(self, None, self._on_export_html_response)
-
-    def _on_export_html_response(self, dialog, result) -> None:
-        self._active_file_dialog = None
-        try:
-            gfile = dialog.save_finish(result)
-        except GLib.Error:
-            return
-        path_str = gfile.get_path()
-        if not path_str:
-            return
-        dest = Path(path_str)
-        if not dest.suffix:
-            dest = dest.with_suffix(".html")
-        if not os.access(dest.parent, os.W_OK):
-            # Transient one-shot failure — toast is appropriate here
-            self._show_toast(
-                f"Cannot write to '{dest.parent}' — permission denied."
-            )
-            return
-        # Build first if the deck has moved on, then copy the HTML that sits
-        # next to the PDF.
-        self._with_current_build(lambda: self._copy_built_html(dest))
-
-    def _copy_built_html(self, dest: Path) -> None:
-        from urllib.parse import urlparse
-        from urllib.request import url2pathname
-        src_path = Path(url2pathname(urlparse(self._html_uri).path))
-        try:
-            shutil.copy2(src_path, dest)
-            self._show_toast(f"HTML exported → {dest.name}")
-        except OSError as e:
-            self._show_toast(f"Could not export HTML: {e}")
-
+        self._exports.export_html()
 
     def _on_export_images(self, *_) -> None:
-        """Export each slide as a full-resolution PNG into a user-chosen folder."""
-        dialog = Gtk.FileDialog()
-        dialog.set_title("Choose Export Folder")
-        self._active_file_dialog = dialog
-        dialog.select_folder(self, None, self._on_export_images_folder_chosen)
-
-    def _on_export_images_folder_chosen(self, dialog, result) -> None:
-        self._active_file_dialog = None
-        try:
-            gfile = dialog.select_folder_finish(result)
-        except GLib.Error:
-            return
-        path_str = gfile.get_path()
-        if not path_str:
-            return
-        folder = Path(path_str)
-        if not folder.is_dir():
-            return
-        self._with_current_build(lambda: self._render_slide_images(folder))
-
-    def _render_slide_images(self, folder: Path) -> None:
-        # Use the high-res renderer so exported PNGs are crisp at 1920px wide.
-        from .slides.thumbnails_render import render_slides_hires
-
-        if self._output_path is None or not self._output_path.exists():
-            # Transient one-shot failure: show as toast, not persistent banner.
-            self._show_toast("No PDF found — convert first.")
-            return
-
-        try:
-            pdf_bytes = self._output_path.read_bytes()
-        except OSError as e:
-            self._show_toast(f"Could not read PDF: {e}")
-            return
-
-        # Render on a background thread so the UI stays responsive.
-        def _render():
-            slides = render_slides_hires(pdf_bytes, width_px=1920)
-            GLib.idle_add(_on_done, slides)
-
-        def _on_done(slides: list) -> bool:
-            saved = 0
-            display = self._pres_path or self._file_path
-            stem = display.stem if display else "slide"
-            for i, png in enumerate(slides):
-                if png:
-                    try:
-                        (folder / f"{stem}_{i + 1:02d}.png").write_bytes(png)
-                        saved += 1
-                    except OSError as e:
-                        log.warning("Could not write slide PNG: %s", e)
-            self._show_toast(
-                f"{saved} image{'s' if saved != 1 else ''} exported → {folder.name}/"
-            )
-            return GLib.SOURCE_REMOVE
-
-        threading.Thread(target=_render, daemon=True).start()
-
-    # ── Handout ───────────────────────────────────────────────────────────────
+        self._exports.export_images()
 
     def _on_export_handout(self, *_) -> None:
-        """Export the talk as a document: each slide with its script."""
-        dialog = Gtk.FileDialog()
-        dialog.set_title("Export Handout")
-        display = self._pres_path or self._file_path
-        stem = display.stem if display else "presentation"
-        dialog.set_initial_name(f"{stem}-handout.pdf")
-        if display:
-            dialog.set_initial_folder(
-                Gio.File.new_for_path(str(display.parent))
-            )
-        dialog.set_filters(make_filter_store(
-            make_file_filter("PDF files", "*.pdf")
-        ))
-        self._active_file_dialog = dialog
-        dialog.save(self, None, self._on_export_handout_response)
-
-    def _on_export_handout_response(self, dialog, result) -> None:
-        self._active_file_dialog = None
-        try:
-            gfile = dialog.save_finish(result)
-        except GLib.Error:
-            return
-        path_str = gfile.get_path()
-        if not path_str:
-            return
-        dest = Path(path_str)
-        if not dest.suffix:
-            dest = dest.with_suffix(".pdf")
-        if not os.access(dest.parent, os.W_OK):
-            self._show_toast(
-                f"Cannot write to '{dest.parent}' — permission denied."
-            )
-            return
-        # A handout is made of slide pictures, so it needs a build that
-        # matches the document just as much as any other export does.
-        self._with_current_build(lambda: self._write_handout(dest))
-
-    def _write_handout(self, dest: Path) -> None:
-        if self._output_path is None or not self._output_path.exists():
-            self._show_toast("No build to make a handout from.")
-            return
-        try:
-            pdf_bytes = self._output_path.read_bytes()
-        except OSError as e:
-            self._show_toast(f"Could not read the built PDF: {e}")
-            return
-
-        meta, _body = parse_frontmatter(self._editor.get_text())
-        slide_info = list(self._slide_info)
-
-        # Rasterising every slide and laying out a document is seconds of
-        # work, so it runs off the main thread like the image export does.
-        def _render() -> None:
-            try:
-                from .slides.thumbnails_render import render_slides_hires
-                from .slides.handout import build_handout_html
-                import weasyprint
-
-                pngs = render_slides_hires(pdf_bytes, width_px=1000)
-                html = build_handout_html(slide_info, pngs, meta)
-                data = weasyprint.HTML(string=html).write_pdf()
-            except Exception as exc:
-                log.exception("Handout export failed")
-                GLib.idle_add(_failed, str(exc))
-                return
-            GLib.idle_add(_done, data)
-
-        def _done(data: bytes) -> bool:
-            try:
-                dest.write_bytes(data)
-                self._show_toast(f"Handout exported → {dest.name}")
-            except OSError as e:
-                self._show_toast(f"Could not write the handout: {e}")
-            return GLib.SOURCE_REMOVE
-
-        def _failed(message: str) -> bool:
-            self._show_toast(f"Could not build the handout: {message}")
-            return GLib.SOURCE_REMOVE
-
-        threading.Thread(target=_render, daemon=True).start()
+        self._exports.export_handout()
 
     def _on_show_in_file_manager(self, *_) -> None:
         """Open the output folder in the system file manager."""
@@ -2014,21 +1461,7 @@ class MainWindow(Adw.ApplicationWindow):
     # ── Autosave ──────────────────────────────────────────────────────────────
 
     def _autosave(self) -> bool:
-        if self._modified and self._editor.get_text():
-            try:
-                rd = recovery_dir()
-                rd.mkdir(parents=True, exist_ok=True)
-                display = self._pres_path or self._file_path
-                if display:
-                    rp = recovery_path_for(display)
-                else:
-                    rp = rd / "untitled.md"
-                rp.write_text(self._editor.get_text(), encoding="utf-8")
-                # Brief toast so users know their work is protected (#29)
-                self._show_toast("Autosaved", timeout=2)
-            except OSError as e:
-                log.warning("Autosave failed: %s", e)
-        return GLib.SOURCE_CONTINUE
+        return self._documents.autosave()
 
     # ── Word count ────────────────────────────────────────────────────────────
 

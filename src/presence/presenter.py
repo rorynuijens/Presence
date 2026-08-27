@@ -23,6 +23,18 @@ from .slides.script import (
 from .slides.thumbnails_render import render_page_png, render_slides_hires
 
 
+def _slide_pages_from(slide_info: list) -> "list[int] | None":
+    """
+    The PDF page each slide starts on, or None if the build did not say.
+
+    A build made before slides carried a page index gives Nones here; the
+    slideshow then falls back to one page per slide, which is what that build
+    assumed anyway.
+    """
+    pages = [info.get("page_index") for info in slide_info]
+    return pages if pages and all(p is not None for p in pages) else None
+
+
 # ── SlideshowWindow ───────────────────────────────────────────────────────────
 
 class SlideshowWindow(Adw.Window):
@@ -50,7 +62,7 @@ class SlideshowWindow(Adw.Window):
 
     def __init__(self, pdf_path, n_slides: int,
                  presenter_window: "PresenterWindow",
-                 parent_window, **kwargs) -> None:
+                 parent_window, slide_pages=None, **kwargs) -> None:
         super().__init__(**kwargs)
         self.set_title("Presence — Slideshow")
         self.set_default_size(1280, 720)
@@ -68,6 +80,13 @@ class SlideshowWindow(Adw.Window):
         # One rendered page per slide, filled in by load(); None until the
         # background pass reaches that slide.
         self._pages: list = [None] * max(0, n_slides)
+        # Which PDF page each slide starts on.  A slide whose text overflows
+        # leaves a continuation page behind it, so this is not always the
+        # slide's own index — see converter._slide_page_indices.
+        self._slide_pages: list = (
+            list(slide_pages) if slide_pages
+            else list(range(max(0, n_slides)))
+        )
         self._render_w: int = 1920
         self._blanked: bool = False
 
@@ -280,7 +299,8 @@ class SlideshowWindow(Adw.Window):
 
         self._render_w = self._slideshow_width()
 
-        first = render_page_png(self._pdf_bytes, self._pending, self._render_w)
+        first = render_page_png(self._pdf_bytes,
+                                self._page_for(self._pending), self._render_w)
         if first is not None and self._pending < len(self._pages):
             self._pages[self._pending] = first
         self._show_page(self._pending)
@@ -302,7 +322,8 @@ class SlideshowWindow(Adw.Window):
         if pdf_bytes is None:
             return
         try:
-            pages = render_slides_hires(pdf_bytes, self._render_w)
+            pages = render_slides_hires(pdf_bytes, self._render_w,
+                                        pages=self._slide_pages)
         except Exception as e:
             log.warning("Slideshow pre-render failed: %s", e)
             return
@@ -334,13 +355,20 @@ class SlideshowWindow(Adw.Window):
         if png is None and self._pdf_bytes is not None:
             # The presenter jumped ahead of the prefetch — pay for it now
             # rather than showing the room a stale slide.
-            png = render_page_png(self._pdf_bytes, index, self._render_w)
+            png = render_page_png(self._pdf_bytes, self._page_for(index),
+                                  self._render_w)
             self._pages[index] = png
         if png is None:
             return
         texture = png_bytes_to_texture(png)
         if texture is not None:
             self._picture.set_paintable(texture)
+
+    def _page_for(self, index: int) -> int:
+        """The PDF page holding slide *index*."""
+        if 0 <= index < len(self._slide_pages):
+            return self._slide_pages[index]
+        return index
 
     def set_blank(self, colour: str | None) -> None:
         """
@@ -463,6 +491,7 @@ class PresenterWindow(Adw.Window):
 
         self._slideshow = SlideshowWindow(
             pdf_path=pdf_path,
+            slide_pages=_slide_pages_from(slide_info),
             n_slides=self._n_slides,
             presenter_window=self,
             parent_window=parent_window,

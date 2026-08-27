@@ -140,6 +140,44 @@ def _fold_line_for_page(page) -> "int | None":
         return None
 
 
+def _slide_page_indices(document, n_slides: int) -> list[int]:
+    """
+    The PDF page each slide starts on.
+
+    A slide is a fixed box with overflow:hidden, but WeasyPrint fragments a
+    block that does not fit rather than clipping it, so a slide with too much
+    text emits a continuation page.  Page number and slide number therefore
+    part company as soon as one slide overflows, and everything made out of
+    the PDF — thumbnails, exported images, the handout, the slideshow — has
+    to be told which page to read.
+
+    Falls back to one page per slide when the stamps cannot be read, which is
+    exactly right for the overwhelmingly common case of nothing overflowing.
+    """
+    found: dict[int, int] = {}
+    try:
+        for page_number, page in enumerate(document.pages):
+            for box in _walk_boxes(page._page_box):
+                element = getattr(box, "element", None)
+                if element is None or not hasattr(element, "get"):
+                    continue
+                raw = element.get("data-slide-index")
+                if raw is None:
+                    continue
+                try:
+                    index = int(raw)
+                except ValueError:
+                    continue
+                # First page carrying this slide is where it starts; later
+                # pages are its overflow.
+                found.setdefault(index, page_number)
+                break
+    except Exception:
+        log.debug("Slide/page mapping failed", exc_info=True)
+
+    return [found.get(i, i) for i in range(n_slides)]
+
+
 def _box_line(box) -> "int | None":
     """The source line stamped on *box*, if any."""
     element = getattr(box, "element", None)
@@ -556,13 +594,20 @@ class Converter(GObject.Object):
 
             # Same laid-out document the PDF came from, so the folds describe
             # the file the writer will actually hand out.
-            for info, fold in zip(slide_info, _measure_folds(wp_doc, len(slides))):
-                info["fold_line"] = fold
+            n_slides = len(slides)
+            pages = _slide_page_indices(wp_doc, n_slides)
+            folds = _measure_folds(wp_doc, n_slides)
+            for info, fold, page in zip(slide_info, folds, pages):
+                info["fold_line"]  = fold
+                # Which PDF page this slide starts on.  Not always its own
+                # index: an overflowing slide leaves a continuation page
+                # behind it, and everything made out of the PDF needs to skip
+                # those rather than mistake them for the next slide.
+                info["page_index"] = page
 
             duration   = time.monotonic() - t0
-            n_slides   = len(slides)
             html_uri   = html_path.as_uri()
-            thumbnails = render_thumbnails(pdf_bytes, n_slides)
+            thumbnails = render_thumbnails(pdf_bytes, n_slides, pages=pages)
 
             # Pass results as idle_add arguments — avoids writing to shared
             # state from the background thread (safe under free-threaded Python).

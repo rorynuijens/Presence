@@ -64,14 +64,19 @@ def _load_pdf_doc(pdf_bytes: bytes):
 def render_thumbnails(
     pdf_bytes: bytes,
     n_slides:  int,
+    pages:     "list[int] | None" = None,
 ) -> list[bytes | None]:
     """
-    Convert each page of *pdf_bytes* to a PNG thumbnail (THUMB_W × THUMB_H).
+    Convert slides of *pdf_bytes* to PNG thumbnails (THUMB_W × THUMB_H).
 
-    *n_slides* is used only for progress reporting; the actual page count
-    comes from Poppler so it is always correct even if the PDF was trimmed.
+    *pages* gives the PDF page each slide starts on.  A slide whose content
+    overflows makes WeasyPrint emit a continuation page, so page number and
+    slide number part company as soon as that happens and the strip would
+    otherwise show a slide's spill as if it were the next slide.  Without
+    *pages* every page is rendered, which is the same thing whenever nothing
+    overflows.
 
-    Returns one PNG bytes blob per page, or an empty list when Cairo or
+    Returns one PNG bytes blob per slide, or an empty list when Cairo or
     Poppler are unavailable.
     """
     try:
@@ -91,12 +96,18 @@ def render_thumbnails(
     if doc is None:
         return []
 
+    wanted = pages if pages is not None else list(range(doc.get_n_pages()))
+
     results: list[bytes | None] = []
-    for i in range(doc.get_n_pages()):
+    for page_index in wanted:
+        if not 0 <= page_index < doc.get_n_pages():
+            results.append(_placeholder_png(cairo))
+            continue
         try:
-            results.append(_render_page(doc, i, cairo))
+            results.append(_render_page(doc, page_index, cairo))
         except Exception as e:
-            log.warning("Thumbnail render failed for page %d: %s", i + 1, e)
+            log.warning("Thumbnail render failed for page %d: %s",
+                        page_index + 1, e)
             results.append(_placeholder_png(cairo))
 
     return results
@@ -145,15 +156,19 @@ def _placeholder_png(cairo) -> bytes:
 def render_slides_hires(
     pdf_bytes: bytes,
     width_px:  int = 1920,
+    pages:     "list[int] | None" = None,
 ) -> list[bytes | None]:
     """
-    Render each page of *pdf_bytes* to a high-resolution PNG.
+    Render slides of *pdf_bytes* to high-resolution PNGs.
 
     *width_px* sets the output width in pixels; height is derived from the
     page aspect ratio so the image is never distorted.  Use 1920 for full-HD
     quality suitable for PNG export (sharp at any normal screen size).
 
-    Returns one PNG bytes blob per page (None on render failure), using the
+    *pages* gives the PDF page each slide starts on; see render_thumbnails().
+    Without it every page is rendered.
+
+    Returns one PNG bytes blob per slide (None on render failure), using the
     same Poppler+Cairo pipeline as render_thumbnails().
     """
     try:
@@ -173,12 +188,17 @@ def render_slides_hires(
     if doc is None:
         return []
 
+    wanted = pages if pages is not None else list(range(doc.get_n_pages()))
+
     results: list[bytes | None] = []
-    for i in range(doc.get_n_pages()):
+    for page_index in wanted:
+        if not 0 <= page_index < doc.get_n_pages():
+            results.append(None)
+            continue
         try:
-            results.append(_render_page_hires(doc, i, cairo, width_px))
+            results.append(_render_page_hires(doc, page_index, cairo, width_px))
         except Exception as e:
-            log.warning("Hires render failed for page %d: %s", i + 1, e)
+            log.warning("Hires render failed for page %d: %s", page_index + 1, e)
             results.append(None)
 
     return results

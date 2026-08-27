@@ -5,8 +5,9 @@ The chip reports whether the built PDF still matches the document.  It is a
 text comparison rather than a dirty flag, so undoing back to what was built
 reports "up to date" again without a rebuild.
 
-GTK 4 widgets cannot be constructed without a display (see conftest.py), so
-these call MainWindow._build_state against a stand-in holding the same fields.
+The rule lives on BuildCoordinator, which reads it off the window it serves.
+These drive a real coordinator over a stand-in window holding the three fields
+it looks at, so no display is needed (see conftest.py).
 """
 
 import pytest
@@ -15,7 +16,7 @@ gi = pytest.importorskip("gi")
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
-from presence.window import MainWindow  # noqa: E402
+from presence.build_coordinator import BuildCoordinator  # noqa: E402
 
 
 class FakeEditor:
@@ -27,14 +28,15 @@ class FakeEditor:
 
 
 class WindowState:
-    """The three fields _build_state() reads."""
-
-    _build_state = MainWindow._build_state
+    """The three fields the build state is read from."""
 
     def __init__(self, current: str, built: str | None, converting: bool = False):
         self._editor = FakeEditor(current)
         self._built_text = built
         self._converting = converting
+
+    def _build_state(self) -> str:
+        return BuildCoordinator(self).state()
 
 
 def test_building_wins_over_everything():

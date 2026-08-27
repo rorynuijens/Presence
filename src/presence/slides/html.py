@@ -99,6 +99,25 @@ from .frontmatter import extract_slide_directives
 from .utils       import logo_img_tag, progress_bar_html
 
 
+def _stamp_slide_index(html_frag: str, index: int) -> str:
+    """
+    Add data-slide-index to the fragment's outermost slide div.
+
+    Done here rather than in each of the five per-layout renderers, so a new
+    layout cannot be added without it.
+    """
+    marker = '<div class="slide'
+    at = html_frag.find(marker)
+    if at == -1:
+        return html_frag
+    close = html_frag.find(">", at)
+    if close == -1:
+        return html_frag
+    return (html_frag[:close]
+            + f' data-slide-index="{index}"'
+            + html_frag[close:])
+
+
 def md_to_html_slides(
     slides:   list[str],
     css:      str,
@@ -224,7 +243,11 @@ def md_to_html_slides(
                                              theme_override,
                                              line_offset=line_offset)
 
-        slide_htmls.append(html_frag)
+        # Stamp the slide's own index on its outermost div.  A slide whose
+        # content overflows its box makes WeasyPrint emit a continuation
+        # page, so a PDF page number is not a slide number; this is what
+        # lets the build say which page each slide actually starts on.
+        slide_htmls.append(_stamp_slide_index(html_frag, i))
 
     lang = _html.escape(str(meta.get("lang", "en")) or "en")
     document = f"""<!DOCTYPE html>
