@@ -54,6 +54,21 @@ _IMAGE_RE = re.compile(
 # thumbnail never disagree about what a slide is called.
 from .slides.splitter import _strip_inline_markdown
 
+
+def _same_file(a: Path, b: Path) -> bool:
+    """True when *a* and *b* hold the same bytes, so a copy can be skipped."""
+    try:
+        if a.samefile(b):
+            return True
+    except OSError:
+        pass
+    try:
+        if a.stat().st_size != b.stat().st_size:
+            return False
+        return a.read_bytes() == b.read_bytes()
+    except OSError:
+        return False
+
 _HEADING_RE = re.compile(r'^#{1,3}\s+(.+)$')
 
 # Invalidation value for the cached current-slide range.  Not None: None is a
@@ -1111,18 +1126,67 @@ class Editor(Gtk.Box):
 
         dialog.open(self.get_root(), None, _on_done)
 
+    # Characters a slide's image source cannot carry.  The syntax ends the
+    # source at whitespace or a closing paren, so a picture called
+    # "My Holiday Photo.png" produces a tag that parses as no image at all,
+    # and "shot(1).png" produces one truncated to "shot(1".  Presence owns
+    # the copy it puts in assets/, so it names that copy something the
+    # document can actually refer to.
+    _UNSAFE_IN_SRC = re.compile(r'[\s()"\']+')
+
+    @staticmethod
+    def _asset_name(src: Path) -> str:
+        """A file name for assets/ that a slide's image source can hold."""
+        stem = Editor._UNSAFE_IN_SRC.sub("-", src.stem).strip("-")
+        return (stem or "image") + src.suffix
+
+    def _copy_into_assets(self, src: Path) -> "str | None":
+        """
+        Copy *src* next to the document and return the path to write.
+
+        Returns None when there is nowhere to copy to or the copy failed;
+        the caller decides what to say about that.  An existing file of the
+        same name is reused only when it is the same picture — otherwise a
+        second "shot.png" from a different folder would silently replace the
+        first one's contents in the document.
+        """
+        if not self._base_path:
+            return None
+        assets_dir = self._base_path.parent / "assets"
+        try:
+            assets_dir.mkdir(exist_ok=True)
+            name = self._asset_name(src)
+            dst = assets_dir / name
+            stem, suffix = Path(name).stem, Path(name).suffix
+            counter = 2
+            while dst.exists() and not _same_file(src, dst):
+                dst = assets_dir / f"{stem}-{counter}{suffix}"
+                counter += 1
+            if not dst.exists():
+                shutil.copy2(src, dst)
+            return f"assets/{dst.name}"
+        except OSError as exc:
+            log.warning("Could not copy image %s into assets: %s", src, exc)
+            return None
+
     def _on_layout_insert(self, alt: str, rel_path: str) -> None:
         src_path = Path(rel_path)
-        if self._base_path and src_path.is_absolute() and src_path.exists():
-            assets_dir = self._base_path.parent / "assets"
-            try:
-                assets_dir.mkdir(exist_ok=True)
-                dst = assets_dir / src_path.name
-                if not dst.exists():
-                    shutil.copy2(src_path, dst)
-                rel_path = f"assets/{src_path.name}"
-            except OSError:
-                pass
+        if src_path.is_absolute() and src_path.exists():
+            copied = self._copy_into_assets(src_path)
+            if copied is not None:
+                rel_path = copied
+            elif self._UNSAFE_IN_SRC.search(rel_path):
+                # The path cannot be written into a slide as it stands and
+                # there is nowhere to put a copy.  A tag that renders nothing
+                # is worse than saying why.
+                self.emit(
+                    "notify-user",
+                    f"'{src_path.name}' cannot be linked from an unsaved "
+                    f"presentation because of the spaces or brackets in its "
+                    f"name. Save the presentation first and Presence will "
+                    f"copy the picture next to it."
+                )
+                return
         self._replace_selection(f"![{alt}]({rel_path})")
         self._view.grab_focus()
 
@@ -1145,8 +1209,9 @@ class Editor(Gtk.Box):
         files = file_list.get_files()
         if not files:
             return False
-        inserted  = []
+        inserted   = []
         unreadable = []
+        unsafe     = []
         for gfile in files:
             path_str = gfile.get_path()
             if not path_str:
@@ -1156,21 +1221,19 @@ class Editor(Gtk.Box):
             if suffix not in self._IMAGE_EXTS:
                 continue
             if self._base_path:
-                assets_dir = self._base_path.parent / "assets"
-                try:
-                    assets_dir.mkdir(exist_ok=True)
-                    dst = assets_dir / src.name
-                    if not dst.exists():
-                        shutil.copy2(src, dst)
-                    rel = f"assets/{src.name}"
-                except OSError as exc:
+                rel = self._copy_into_assets(src)
+                if rel is None:
                     # Under Flatpak this is normally the sandbox: the drop
                     # carries a real path the app is not permitted to read.
                     # Inserting it anyway produces a tag that silently
                     # renders nothing, which is worse than saying so.
-                    log.warning("Could not copy dropped image %s: %s", src, exc)
                     unreadable.append(src.name)
                     continue
+            elif self._UNSAFE_IN_SRC.search(str(src)):
+                # Nowhere to copy to, and the path cannot be written into a
+                # slide as it stands.
+                unsafe.append(src.name)
+                continue
             else:
                 rel = str(src)
             alt = src.stem.replace("-", " ").replace("_", " ")
@@ -1182,6 +1245,13 @@ class Editor(Gtk.Box):
             self.emit("notify-user",
                       f"Could not read {names}{more}. Presence may not have "
                       f"permission to open files in that folder.")
+        if unsafe:
+            names = ", ".join(unsafe[:3])
+            more  = f" and {len(unsafe) - 3} more" if len(unsafe) > 3 else ""
+            self.emit("notify-user",
+                      f"Could not add {names}{more} to an unsaved presentation "
+                      f"because of the spaces or brackets in the name. Save the "
+                      f"presentation first and Presence will copy them next to it.")
         if not inserted:
             return False
 
