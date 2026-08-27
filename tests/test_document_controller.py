@@ -67,6 +67,7 @@ class FakeWindow:
         self.toasts = []
         self.converts = 0
         self.packed = 0
+        self.pres_saves = []
 
     # collaborators the controller calls back into
     def _show_error(self, message):  self.errors.append(message)
@@ -78,6 +79,12 @@ class FakeWindow:
     def _refresh_recent_actions(self):    pass
     def _trigger_convert(self):      self.converts += 1
     def _pack_pres(self):            self.packed += 1
+
+    def _setup_pres_save(self, pres_path, on_done=None):
+        self.pres_saves.append(pres_path)
+        self._pres_path = pres_path
+        if on_done is not None:
+            on_done()
     def get_application(self):       return None
 
 

@@ -83,7 +83,8 @@ class SlideFrame:
     height:     int
 
 
-def _measure_folds(document, n_slides: int) -> list[int | None]:
+def _measure_folds(document, n_slides: int,
+                   page_indices: list[int] | None = None) -> list[int | None]:
     """
     Find, per slide, the first source line whose block runs past the slide.
 
@@ -93,19 +94,33 @@ def _measure_folds(document, n_slides: int) -> list[int | None]:
     word count can only guess at.  The data-src-line attributes put there by
     the renderer turn a y coordinate back into a line the writer can edit.
 
+    *page_indices* says which PDF page each slide starts on, as measured by
+    :func:`_slide_page_indices`.  It is not optional information once any
+    slide overflows: WeasyPrint emits a continuation page for that slide, so
+    the n-th page stops being the n-th slide and every fold measured after it
+    would be read off the wrong page — naming a line in a slide the writer
+    was not told about, and leaving the slide that really overflows unmarked.
+    Omitting it means one page per slide, which is what a single-slide canvas
+    render has.
+
     Returns one entry per slide: the line number, or None when it all fits.
     Any failure yields None rather than a wrong line — the box tree is
     WeasyPrint's internal representation and may change between versions.
     """
-    folds: list[int | None] = []
     try:
         pages = list(document.pages)
     except Exception:
         return [None] * n_slides
 
-    for page in pages[:n_slides]:
-        folds.append(_fold_line_for_page(page))
-    folds.extend([None] * (n_slides - len(folds)))
+    if page_indices is None:
+        page_indices = list(range(n_slides))
+
+    folds: list[int | None] = []
+    for index in range(n_slides):
+        page = page_indices[index] if index < len(page_indices) else index
+        folds.append(
+            _fold_line_for_page(pages[page]) if 0 <= page < len(pages) else None
+        )
     return folds
 
 
@@ -596,7 +611,10 @@ class Converter(GObject.Object):
             # the file the writer will actually hand out.
             n_slides = len(slides)
             pages = _slide_page_indices(wp_doc, n_slides)
-            folds = _measure_folds(wp_doc, n_slides)
+            # Measured off each slide's own first page: a slide that overflows
+            # leaves a continuation page behind it, and reading folds in page
+            # order would attribute that page's overrun to the next slide.
+            folds = _measure_folds(wp_doc, n_slides, pages)
             for info, fold, page in zip(slide_info, folds, pages):
                 info["fold_line"]  = fold
                 # Which PDF page this slide starts on.  Not always its own

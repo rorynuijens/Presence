@@ -700,6 +700,26 @@ class MainWindow(Adw.ApplicationWindow):
     # ── Unsaved changes ───────────────────────────────────────────────────────
 
     def _on_close_request(self, win) -> bool:
+        if not self._modified:
+            self._shut_down()
+            return False
+
+        # Torn down only once the window is really going: cancelling the
+        # question — or cancelling the Save As chooser behind it — leaves a
+        # window the writer keeps typing in, and it must keep autosaving.
+        self._documents.show_unsaved_dialog(
+            on_save=self._close_now,
+            on_discard=self._close_now,
+        )
+        return True
+
+    def _close_now(self) -> None:
+        """Stop the window's timers and close it for good."""
+        self._shut_down()
+        self.destroy()
+
+    def _shut_down(self) -> None:
+        """Release everything that outlives a closed window."""
         self._converter.stop_watch()
         for attr in ("_autosave_source", "_size_save_source",
                      "_initial_convert_source", "_sidebar_update_source",
@@ -710,15 +730,6 @@ class MainWindow(Adw.ApplicationWindow):
                 setattr(self, attr, None)
         # Always clean up temp files, regardless of modified state (#44)
         self._cleanup_temp_files()
-
-        if not self._modified:
-            return False
-
-        self._documents.show_unsaved_dialog(
-            on_save=lambda: self.destroy(),
-            on_discard=lambda: self.destroy(),
-        )
-        return True
 
     def _check_unsaved(self, action) -> None:
         self._documents.check_unsaved(action)
@@ -731,14 +742,14 @@ class MainWindow(Adw.ApplicationWindow):
     def restore_autosave(self, text: str) -> None:
         self._documents.restore_autosave(text)
 
-    def _save(self) -> bool:
-        return self._documents.save()
+    def _save(self, on_done=None) -> bool:
+        return self._documents.save(on_done=on_done)
 
-    def _write_document(self) -> bool:
-        return self._documents.write_document()
+    def _write_document(self, on_done=None) -> bool:
+        return self._documents.write_document(on_done=on_done)
 
-    def _save_as_dialog(self) -> bool:
-        return self._documents.save_as_dialog()
+    def _save_as_dialog(self, on_done=None) -> bool:
+        return self._documents.save_as_dialog(on_done=on_done)
 
     # ── Conversion ────────────────────────────────────────────────────────────
 
@@ -821,7 +832,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._pres_temp_dir = None
         self._pres_path = None
 
-    def _setup_pres_save(self, pres_path: Path) -> None:
+    def _setup_pres_save(self, pres_path: Path, on_done=None) -> None:
         """Switch to .pres bundle mode, creating a temp dir for the working copy."""
         old_file_path = self._file_path
         old_pres_temp = self._pres_temp_dir
@@ -844,7 +855,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._file_path = md_path
         self._output_path = tmp_dir / "slides.pdf"
         self._editor.set_base_path(md_path)
-        self._save()
+        self._save(on_done=on_done)
         if old_pres_temp and old_pres_temp != tmp_dir and old_pres_temp.exists():
             shutil.rmtree(old_pres_temp, ignore_errors=True)
 

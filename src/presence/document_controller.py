@@ -44,6 +44,9 @@ class DocumentController:
 
     def __init__(self, window) -> None:
         self._win = window
+        # Set while a Save As chooser is open: what to run once the document
+        # actually reaches disk.
+        self._save_as_done = None
 
     # ── Unsaved changes ───────────────────────────────────────────────────────
 
@@ -73,8 +76,12 @@ class DocumentController:
 
         def _on_response(_dlg, response):
             if response == "save":
-                self.save()
-                on_save()
+                # Not save() then on_save(): for a document that has never
+                # been saved, save() only opens the Save As chooser, so
+                # running the continuation here would close the window — or
+                # replace the buffer — while the file it promised to write is
+                # still an unanswered dialog.  on_save() waits for the write.
+                self.save(on_done=on_save)
             elif response == "discard":
                 win._modified = False
                 on_discard()
@@ -190,7 +197,7 @@ class DocumentController:
 
     # ── Saving ────────────────────────────────────────────────────────────────
 
-    def save(self) -> bool:
+    def save(self, on_done=None) -> bool:
         """
         Write the document, and rebuild only if asked to on every save.
 
@@ -199,18 +206,32 @@ class DocumentController:
         the slide, and the status chip says when the PDF has fallen behind,
         so the build is now something you ask for — from the chip, Ctrl+Return,
         Present, or an export.
-        """
-        if not self.write_document():
-            return False
-        if self._win._auto_convert:
-            self._win._trigger_convert()
-        return True
 
-    def write_document(self) -> bool:
-        """Write the document to disk.  Never builds."""
+        *on_done* runs once the document is on disk, which is **not** always
+        before this returns: a document that has never been saved has to ask
+        for a filename first.  It never runs if the save is cancelled or
+        fails.  The return value only says the save has not already failed;
+        anything that must not happen until the file exists belongs in
+        *on_done*.
+        """
+        def _saved() -> None:
+            if self._win._auto_convert:
+                self._win._trigger_convert()
+            if on_done is not None:
+                on_done()
+
+        return self.write_document(on_done=_saved)
+
+    def write_document(self, on_done=None) -> bool:
+        """
+        Write the document to disk.  Never builds.
+
+        *on_done* runs after the write lands — see :meth:`save` for why it
+        cannot simply be the next statement at the call site.
+        """
         win = self._win
         if win._file_path is None:
-            return self.save_as_dialog()
+            return self.save_as_dialog(on_done=on_done)
         try:
             win._file_path.write_text(win._editor.get_text(), encoding="utf-8")
             if win._pres_path:
@@ -221,12 +242,14 @@ class DocumentController:
             save_last_file(display)
             # Delete any orphaned recovery file (fixes #59)
             delete_recovery_file(display)
-            return True
         except OSError as e:
             win._show_error(f"Could not save: {e}")
             return False
+        if on_done is not None:
+            on_done()
+        return True
 
-    def save_as_dialog(self) -> bool:
+    def save_as_dialog(self, on_done=None) -> bool:
         win = self._win
         dialog = Gtk.FileDialog()
         dialog.set_title("Save As")
@@ -237,16 +260,22 @@ class DocumentController:
         if win._pres_path:
             dialog.set_initial_file(Gio.File.new_for_path(str(win._pres_path)))
         win._active_file_dialog = dialog
+        # Held rather than passed, because the answer comes back through a
+        # GTK callback.  Whoever is waiting on this save waits here.
+        self._save_as_done = on_done
         dialog.save(win, None, self._on_save_as_response)
         return True
 
     def _on_save_as_response(self, dialog, result) -> None:
         win = self._win
         win._active_file_dialog = None
+        # Claim the continuation up front: every path out of here either runs
+        # it or drops it, and none may leave it behind for the next save.
+        on_done, self._save_as_done = self._save_as_done, None
         try:
             gfile = dialog.save_finish(result)
         except GLib.Error:
-            return
+            return                      # cancelled — nothing was written
         path_str = gfile.get_path()
         if not path_str:
             return
@@ -258,11 +287,11 @@ class DocumentController:
             return
 
         if path.suffix.lower() == ".pres":
-            win._setup_pres_save(path)
+            win._setup_pres_save(path, on_done=on_done)
         else:
-            self._save_as_markdown(path)
+            self._save_as_markdown(path, on_done=on_done)
 
-    def _save_as_markdown(self, path: Path) -> None:
+    def _save_as_markdown(self, path: Path, on_done=None) -> None:
         """
         Save a bundle out as a plain .md, taking its assets with it.
 
@@ -286,7 +315,7 @@ class DocumentController:
         win._file_path   = path
         win._output_path = path.with_suffix(".pdf")
         win._editor.set_base_path(path)
-        self.save()
+        self.save(on_done=on_done)
         if old_pres_temp and old_pres_temp.exists():
             shutil.rmtree(old_pres_temp, ignore_errors=True)
 
