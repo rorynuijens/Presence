@@ -127,9 +127,16 @@ def test_a_heading_and_a_picture_sit_side_by_side():
     assert "A statement" in html
 
 
-def test_a_wordless_bleed_gets_no_scrim():
-    """There are no words to protect, and the picture is the whole slide."""
-    assert "slide-image-gradient" not in _render("![a](a.png)")
+@pytest.mark.parametrize("md", [
+    "![a](a.png)",                          # bleed
+    "## H\n\n![a](a.png)",                  # single
+    PROSE + "\n\n![a](a.png)",              # single, text-heavy
+])
+def test_no_slide_lays_a_gradient_over_its_picture(md):
+    """The scrim existed to keep a caption legible; the caption is gone."""
+    html = _render(md)
+    assert "gradient" not in html
+    assert "data-img-fade" not in html
 
 
 def test_a_list_never_sits_on_the_picture():

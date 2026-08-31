@@ -213,12 +213,11 @@ def md_to_html_slides(
                     base_url=base_url, line_offset=line_offset,
                 )
             elif plan.kind == "pair":
-                # The flanking positions are the plan's, not the document's;
-                # the gradients face inward toward the text between them.
+                # The flanking positions are the plan's, not the document's.
                 layout_a = {**AUTO_IMAGE_LAYOUT, "position": "left",
-                            "size": PAIR_SIZE, "fade": "right"}
+                            "size": PAIR_SIZE}
                 layout_b = {**AUTO_IMAGE_LAYOUT, "position": "right",
-                            "size": PAIR_SIZE, "fade": "left"}
+                            "size": PAIR_SIZE}
                 html_frag = _render_two_image_slide(
                     cleaned_md, images[0]["src"], layout_a,
                     images[1]["src"], layout_b,
@@ -237,8 +236,7 @@ def md_to_html_slides(
                     layout["position"] = plan.position
                 if plan.kind == "bleed":
                     # An image with nothing to sit beside fills the slide.
-                    layout.update(position="background",
-                                  size="100", gradient=False)
+                    layout.update(position="background", size="100")
                 html_frag = _render_image_slide(
                     cleaned_md, images[0]["src"], layout,
                     page_num, total_numbered, logo_b64, theme_override,
@@ -276,35 +274,30 @@ def md_to_html_slides(
 
 # ── Geometry helpers ─────────────────────────────────────────────────────────
 
-def _image_geometry(pos: str, size: int, height: int) -> tuple[str, str, str]:
+def _image_geometry(pos: str, size: int, height: int) -> tuple[str, str]:
     """
-    Return (img_style, grad_style, text_pad_style) inline CSS strings for a
-    single-image slide panel.  All size-dependent layout is expressed as
-    inline styles so any integer size 1-100 works without fixed CSS rules.
+    Return (img_style, text_pad_style) inline CSS strings for a single-image
+    slide panel.  All size-dependent layout is expressed as inline styles so
+    any integer size 1-100 works without fixed CSS rules.
     """
     if pos == "background" or size >= 100:
-        img_style  = "top:0;left:0;right:0;bottom:0;width:100%;height:100%;"
-        grad_style = "top:0;left:0;right:0;bottom:0;width:100%;height:100%;"
-        text_pad   = ""
+        img_style = "top:0;left:0;right:0;bottom:0;width:100%;height:100%;"
+        text_pad  = ""
     elif pos == "right":
-        img_style  = f"top:0;right:0;bottom:0;width:{size}%;height:100%;"
-        grad_style = f"top:0;right:0;bottom:0;width:{size}%;"
-        text_pad   = f"padding-right:{size}%;"
+        img_style = f"top:0;right:0;bottom:0;width:{size}%;height:100%;"
+        text_pad  = f"padding-right:{size}%;"
     elif pos == "left":
-        img_style  = f"top:0;left:0;bottom:0;width:{size}%;height:100%;"
-        grad_style = f"top:0;left:0;bottom:0;width:{size}%;"
-        text_pad   = f"padding-left:{size}%;"
+        img_style = f"top:0;left:0;bottom:0;width:{size}%;height:100%;"
+        text_pad  = f"padding-left:{size}%;"
     elif pos == "top":
-        img_style  = f"top:0;left:0;right:0;width:100%;height:{size}%;"
-        grad_style = f"top:0;left:0;right:0;height:{size}%;"
-        text_pad   = f"padding-top:{int(height * size / 100)}px;"
+        img_style = f"top:0;left:0;right:0;width:100%;height:{size}%;"
+        text_pad  = f"padding-top:{int(height * size / 100)}px;"
     elif pos == "bottom":
-        img_style  = f"bottom:0;left:0;right:0;width:100%;height:{size}%;"
-        grad_style = f"bottom:0;left:0;right:0;height:{size}%;"
-        text_pad   = f"padding-bottom:{int(height * size / 100)}px;"
+        img_style = f"bottom:0;left:0;right:0;width:100%;height:{size}%;"
+        text_pad  = f"padding-bottom:{int(height * size / 100)}px;"
     else:
-        img_style = grad_style = text_pad = ""
-    return img_style, grad_style, text_pad
+        img_style = text_pad = ""
+    return img_style, text_pad
 
 
 # ── Slide type renderers ──────────────────────────────────────────────────────
@@ -355,14 +348,9 @@ def _render_image_slide(
     """
     Render a slide that contains an image with flexible layout.
 
-    The gradient is rendered as an absolutely-positioned <div> with
-    background-image: linear-gradient(...).  WeasyPrint supports
-    background-image gradients on regular elements (stored as PDF Patterns)
-    but NOT on ::after pseudo-elements, so we use a real div here.
-
     Geometry (position/size) is expressed via inline styles so any integer
-    size 1-100 works.  data-img-pos and data-img-fade still drive gradient
-    direction in CSS; data-img-fit and data-img-focal drive object-fit/position.
+    size 1-100 works.  data-img-fit and data-img-focal drive
+    object-fit/object-position in CSS.
     """
     content   = render_slide_content(slide_md, line_offset)
     t_attr    = _theme_attr(theme_override)
@@ -370,7 +358,6 @@ def _render_image_slide(
     pos       = layout.get("position", "right")
     size      = int(layout.get("size", "50"))
     opacity   = layout.get("opacity", 75)
-    fade      = layout.get("fade")
     fit       = layout.get("fit", "cover")
     focal     = layout.get("focal", "focal-center")
     grayscale = layout.get("grayscale", 0)
@@ -394,12 +381,11 @@ def _render_image_slide(
     flip_v    = layout.get("flip_v", False)
     zoom      = layout.get("zoom", 100)
 
-    fade_attr  = f' data-img-fade="{_html.escape(fade)}"' if fade else ""
     fit_attr   = f' data-img-fit="{_html.escape(fit)}"' if fit != "cover" else ""
     focal_attr = (f' data-img-focal="{_html.escape(focal)}"'
                   if focal != "focal-center" and fit == "cover" else "")
 
-    img_style, grad_style, text_pad = _image_geometry(pos, size, height)
+    img_style, text_pad = _image_geometry(pos, size, height)
 
     # Build img inline style (opacity + transforms only — filter handled below)
     img_css_parts = [f"opacity:{opacity / 100:.2f}"]
@@ -449,20 +435,15 @@ def _render_image_slide(
                     f' style="background:{_html.escape(tint)};"'
                     f' aria-hidden="true"></div>')
 
-    grad_div = (f'<div class="slide-image-gradient" style="{grad_style}"'
-                f' aria-hidden="true"></div>'
-                if layout.get("gradient", True) else "")
-
     text_style = f' style="{text_pad}"' if text_pad else ""
 
     return (
         f'<div class="slide has-image"'
-        f' data-img-pos="{_html.escape(pos)}"{fade_attr}{fit_attr}{focal_attr}{t_attr}>'
+        f' data-img-pos="{_html.escape(pos)}"{fit_attr}{focal_attr}{t_attr}>'
         f'  <div class="slide-image" style="{img_style}">'
         f'    {img_el}'
         f'    {tint_div}'
         f'  </div>'
-        f'  {grad_div}'
         f'  <div class="slide-text"{text_style}>'
         f'    {content}'
         f'    <div class="slide-number">{page_num} / {total}</div>'
@@ -610,7 +591,7 @@ def _render_two_image_slide(
       left + right  → horizontal: [img] [text] [img]
       top  + bottom → vertical:   [img] / [text] / [img]
 
-    The text sits in the centre; the gradients face inward toward it.
+    The text sits in the centre, between the two pictures.
     """
     content = render_slide_content(slide_md, line_offset)
     t_attr  = _theme_attr(theme_override)
@@ -619,8 +600,6 @@ def _render_two_image_slide(
     pos_b     = layout_b["position"]
     size_a    = int(layout_a["size"])
     size_b    = int(layout_b["size"])
-    grad_a    = layout_a["gradient"]
-    grad_b    = layout_b["gradient"]
     opacity_a = layout_a["opacity"]
     opacity_b = layout_b["opacity"]
     grayscale_a = layout_a["grayscale"]
@@ -657,30 +636,17 @@ def _render_two_image_slide(
 
     axis = "h" if horizontal else "v"
 
-    # Build inline geometry styles; gradient background-image stays in CSS
-    # (direction is always inward, independent of size).
+    # Geometry is inline; the stylesheet only positions the panels.
     if horizontal:
-        img_a_style  = f"top:0;left:0;bottom:0;width:{size_a}%;height:100%;"
-        img_b_style  = f"top:0;right:0;bottom:0;width:{size_b}%;height:100%;"
-        grad_a_style = f"top:0;left:0;bottom:0;width:{size_a}%;"
-        grad_b_style = f"top:0;right:0;bottom:0;width:{size_b}%;"
-        text_style   = f"padding-left:{size_a}%;padding-right:{size_b}%;"
+        img_a_style = f"top:0;left:0;bottom:0;width:{size_a}%;height:100%;"
+        img_b_style = f"top:0;right:0;bottom:0;width:{size_b}%;height:100%;"
+        text_style  = f"padding-left:{size_a}%;padding-right:{size_b}%;"
     else:
-        img_a_style  = f"top:0;left:0;right:0;width:100%;height:{size_a}%;"
-        img_b_style  = f"bottom:0;left:0;right:0;width:100%;height:{size_b}%;"
-        grad_a_style = f"top:0;left:0;right:0;height:{size_a}%;"
-        grad_b_style = f"bottom:0;left:0;right:0;height:{size_b}%;"
-        pad_top      = int(height * size_a / 100)
-        pad_bot      = int(height * size_b / 100)
-        text_style   = f"padding-top:{pad_top}px;padding-bottom:{pad_bot}px;"
-
-    # Gradient divs — real elements so WeasyPrint renders them correctly.
-    grad_a_div = (f'<div class="slide-image-a-gradient" style="{grad_a_style}"'
-                  f' aria-hidden="true"></div>'
-                  if grad_a else "")
-    grad_b_div = (f'<div class="slide-image-b-gradient" style="{grad_b_style}"'
-                  f' aria-hidden="true"></div>'
-                  if grad_b else "")
+        img_a_style = f"top:0;left:0;right:0;width:100%;height:{size_a}%;"
+        img_b_style = f"bottom:0;left:0;right:0;width:100%;height:{size_b}%;"
+        pad_top     = int(height * size_a / 100)
+        pad_bot     = int(height * size_b / 100)
+        text_style  = f"padding-top:{pad_top}px;padding-bottom:{pad_bot}px;"
 
     # CSS filter fallback for two-image slides (PIL unavailable / remote src)
     def _two_img_el(src: str, opacity: float, css_gs: int, css_bl: int) -> str:
@@ -706,11 +672,9 @@ def _render_two_image_slide(
         f'  <div class="slide-image-a" style="{img_a_style}">'
         f'    {_two_img_el(src_a, opacity_a / 100, css_gs_a, css_blur_a)}'
         f'  </div>'
-        f'  {grad_a_div}'
         f'  <div class="slide-image-b" style="{img_b_style}">'
         f'    {_two_img_el(src_b, opacity_b / 100, css_gs_b, css_blur_b)}'
         f'  </div>'
-        f'  {grad_b_div}'
         f'  <div class="slide-text" style="{text_style}">'
         f'    {content}'
         f'    <div class="slide-number">{page_num} / {total}</div>'

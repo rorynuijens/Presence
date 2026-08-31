@@ -377,19 +377,15 @@ a {{
 /*
  * Layout is driven by data attributes on .slide.has-image:
  *   data-img-pos   : left | right | top | bottom | background
- *   data-img-fade  : left | right | top | bottom  (gradient direction override)
  *   data-img-fit   : contain  (omitted = cover, the default)
  *   data-img-focal : focal-top | focal-center | focal-bottom
  *
  * Geometry (panel size/position) is expressed as inline styles on each element
  * in html.py so any integer size 1-100 works without per-size CSS rules here.
  *
- * The gradient is a real <div class="slide-image-gradient"> — NOT a ::after
- * pseudo-element — because WeasyPrint supports background-image gradients
- * on regular elements (as PDF Patterns) but silently drops them on ::after.
- *
- * All gradient colour values are literal (no var()) so WeasyPrint can resolve
- * them without CSS custom-property support.
+ * A picture used to carry a gradient of the theme's background across its
+ * edge, to keep a caption legible on top of it.  Captions are gone and the
+ * picture sits beside the words, so the edge is left hard.
  */
 
 /* ── Image panel ── */
@@ -431,31 +427,6 @@ a {{
 
 .slide.has-image[data-img-focal="focal-top"]    .slide-image img {{ object-position: top; }}
 .slide.has-image[data-img-focal="focal-bottom"] .slide-image img {{ object-position: bottom; }}
-
-/* ── Gradient overlay div ── */
-
-.slide-image-gradient {{
-    position: absolute;
-    z-index: 1;
-    pointer-events: none;
-}}
-
-/* ── Default gradient direction per image position ── */
-/* background-image only; geometry is set as inline styles by html.py.        */
-/* The explicit fade-direction rules below have the SAME specificity and are   */
-/* placed AFTER — cascade order lets them override when data-img-fade is set.  */
-.slide.has-image[data-img-pos="right"]  .slide-image-gradient {{ background-image: linear-gradient(to right,  {t.bg} 0%, transparent 60%); }}
-.slide.has-image[data-img-pos="left"]   .slide-image-gradient {{ background-image: linear-gradient(to left,   {t.bg} 0%, transparent 60%); }}
-.slide.has-image[data-img-pos="top"]    .slide-image-gradient {{ background-image: linear-gradient(to top,    {t.bg} 0%, transparent 60%); }}
-.slide.has-image[data-img-pos="bottom"] .slide-image-gradient {{ background-image: linear-gradient(to bottom, {t.bg} 0%, transparent 60%); }}
-
-/* ── Explicit gradient direction override (data-img-fade attribute) ── */
-/* fade-X: background colour is strongest on side X.                          */
-/* Placed AFTER position defaults — same specificity wins via cascade order.  */
-.slide.has-image[data-img-fade="left"]   .slide-image-gradient {{ background-image: linear-gradient(to right,  {t.bg} 0%, transparent 60%); }}
-.slide.has-image[data-img-fade="right"]  .slide-image-gradient {{ background-image: linear-gradient(to left,   {t.bg} 0%, transparent 60%); }}
-.slide.has-image[data-img-fade="top"]    .slide-image-gradient {{ background-image: linear-gradient(to bottom, {t.bg} 0%, transparent 60%); }}
-.slide.has-image[data-img-fade="bottom"] .slide-image-gradient {{ background-image: linear-gradient(to top,    {t.bg} 0%, transparent 60%); }}
 
 /* ── Text container ── */
 
@@ -598,10 +569,8 @@ a {{
  * data-split="v" (vertical: top+bottom).
  *
  * data-size-a / data-size-b : 30 | 50 | 70  (each image's share)
- * data-grad-a / data-grad-b : 1 = gradient enabled, 0 = disabled
  *
  * All percentages are literal so WeasyPrint needs no CSS custom properties.
- * Gradient divs are emitted as real elements by html.py (WeasyPrint-safe).
  */
 
 /* ── Shared: image panels absolutely positioned, text in normal flow ── */
@@ -631,39 +600,6 @@ a {{
     justify-content: center;
     box-sizing: border-box;
     height: 100%;
-}}
-
-/* ── Two-image slide: geometry is set as inline styles by html.py ── */
-/* Only gradient background-image direction is needed here.         */
-
-/* ── Gradient overlay divs — emitted as real elements by html.py ── */
-/* The gradient div for image-a fades inward (toward the text centre). */
-
-.slide-image-a-gradient,
-.slide-image-b-gradient {{
-    position: absolute;
-    z-index: 1;
-    pointer-events: none;
-}}
-
-/* Horizontal: image-a is left → gradient fades right (to left = bg on left edge) */
-.slide.has-two-images[data-split="h"] .slide-image-a-gradient {{
-    background-image: linear-gradient(to left, {t.bg} 0%, transparent 60%);
-}}
-
-/* Horizontal: image-b is right → gradient fades left */
-.slide.has-two-images[data-split="h"] .slide-image-b-gradient {{
-    background-image: linear-gradient(to right, {t.bg} 0%, transparent 60%);
-}}
-
-/* Vertical: image-a is top → gradient fades downward */
-.slide.has-two-images[data-split="v"] .slide-image-a-gradient {{
-    background-image: linear-gradient(to top, {t.bg} 0%, transparent 60%);
-}}
-
-/* Vertical: image-b is bottom → gradient fades upward */
-.slide.has-two-images[data-split="v"] .slide-image-b-gradient {{
-    background-image: linear-gradient(to bottom, {t.bg} 0%, transparent 60%);
 }}
 
 /* ── Gallery: any number of images the writer did not arrange ──────────── */

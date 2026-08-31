@@ -39,19 +39,22 @@ _SIDES = ("right", "left")
 _PORTRAIT_ASPECT = 0.9
 
 
-# What an automatically placed image looks like. These are the values the
-# token parser used as its defaults, kept exactly so that a deck written
-# before the tokens went away still renders the way it always did wherever
-# its author never overrode them.
+# What an automatically placed image looks like. Mostly the values the token
+# parser used as its defaults, so a deck written before the tokens went away
+# still renders much as it did.
+#
+# The exception is the gradient, which used to lay the theme's background
+# under the edge of every picture and fade it out across 60% of the panel.
+# It was there to keep a caption legible over a photograph; with the picture
+# beside the words rather than behind them there is nothing to protect, and
+# it only softened an edge that reads better hard.
 #
 # This dict is the single owner of the answer. Nothing else in the renderer
 # may read a treatment value off a parsed image.
 AUTO_IMAGE_LAYOUT: dict = {
     "position":  "right",
     "size":      "50",
-    "gradient":  True,
     "opacity":   75,
-    "fade":      None,
     "fit":       "cover",
     "focal":     "focal-center",
     "grayscale": 0,

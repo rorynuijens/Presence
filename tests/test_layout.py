@@ -174,9 +174,15 @@ def test_auto_layout_covers_every_key_the_renderer_reads():
     """A missing key would silently fall back to a .get() default elsewhere,
     which is exactly the drift this dict exists to prevent."""
     assert set(AUTO_IMAGE_LAYOUT) == {
-        "position", "size", "gradient", "opacity", "fade", "fit", "focal",
+        "position", "size", "opacity", "fit", "focal",
         "grayscale", "blur", "tint", "flip_h", "flip_v", "zoom",
     }
+
+
+def test_a_picture_carries_no_gradient_over_its_edge():
+    """It existed to keep a caption legible on a photograph. Both are gone."""
+    assert "gradient" not in AUTO_IMAGE_LAYOUT
+    assert "fade" not in AUTO_IMAGE_LAYOUT
 
 
 def test_auto_layout_applies_no_treatment():
