@@ -186,6 +186,17 @@ def test_a_picture_carries_no_gradient_over_its_edge():
 
 
 def test_auto_layout_applies_no_treatment():
+    """
+    Opacity belongs on this list and was missing from it.
+
+    It sat at 75 while this test passed, so every automatically placed
+    picture was washed out to three-quarters strength — a treatment, applied
+    by the dict whose whole job is to apply none, guarded by a test that did
+    not look at it. The gallery never read the value and showed its pictures
+    at full strength, so the same photograph had two brightnesses depending
+    on how many others shared its slide.
+    """
+    assert AUTO_IMAGE_LAYOUT["opacity"] == 100
     assert AUTO_IMAGE_LAYOUT["grayscale"] == 0
     assert AUTO_IMAGE_LAYOUT["blur"] == 0
     assert AUTO_IMAGE_LAYOUT["zoom"] == 100

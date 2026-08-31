@@ -43,18 +43,20 @@ _PORTRAIT_ASPECT = 0.9
 # parser used as its defaults, so a deck written before the tokens went away
 # still renders much as it did.
 #
-# The exception is the gradient, which used to lay the theme's background
-# under the edge of every picture and fade it out across 60% of the panel.
-# It was there to keep a caption legible over a photograph; with the picture
-# beside the words rather than behind them there is nothing to protect, and
-# it only softened an edge that reads better hard.
+# Two exceptions, and both were there to keep words legible on top of a
+# picture. The gradient laid the theme's background under a picture's edge
+# and faded it across 60% of the panel; the opacity washed the whole picture
+# out to three-quarters strength. With the picture beside the words rather
+# than behind them there is nothing to protect, so the gradient is gone and
+# the picture is shown at full strength — which is what the gallery has
+# always done, since it never read this value at all.
 #
 # This dict is the single owner of the answer. Nothing else in the renderer
 # may read a treatment value off a parsed image.
 AUTO_IMAGE_LAYOUT: dict = {
     "position":  "right",
     "size":      "50",
-    "opacity":   75,
+    "opacity":   100,
     "fit":       "cover",
     "focal":     "focal-center",
     "grayscale": 0,
