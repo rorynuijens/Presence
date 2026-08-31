@@ -136,8 +136,11 @@ class ExportController:
     def _write_pdf(self, path: Path) -> None:
         # The PDF is the build's own output, so exporting one is just building
         # somewhere else.
-        self._win._output_path = path
-        self._win._trigger_convert()
+        win = self._win
+        win._output_path = path
+        win._build_for_export(
+            lambda: win._show_toast(f"PDF exported → {path.name}")
+        )
 
     # ── HTML ──────────────────────────────────────────────────────────────────
 
@@ -152,7 +155,7 @@ class ExportController:
             initial_file=(win._output_path.with_suffix(".html")
                           if not win._pres_path and win._output_path else None),
             on_chosen=lambda dest: win._with_current_build(
-                lambda: self._copy_built_html(dest)
+                lambda: self._copy_built_html(dest), on_wait=win._export_busy
             ),
         )
 
@@ -188,7 +191,8 @@ class ExportController:
             folder = Path(path_str)
             if not folder.is_dir():
                 return
-            win._with_current_build(lambda: self.render_slide_images(folder))
+            win._with_current_build(lambda: self.render_slide_images(folder),
+                                    on_wait=win._export_busy)
 
         win._active_file_dialog = dialog
         dialog.select_folder(win, None, _response)
@@ -205,7 +209,10 @@ class ExportController:
         pages = self._slide_pages()
 
         # Rasterising a whole deck is seconds of work, so it runs off the
-        # main thread and reports back on it.
+        # main thread and reports back on it — with the Export button held
+        # busy meanwhile, since the build it waited for has already let go.
+        win._export_busy(True)
+
         def _render() -> None:
             slides = render_slides_hires(pdf_bytes, width_px=IMAGE_EXPORT_WIDTH,
                                          pages=pages)
@@ -224,6 +231,7 @@ class ExportController:
             win._show_toast(
                 f"{saved} image{'s' if saved != 1 else ''} exported → {folder.name}/"
             )
+            win._export_busy(False)
             return GLib.SOURCE_REMOVE
 
         threading.Thread(target=_render, daemon=True).start()
@@ -241,7 +249,7 @@ class ExportController:
             # A handout is made of slide pictures, so it needs a build that
             # matches the document just as much as any other export does.
             on_chosen=lambda dest: win._with_current_build(
-                lambda: self.write_handout(dest)
+                lambda: self.write_handout(dest), on_wait=win._export_busy
             ),
         )
 
@@ -254,6 +262,7 @@ class ExportController:
         meta, _body = parse_frontmatter(win._editor.get_text())
         slide_info = list(win._slide_info)
         pages = self._slide_pages()
+        win._export_busy(True)
 
         def _render() -> None:
             try:
@@ -277,10 +286,12 @@ class ExportController:
                 win._show_toast(f"Handout exported → {dest.name}")
             except OSError as e:
                 win._show_toast(f"Could not write the handout: {e}")
+            win._export_busy(False)
             return GLib.SOURCE_REMOVE
 
         def _failed(message: str) -> bool:
             win._show_toast(f"Could not build the handout: {message}")
+            win._export_busy(False)
             return GLib.SOURCE_REMOVE
 
         threading.Thread(target=_render, daemon=True).start()

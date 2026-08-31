@@ -459,6 +459,8 @@ class SettingsDialog(Adw.PreferencesDialog):
     def _on_speaking_rate_changed(self, row: "Adw.SpinRow", _param) -> None:
         rate = int(row.get_value())
         self._parent._speaking_rate = rate
+        # The strip quotes a per-slide time, so it has to be told too.
+        self._parent._sidebar.set_speaking_rate(rate)
         save_presentation_prefs({
             "timer_minutes":        self._parent._timer_minutes,
             "auto_convert":         self._parent._auto_convert,
@@ -469,6 +471,8 @@ class SettingsDialog(Adw.PreferencesDialog):
     def _on_speaking_rate_changed_spin(self, spin: Gtk.SpinButton) -> None:
         rate = int(spin.get_value())
         self._parent._speaking_rate = rate
+        # The strip quotes a per-slide time, so it has to be told too.
+        self._parent._sidebar.set_speaking_rate(rate)
         save_presentation_prefs({
             "timer_minutes":        self._parent._timer_minutes,
             "auto_convert":         self._parent._auto_convert,

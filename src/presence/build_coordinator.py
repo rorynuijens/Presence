@@ -43,11 +43,19 @@ class BuildCoordinator:
     def __init__(self, window) -> None:
         self._win = window
         self._fold_lines: list = []
+        # Busy indicators taken by whoever is waiting on the running build,
+        # released together when it lands or fails.
+        self._waiting: list = []
 
     # ── Starting a build ──────────────────────────────────────────────────────
 
-    def trigger(self, *_) -> None:
-        """Build the document as it currently stands."""
+    def trigger(self, *_) -> bool:
+        """
+        Build the document as it currently stands.
+
+        Returns False when no build was started, so a caller holding a busy
+        indicator can let go of it rather than spin forever.
+        """
         win = self._win
         if win._file_path is None:
             # Nothing on disk yet, so the converter — which reads from a
@@ -66,25 +74,50 @@ class BuildCoordinator:
             # write_document() rather than save() so auto-convert cannot
             # recurse back into here.
             if win._modified and not win._documents.write_document():
-                return
+                win._after_build = None
+                self._settle_waits()
+                return False
             win._cleanup_temp_files()
             input_path, output_path = win._file_path, win._output_path
 
         win._converter.convert(input_path, output_path)
+        return True
 
-    def with_current_build(self, action) -> None:
+    def with_current_build(self, action, on_wait=None) -> None:
         """
         Run *action* against a build that matches the document.
 
         Anything consuming the PDF or HTML goes through here, so no export
         or presentation can quietly ship the previous version of the deck.
+
+        *on_wait* is the busy indicator of the control that asked — the
+        Present or Export button — called with True when the action has to
+        wait for a build and with False once that build settles, either way.
+        A deck that is already current never waits, so it is never called.
         """
         win = self._win
         if self.state() == "current" and win._html_uri:
             action()
             return
         win._after_build = action
+        if on_wait is not None:
+            self.wait_for_build(on_wait)
         self.trigger()
+
+    def after_build(self, action) -> None:
+        """Run *action* once the build about to be asked for lands."""
+        self._win._after_build = action
+
+    def wait_for_build(self, on_wait) -> None:
+        """Hold *on_wait* busy until the running build lands or fails."""
+        self._waiting.append(on_wait)
+        on_wait(True)
+
+    def _settle_waits(self) -> None:
+        """Release every indicator waiting on the build that just resolved."""
+        waiting, self._waiting = self._waiting, []
+        for on_wait in waiting:
+            on_wait(False)
 
     # ── What the chip says ────────────────────────────────────────────────────
 
@@ -149,7 +182,6 @@ class BuildCoordinator:
         win._built_text = win._building_text
         self.update_chip()
         win._present_btn.set_sensitive(True)
-        win._share_btn.set_sensitive(True)
         win._output_path = Path(pdf_path)
 
         # No toast: a routine build that succeeded is what the chip is for.
@@ -157,10 +189,6 @@ class BuildCoordinator:
         win._slide_info = converter.slide_info
         win._thumbnails = converter.thumbnails
         win._html_uri   = html_uri
-
-        # Enable presenter mode now that a conversion exists (#27)
-        if win._presenter_action:
-            win._presenter_action.set_enabled(True)
 
         # Anything that was waiting for a current build can run now.
         if win._after_build is not None:
@@ -174,10 +202,19 @@ class BuildCoordinator:
 
         # Stop thumbnail spinners before replacing content (#71)
         win._sidebar.set_converting(False)
+        # Shown against the text this build was made from, not the text being
+        # typed now, so every picture lands beside the words it was rendered
+        # from.  Where the two have drifted apart the live document follows
+        # immediately, carrying these pictures onto the slides they still
+        # belong to and marking the rest as out of date.
         overflow_count = win._sidebar.update_from_conversion(
             converter.slide_info, converter.thumbnails,
+            markdown_text=win._built_text or "",
             wpm=win._speaking_rate,
         ) or 0
+        live_text = win._editor.get_text()
+        if live_text != win._built_text:
+            win._sidebar.update_from_text(live_text)
         if overflow_count:
             s = "slide" if overflow_count == 1 else "slides"
             win._banner.set_title(
@@ -195,6 +232,10 @@ class BuildCoordinator:
         if win._pres_path:
             win._pack_pres()
 
+        # Last, so that whatever this build re-enabled above cannot leave a
+        # button that is still working looking ready.
+        self._settle_waits()
+
     def on_failed(self, _converter, message: str) -> None:
         from .window import _friendly_error
 
@@ -211,6 +252,7 @@ class BuildCoordinator:
         # Show a user-friendly message rather than a raw exception string (#87)
         win._banner.set_title(_friendly_error(message))
         win._banner.set_revealed(True)
+        self._settle_waits()
 
     # ── Fold lines ────────────────────────────────────────────────────────────
 

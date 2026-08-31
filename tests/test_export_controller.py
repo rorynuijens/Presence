@@ -42,15 +42,29 @@ class FakeWindow:
         self.errors = []
         self.converts = 0
         self.deferred = []
+        self.exported = []
+        self.busy = []
 
     def _show_toast(self, message, timeout=None): self.toasts.append(message)
     def _show_error(self, message):              self.errors.append(message)
-    def _trigger_convert(self):                  self.converts += 1
+    def _trigger_convert(self):                  self.converts += 1; return True
+    def _export_busy(self, busy):                self.busy.append(busy)
 
-    def _with_current_build(self, action):
+    def _build_for_export(self, on_done):
+        # The real one always builds, then runs on_done when it lands.
+        self.converts += 1
+        self.exported.append(on_done)
+        on_done()
+
+    def _with_current_build(self, action, on_wait=None):
         # The real one may defer; here it runs, so the test sees the result.
         self.deferred.append(action)
-        action()
+        if on_wait is not None:
+            on_wait(True)
+            action()
+            on_wait(False)
+        else:
+            action()
 
 
 class FakeGFile:

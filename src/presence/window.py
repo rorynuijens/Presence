@@ -20,7 +20,7 @@ from gi.repository import Gtk, Adw, Gio, GLib, Gdk, Pango
 
 from .editor     import Editor
 from .preview    import SlideCanvas
-from .sidebar    import Sidebar
+from .sidebar    import Sidebar, THUMBNAIL_WIDTH
 from .theme_panel    import ThemePanel
 from .inspector      import Inspector
 from .settings_dialog import SettingsDialog
@@ -86,6 +86,48 @@ Notes go below the ^^^ separator.
 These are **speaker notes** — only visible in presenter mode.
 """.lstrip()
 
+
+class _BusyIndicator:
+    """
+    A header button whose icon becomes a spinner while it is working.
+
+    Present and Export can both start work that does not finish on the click:
+    a build has to run first, and an image or handout export then rasterizes
+    the whole deck.  Until now the button went insensitive and the only sign
+    of life was the build chip at the other end of the header — the control
+    the writer pressed looked broken rather than busy.
+
+    Waits are counted rather than flagged, because an export takes one for the
+    build and another for the render and the two overlap; the button has to
+    stay busy until the last of them lets go.
+    """
+
+    def __init__(self, button: Gtk.Widget, icon_name: str) -> None:
+        self._button  = button
+        self._spinner = Gtk.Spinner()
+        self._stack   = Gtk.Stack()
+        self._stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        self._stack.add_named(Gtk.Image.new_from_icon_name(icon_name), "idle")
+        self._stack.add_named(self._spinner, "busy")
+        button.set_child(self._stack)
+        self._waits = 0
+
+    @property
+    def busy(self) -> bool:
+        return self._waits > 0
+
+    def __call__(self, busy: bool) -> None:
+        """Take or release one wait — usable directly as an on_wait callback."""
+        self._waits = max(0, self._waits + (1 if busy else -1))
+        if self._waits:
+            self._spinner.start()
+            self._stack.set_visible_child_name("busy")
+        else:
+            self._stack.set_visible_child_name("idle")
+            self._spinner.stop()
+        self._button.set_sensitive(not self._waits)
+
+
 class MainWindow(Adw.ApplicationWindow):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -120,6 +162,8 @@ class MainWindow(Adw.ApplicationWindow):
         self._initial_convert_source: int | None = None
         # Debounce source for sidebar update from text (#37)
         self._sidebar_update_source: int | None = None
+        # The document the slide now being rendered was read from.
+        self._live_render_text: str = ""
         # Cursor-position polling source for sidebar sync (#28)
         self._cursor_sync_source: int | None = None
         # Cache for cursor-sync: avoid re-parsing unchanged text every 300ms
@@ -172,6 +216,8 @@ class MainWindow(Adw.ApplicationWindow):
         # panel doesn't inflate the window's minimum width at startup.
         if self._theme_panel_open:
             self._theme_panel_btn.set_active(True)
+
+        self._sidebar.set_speaking_rate(self._speaking_rate)
 
         # Apply persisted editor preferences (#50 + editor tab)
         self._editor.set_font_size(prefs.get("font_size", 13))
@@ -404,13 +450,20 @@ class MainWindow(Adw.ApplicationWindow):
         )
         self._share_btn.add_css_class("flat")
         self._share_btn.set_popover(self._build_share_popover())
-        # Disable until a conversion exists
-        self._share_btn.set_sensitive(False)
+        # Enabled from the start.  Every format routes through
+        # _with_current_build(), which builds first when the deck has moved
+        # on, so there is nothing left for a greyed-out button to protect
+        # against — only a control that looked broken until a build happened.
+        self._export_busy = _BusyIndicator(
+            self._share_btn, "document-send-symbolic"
+        )
         bar.pack_end(self._share_btn)
 
         # Present button — converts (if needed) then opens presenter mode.
         self._present_btn = Gtk.Button()
-        self._present_btn.set_child(Gtk.Image.new_from_icon_name("media-playback-start-symbolic"))
+        self._present_busy = _BusyIndicator(
+            self._present_btn, "media-playback-start-symbolic"
+        )
         self._present_btn.set_tooltip_text("Present (Ctrl+P)")
         self._present_btn.update_property(
             [Gtk.AccessibleProperty.LABEL], ["Present"]
@@ -644,7 +697,10 @@ class MainWindow(Adw.ApplicationWindow):
             ("open-pdf",      self._on_open_pdf_clicked,                  None),
             ("show-output",   self._on_show_in_file_manager,              None),
             ("copy-pdf-path", self._on_copy_pdf_path,                     None),
-            ("presenter",    self._on_presenter,                          "<primary>p"),
+            # Through _on_present_clicked, not _on_presenter: the shortcut
+            # used to open the presenter against whatever the last build
+            # left behind, while the button beside it built first.
+            ("presenter",    self._on_present_clicked,                    "<primary>p"),
             # F1 for shortcuts (#45 / #86)
             ("shortcuts",    self._on_shortcuts,                          "F1"),
             ("insert-image",   self._on_insert_image,   None),
@@ -676,9 +732,6 @@ class MainWindow(Adw.ApplicationWindow):
         self.get_application().set_accels_for_action(
             "win.focus-mode", ["<primary><shift>f"]
         )
-
-        # Presenter action: disabled until first successful conversion (#27)
-        self._presenter_action = self.lookup_action("presenter")
 
     def _setup_recent_actions(self) -> None:
         recents = load_recent_files()
@@ -753,8 +806,22 @@ class MainWindow(Adw.ApplicationWindow):
 
     # ── Conversion ────────────────────────────────────────────────────────────
 
-    def _trigger_convert(self, *_) -> None:
-        self._builds.trigger()
+    def _trigger_convert(self, *_) -> bool:
+        return self._builds.trigger()
+
+    def _build_for_export(self, on_done) -> None:
+        """
+        Build the deck to wherever Export just pointed it, and say when it lands.
+
+        Exporting a PDF cannot go through _with_current_build(): the deck may
+        already be current and still need writing to the chosen path, so this
+        always builds.  The Export button holds the wait, which is the only
+        sign the writer gets that a file is on its way — the other three
+        formats finish with a toast, and this one now does too.
+        """
+        self._builds.after_build(on_done)
+        if self._trigger_convert():
+            self._builds.wait_for_build(self._export_busy)
 
     def _cleanup_temp_files(self) -> None:
         for attr in ("_temp_md", "_temp_pdf"):
@@ -889,24 +956,45 @@ class MainWindow(Adw.ApplicationWindow):
             return self._file_path.parent
         return Path.home()
 
+    def _live_render_width(self) -> int | None:
+        """
+        Width to rasterize the slide under the cursor at, or None for nobody.
+
+        Two surfaces want that render and either one is reason enough to pay
+        for it: the canvas wants it at pane width, and with the canvas closed
+        the thumbnail strip still wants it, at thumbnail width, so the row
+        being edited keeps up either way.  With both away there is nothing to
+        show it on and the writer pays nothing.
+        """
+        if not self._canvas.available:
+            return None
+        if self._canvas.get_visible():
+            return self._canvas.render_width
+        if self._left_split.get_show_sidebar():
+            return THUMBNAIL_WIDTH * max(1, self.get_scale_factor())
+        return None
+
     def _refresh_canvas(self, text: str | None = None) -> None:
         """
-        Ask for the current slide to be rendered into the canvas.
+        Ask for the current slide to be rendered, for whoever is showing it.
 
-        Does nothing while the canvas is hidden or the rasterizer is missing,
-        so a writer who has closed the pane pays nothing for it.  The render
-        itself runs on a background thread and lands in _on_canvas_frame;
+        The render runs on a background thread and lands in _on_canvas_frame;
         requests coalesce, so typing quickly never queues stale frames.
         """
-        if not self._canvas.get_visible() or not self._canvas.available:
+        width = self._live_render_width()
+        if width is None:
             return
 
         if text is None:
             text = self._editor.get_text()
 
+        # Kept so the frame that comes back can be matched to the words it
+        # was laid out from; a request that is superseded never arrives, so
+        # whatever does arrive belongs to this text.
+        self._live_render_text = text
         self._converter.render_slide_async(
             text, self._canvas_base_dir(), self._current_slide,
-            self._canvas.render_width, self._on_canvas_frame,
+            width, self._on_canvas_frame,
         )
 
     def _on_canvas_frame(self, frame, error) -> None:
@@ -922,9 +1010,23 @@ class MainWindow(Adw.ApplicationWindow):
                 )
             return
 
-        self._canvas.show_slide(frame.png, frame.width, frame.height)
+        if self._canvas.get_visible():
+            self._canvas.show_slide(frame.png, frame.width, frame.height)
+
+        # Bring the strip up to the text this frame was rendered from before
+        # handing the picture over.  The strip's text update is debounced
+        # twice — the editor settles, then the window does — so it reliably
+        # lands after a render, and a picture applied before it would be
+        # marked out of date again by the words catching up behind it.  This
+        # also lines the row indices up with the slides the frame counted.
+        if self._sidebar_update_source is not None:
+            GLib.source_remove(self._sidebar_update_source)
+        self._flush_sidebar_update(self._live_render_text)
         # The canvas laid this slide out with the same engine the build uses,
         # so its fold is as authoritative as the build's — and it is fresher.
+        # The strip gets the picture for the same reason: the row being
+        # edited need not wait for a build to stop being out of date.
+        self._sidebar.set_live_slide(frame.index, frame.png, frame.fold_line)
         self._set_live_fold(frame.index, frame.fold_line)
 
     def _on_canvas_render_size(self, _canvas) -> None:
@@ -997,8 +1099,9 @@ class MainWindow(Adw.ApplicationWindow):
                 else:
                     break
 
-            if self._slide_info:
-                self._sidebar.scroll_to_index(current)
+            # No longer gated on a build: the strip is read out of the text,
+            # so it has rows to select from the first keystroke.
+            self._sidebar.scroll_to_index(current)
 
             # Follow the cursor across slide boundaries.  Edits within one
             # slide are handled by the live-changed signal instead.
@@ -1082,12 +1185,12 @@ class MainWindow(Adw.ApplicationWindow):
         self._refresh_canvas(new_text)
         self._update_build_chip()
 
-    def _with_current_build(self, action) -> None:
-        self._builds.with_current_build(action)
+    def _with_current_build(self, action, on_wait=None) -> None:
+        self._builds.with_current_build(action, on_wait)
 
     def _on_present_clicked(self, *_) -> None:
         """Build if the deck has moved on, then open presenter mode."""
-        self._with_current_build(self._on_presenter)
+        self._with_current_build(self._on_presenter, on_wait=self._present_busy)
 
     def _on_open_pdf_clicked(self, *_) -> None:
         self._with_current_build(self._open_built_pdf)

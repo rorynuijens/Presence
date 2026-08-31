@@ -2,7 +2,9 @@
 sidebar.py — Slide thumbnail sidebar with drag-to-reorder.
 """
 
+import difflib
 import logging
+from dataclasses import dataclass
 
 import gi
 gi.require_version("Gtk", "4.0")
@@ -13,6 +15,124 @@ log = logging.getLogger(__name__)
 
 from .app_utils import png_bytes_to_texture
 from .slides.script import Timing, slide_timing
+
+
+# Width a thumbnail is displayed at.  The live renderer reads this when the
+# canvas is closed and the strip is the only thing asking for pixels.
+THUMBNAIL_WIDTH  = 240
+THUMBNAIL_HEIGHT = 135
+
+
+@dataclass(frozen=True)
+class _SlideFacts:
+    """What a slide's own source says about it, with no build involved."""
+
+    key:       str          # content identity, for matching rows across edits
+    title:     str
+    timing:    Timing
+    has_notes: bool
+
+
+@dataclass(frozen=True)
+class RowState:
+    """What a row on screen is showing, as far as matching is concerned."""
+
+    key:       str
+    thumbnail: object = None
+    stale:     bool = False
+    overflow:  bool = False
+
+
+def carry_over(previous: "list[RowState]", new_keys: list) -> "list[RowState]":
+    """
+    Match the rows already on screen to the slides now in the document.
+
+    Position is not identity.  Pairing the two lists off by index means that
+    inserting a slide at the top slides every picture below it onto the wrong
+    row — correct title, someone else's picture — and leaves it there until
+    the next build.  A sequence match over slide content anchors the slides
+    that did not change, so only the run that really differs loses its place.
+
+    A slide that was edited keeps its old picture, marked out of date: it is
+    still that slide, and blanking it would strobe the strip on every pause
+    in typing.  A slide that was inserted has no picture to keep.
+    """
+    new_keys = list(new_keys)
+    carried  = [RowState(key=k, stale=True) for k in new_keys]
+    filled: set = set()
+    spent:  set = set()
+
+    matcher = difflib.SequenceMatcher(
+        a=[r.key for r in previous], b=new_keys, autojunk=False
+    )
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            span = i2 - i1
+        elif tag == "replace":
+            span = min(i2 - i1, j2 - j1)
+        else:                                   # insert / delete
+            continue
+        for off in range(span):
+            src = previous[i1 + off]
+            carried[j1 + off] = RowState(
+                key=new_keys[j1 + off],
+                thumbnail=src.thumbnail,
+                # An unchanged slide keeps whatever it was; a changed one is
+                # out of date by definition, however fresh its picture was.
+                stale=src.stale if tag == "equal" else True,
+                overflow=src.overflow,
+            )
+            filled.add(j1 + off)
+            spent.add(i1 + off)
+
+    # A slide moved by editing the text rather than by dragging its row reads
+    # as a deletion and an insertion, and would arrive at its new position
+    # with no picture.  Whatever the sequence match did not place is offered
+    # once more by key alone: same content, same slide, same picture.
+    loose: dict = {}
+    for i, row in enumerate(previous):
+        if i not in spent:
+            loose.setdefault(row.key, []).append(row)
+    for j, key in enumerate(new_keys):
+        if j in filled or not loose.get(key):
+            continue
+        src = loose[key].pop(0)
+        carried[j] = RowState(key=key, thumbnail=src.thumbnail,
+                              stale=src.stale, overflow=src.overflow)
+
+    return carried
+
+
+def read_slides(markdown_text: str, wpm: int = 110) -> "list[_SlideFacts]":
+    """
+    Everything the strip can know from the document alone.
+
+    Both update paths go through here, so a row's number, title, script
+    indicator and timing cannot say one thing while a build is fresh and
+    something else a keystroke later.  Only the picture and the overflow
+    badge are left needing a build, because only they are measured from one.
+
+    The slide is split the way the deck splits it — notes off the body,
+    images out of the text — so the words this times are the words the
+    presenter view and the handout will time too.
+    """
+    from .slides.splitter import (split_slides, infer_slide_title,
+                                  extract_speaker_notes, extract_images)
+    from .slides.frontmatter import parse_frontmatter
+
+    _meta, body = parse_frontmatter(markdown_text)
+
+    facts: list[_SlideFacts] = []
+    for i, slide_md in enumerate(split_slides(body)):
+        slide_body, notes = extract_speaker_notes(slide_md)
+        cleaned, _images  = extract_images(slide_body)
+        facts.append(_SlideFacts(
+            key=f"{slide_body}\x00{notes}",
+            title=infer_slide_title(slide_body, fallback=f"Slide {i + 1}"),
+            timing=slide_timing(notes, cleaned, wpm),
+            has_notes=bool(notes.strip()),
+        ))
+    return facts
 
 
 _css_provider_registered = False
@@ -115,66 +235,90 @@ class Sidebar(Gtk.Box):
 
         self._rows: list[_SlideRow] = []
         self._converting: bool = False   # tracks thumbnail-load state (#71)
+        # The document the rows were last read from, so a settings change can
+        # re-time them without the window handing the text over again.
+        self._source: str = ""
+        # Speaking rate the per-slide timings are quoted at.  Held here so a
+        # text update can time a slide without the window handing it over on
+        # every keystroke; Settings pushes changes in via set_speaking_rate().
+        self._wpm: int = 110
 
     # ── Public API ────────────────────────────────────────────────────────────
 
+    def set_speaking_rate(self, wpm: int) -> None:
+        """Re-time every slide at a new words-per-minute setting."""
+        if wpm == self._wpm:
+            return
+        self._wpm = wpm
+        for row, timing in zip(self._rows, self._timings_at(wpm)):
+            row.set_stats(timing)
+
+    def _timings_at(self, wpm: int) -> list:
+        return [f.timing for f in read_slides(self._source, wpm)]
+
     def set_converting(self, converting: bool) -> None:
-        """Show/hide per-thumbnail spinner overlays during conversion (#71)."""
+        """
+        Spin the rows a build is actually going to change.
+
+        Every row used to spin, which said that a build was running but not
+        what it was for.  A slide that has not moved since the last build is
+        not waiting for anything, and its picture is already right.
+        """
         self._converting = converting
         for row in self._rows:
-            row.set_converting(converting)
+            row.set_converting(converting and row.is_stale())
 
     def update_from_text(self, markdown_text: str) -> None:
-        from .slides.splitter import split_slides, infer_slide_title
-        from .slides.frontmatter import parse_frontmatter
+        """
+        Re-read the document and show what it says, keeping the pictures.
 
-        _, markdown_text = parse_frontmatter(markdown_text)
-        slides = split_slides(markdown_text)
-        titles = [
-            infer_slide_title(s, fallback=f"Slide {i + 1}")
-            for i, s in enumerate(slides)
-        ]
-
-        if len(titles) == len(self._rows):
-            for row, title in zip(self._rows, titles):
-                row.set_title(title)
-            self._update_stack()
-            return
-
-        existing_thumbs = [row.get_thumbnail() for row in self._rows]
-        self._rebuild(titles, notes_list=[""] * len(titles),
-                      thumbnails=existing_thumbs)
+        Called on every pause in typing.  Titles, timings and the script
+        indicator come straight out of the text, so they are never behind;
+        the pictures are carried across from the rows already on screen by
+        :func:`carry_over`, which matches on slide content rather than on
+        position.
+        """
+        self._source = markdown_text
+        facts   = read_slides(markdown_text, self._wpm)
+        carried = carry_over(self._row_states(), [f.key for f in facts])
+        self._apply(facts,
+                    [c.thumbnail for c in carried],
+                    [c.stale     for c in carried],
+                    [c.overflow  for c in carried])
 
     def update_from_conversion(self, slide_info: list[dict], thumbnails: list,
-                               wpm: int = 110) -> None:
+                               markdown_text: str, wpm: int = 110) -> int:
+        """
+        Show the deck a build just made, and return how many slides overflow.
+
+        *markdown_text* is the document the build was made from rather than
+        the one being typed now, so every picture lands beside the words it
+        was rendered from.  The window follows this with the live text when
+        the two have drifted apart.
+        """
+        self._wpm   = wpm
+        self._source = markdown_text
+        facts = read_slides(markdown_text, wpm)
+
+        # Overflow is measured from the laid-out page rather than guessed:
+        # the converter reports the line where each slide runs out of room,
+        # and None when it fits.  A build that predates the measurement
+        # falls back to the old >120-word heuristic.
         import re as _re
-        titles    = [s["title"] for s in slide_info]
-        notes     = [s.get("notes", "") for s in slide_info]
-        has_notes = [bool(n.strip()) for n in notes]
-        word_counts = [
-            len(_re.findall(r'\S+', s.get('body', '')))
-            for s in slide_info
-        ]
-        # A slide takes as long as its script takes to say, so that is what
-        # the strip times it by — the same measure, and the same function,
-        # the presenter view paces against.  Only a slide with no script is
-        # timed by the words standing behind the speaker.
-        timings = [
-            slide_timing(n, s.get('body', ''), wpm)
-            for s, n in zip(slide_info, notes)
-        ]
-        # Overflow stays a fact about the slide, not about the talk, so it
-        # keeps counting the body.  It is measured from the laid-out page
-        # rather than guessed: the converter reports the line where each
-        # slide runs out of room, and None when it fits.  Fall back to the
-        # old >120-word heuristic only when no measurement is available.
-        overflows = [
-            (s["fold_line"] is not None) if s.get("fold_line", "missing") != "missing"
-            else w > 120
-            for s, w in zip(slide_info, word_counts)
-        ]
-        self._rebuild(titles, notes, thumbnails, has_notes,
-                      timings, overflows)
+        overflows = []
+        for i, info in enumerate(slide_info):
+            fold = info.get("fold_line", "missing")
+            if fold != "missing":
+                overflows.append(fold is not None)
+            else:
+                overflows.append(
+                    len(_re.findall(r'\S+', info.get('body', ''))) > 120
+                )
+
+        # Everything here came out of one build, so nothing on screen is
+        # older than the text beside it.
+        return self._apply(facts, thumbnails,
+                           [False] * len(facts), overflows)
 
     def select_slide(self, index: int) -> None:
         if 0 <= index < len(self._rows):
@@ -234,31 +378,66 @@ class Sidebar(Gtk.Box):
         """Switch between empty state and list depending on row count (#54)."""
         self._stack.set_visible_child_name("list" if self._rows else "empty")
 
-    def _rebuild(self, titles, notes_list, thumbnails,
-                 has_notes: list | None = None,
-                 timings: list | None = None,
-                 overflows: list | None = None) -> int:
-        for row in self._rows:
-            self._list.remove(row)
-        self._rows.clear()
+    def _row_states(self) -> list:
+        """The rows on screen, as :func:`carry_over` needs to see them."""
+        return [
+            RowState(key=row.key, thumbnail=row.get_thumbnail(),
+                     stale=row.is_stale(), overflow=row.is_overflow())
+            for row in self._rows
+        ]
 
-        for i, title in enumerate(titles):
-            notes = notes_list[i] if i < len(notes_list) else ""
-            png   = thumbnails[i] if i < len(thumbnails) else None
-            row   = _SlideRow(i + 1, title, notes, png, self)
-            if self._converting:
-                row.set_converting(True)
+    def _make_rows(self, count: int) -> None:
+        """
+        Grow or shrink the strip to *count* rows, reusing the ones that fit.
+
+        Rows are widgets with a selection and a scroll position attached, and
+        the strip is refreshed on every pause in typing; tearing all of them
+        down each time would drop the selection and jump the list.
+        """
+        while len(self._rows) > count:
+            self._list.remove(self._rows.pop())
+        while len(self._rows) < count:
+            row = _SlideRow(len(self._rows) + 1, self)
             self._list.append(row)
             self._rows.append(row)
-            if has_notes is not None and i < len(has_notes):
-                row.set_has_notes(has_notes[i])
-            if timings is not None and i < len(timings):
-                row.set_stats(timings[i])
-            if overflows is not None and i < len(overflows):
-                row.set_overflow(overflows[i])
+
+    def _apply(self, facts: list, thumbnails: list,
+               stale: list, overflows: list) -> int:
+        """Put *facts* on screen and return how many slides overflow."""
+        self._make_rows(len(facts))
+
+        for i, f in enumerate(facts):
+            row = self._rows[i]
+            row.key = f.key
+            row.set_number(i + 1)
+            row.set_title(f.title)
+            row.set_stats(f.timing)
+            row.set_has_notes(f.has_notes)
+            row.set_thumbnail(thumbnails[i] if i < len(thumbnails) else None)
+            row.set_overflow(bool(overflows[i]) if i < len(overflows) else False)
+            is_stale = bool(stale[i]) if i < len(stale) else False
+            row.set_stale(is_stale)
+            row.set_converting(self._converting and is_stale)
 
         self._update_stack()
-        return sum(overflows) if overflows else 0
+        return sum(1 for o in overflows[:len(facts)] if o)
+
+    def set_live_slide(self, index: int, png: bytes, fold_line) -> None:
+        """
+        Replace one row's picture with a fresh render of the slide being edited.
+
+        The canvas has already laid this slide out with the engine that makes
+        the deck, so the strip may as well show the result: the row the writer
+        is working on stops waiting for a build, and its overflow badge is
+        measured rather than remembered.
+        """
+        if not (0 <= index < len(self._rows)):
+            return
+        row = self._rows[index]
+        row.set_thumbnail(png)
+        row.set_overflow(fold_line is not None)
+        row.set_stale(False)
+        row.set_converting(False)
 
     def _on_add_slide_clicked(self, *_) -> None:
         """Emit slide-insert-after with the currently selected index (#90)."""
@@ -307,14 +486,24 @@ class _SlideRow(Gtk.ListBoxRow):
 
     # Display at 240×135 — fits a 260px-wide panel with comfortable margins
     # and is large enough to read heading text and see colour accurately.
-    _DISPLAY_W = 240
-    _DISPLAY_H = 135
+    _DISPLAY_W = THUMBNAIL_WIDTH
+    _DISPLAY_H = THUMBNAIL_HEIGHT
 
-    def __init__(self, number, title, notes, png_bytes, sidebar: Sidebar) -> None:
+    # How far a picture is faded when it is older than the words beside it.
+    # Gentle, because the badge above is what actually says so: a slide on a
+    # white theme barely reads as dimmed at all, and one on a black theme
+    # reads as broken long before this.
+    _STALE_OPACITY = 0.6
+
+    def __init__(self, number: int, sidebar: Sidebar) -> None:
         super().__init__()
         self.index    = number - 1
         self._sidebar = sidebar
         self._png_bytes = None
+        self._stale     = False
+        # Content identity, set by Sidebar._apply.  What makes a row this
+        # slide rather than the slide that happens to sit at its index.
+        self.key: str = ""
 
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         outer.set_margin_top(8)
@@ -330,7 +519,6 @@ class _SlideRow(Gtk.ListBoxRow):
         self._picture.set_size_request(self._DISPLAY_W, self._DISPLAY_H)
         self._picture.set_content_fit(Gtk.ContentFit.CONTAIN)
         self._picture.add_css_class("card")
-        self._set_thumbnail(png_bytes)
         overlay.set_child(self._picture)
 
         self._spinner = Gtk.Spinner()
@@ -372,6 +560,22 @@ class _SlideRow(Gtk.ListBoxRow):
         self._overflow_badge.set_visible(False)
         overlay.add_overlay(self._overflow_badge)
 
+        # Out-of-date marker.  The same icon the header chip uses for
+        # "Rebuild needed", because it means the same thing one slide down:
+        # what you are looking at is older than what you wrote.  Dimming
+        # alone was carrying this and could not — a white slide at 45%
+        # opacity on a white strip is still a white slide.
+        self._stale_icon = Gtk.Image.new_from_icon_name("view-refresh-symbolic")
+        self._stale_icon.set_pixel_size(12)
+        self._stale_icon.set_halign(Gtk.Align.END)
+        self._stale_icon.set_valign(Gtk.Align.START)
+        self._stale_icon.set_margin_end(4)
+        self._stale_icon.set_margin_top(4)
+        self._stale_icon.set_tooltip_text("Edited since the last build")
+        self._stale_icon.add_css_class("dim-label")
+        self._stale_icon.set_visible(False)
+        overlay.add_overlay(self._stale_icon)
+
         outer.append(overlay)
 
         meta_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
@@ -382,7 +586,7 @@ class _SlideRow(Gtk.ListBoxRow):
         self._num_label.add_css_class("dim-label")
         self._num_label.set_valign(Gtk.Align.CENTER)
 
-        self._title_label = Gtk.Label(label=title)
+        self._title_label = Gtk.Label(label="")
         self._title_label.add_css_class("caption")
         self._title_label.set_ellipsize(Pango.EllipsizeMode.END)
         self._title_label.set_xalign(0)
@@ -439,6 +643,32 @@ class _SlideRow(Gtk.ListBoxRow):
     def set_overflow(self, overflow: bool) -> None:
         """Show/hide the FULL overflow warning badge."""
         self._overflow_badge.set_visible(overflow)
+
+    def is_overflow(self) -> bool:
+        return self._overflow_badge.get_visible()
+
+    def is_stale(self) -> bool:
+        return self._stale
+
+    def set_stale(self, stale: bool) -> None:
+        """
+        Mark the picture as older than the words beside it.
+
+        Only a row whose own slide has changed since the build is marked, so
+        the strip says which slides are out of date instead of shading the
+        whole deck on every keystroke.  The header chip is about the deck;
+        this is about one slide.
+        """
+        if stale == self._stale:
+            return
+        self._stale = stale
+        self._stale_icon.set_visible(stale)
+        self._refresh_dimming()
+
+    def _refresh_dimming(self) -> None:
+        """A picture is dimmed only when there is one and it is out of date."""
+        faded = self._stale and self._png_bytes is not None
+        self._picture.set_opacity(self._STALE_OPACITY if faded else 1.0)
 
     def set_stats(self, timing: Timing) -> None:
         """
@@ -524,11 +754,17 @@ class _SlideRow(Gtk.ListBoxRow):
     # ── Thumbnail ─────────────────────────────────────────────────────────────
 
     def _set_thumbnail(self, png_bytes) -> None:
-        self._png_bytes = png_bytes
-        if png_bytes:
-            texture = png_bytes_to_texture(png_bytes)
-            if texture is not None:
-                self._picture.set_paintable(texture)
-                return
-        self._png_bytes = None
-        self._picture.set_paintable(None)
+        """
+        Show *png_bytes* as this slide's picture.
+
+        Returns early when handed the bytes already on screen.  The strip is
+        refreshed on every pause in typing and most rows carry their picture
+        over unchanged; decoding an identical PNG into a texture each time is
+        the entire cost of doing that.
+        """
+        if png_bytes is self._png_bytes:
+            return
+        texture = png_bytes_to_texture(png_bytes) if png_bytes else None
+        self._png_bytes = png_bytes if texture is not None else None
+        self._picture.set_paintable(texture)
+        self._refresh_dimming()

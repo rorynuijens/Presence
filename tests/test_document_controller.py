@@ -42,9 +42,13 @@ class FakeEditor:
 class FakeSidebar:
     def __init__(self) -> None:
         self.texts = []
+        self.wpm = None
 
     def update_from_text(self, text) -> None:
         self.texts.append(text)
+
+    def set_speaking_rate(self, wpm) -> None:
+        self.wpm = wpm
 
 
 class FakeWindow:
