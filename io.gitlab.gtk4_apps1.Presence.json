@@ -215,6 +215,7 @@
             "name": "presence",
             "buildsystem": "simple",
             "build-commands": [
+                "rm -rf build src/presence.egg-info",
                 "pip3 install --prefix=/app --no-build-isolation --no-deps --no-index .",
                 "install -Dm644 data/openssl.cnf /app/etc/openssl.cnf",
                 "install -Dm644 src/presence/presence-markdown.xml /app/share/gtksourceview-5/styles/presence-markdown.xml",
@@ -228,7 +229,15 @@
             "sources": [
                 {
                     "type": "dir",
-                    "path": "."
+                    "path": ".",
+                    "skip": [
+                        "build",
+                        "src/presence.egg-info",
+                        ".flatpak-builder",
+                        "_build",
+                        ".git",
+                        ".pytest_cache"
+                    ]
                 }
             ]
         }
