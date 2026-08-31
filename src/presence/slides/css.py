@@ -485,7 +485,7 @@ a {{
  *
  * align-items controls the cross-axis (horizontal for a column flex container).
  * WeasyPrint's flex support is partial; text-align is the reliable fallback,
- * and WeasyPrint is what lays out the canvas, the room and the PDF alike.
+ * and WeasyPrint is what lays out the strip, the room and the PDF alike.
  *
  * Headings, paragraphs and list items inherit text-align from their container
  * via the explicit rules below (some theme CSS sets text-align on h1/p directly

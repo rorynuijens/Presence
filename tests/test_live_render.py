@@ -1,12 +1,12 @@
 """
-test_canvas_render.py — The live canvas renders what the deck will be.
+test_live_render.py — The live single-slide render is what the deck will be.
 
 The point of the medium path is that the writer, the room and the reader are
 all looking at one WeasyPrint layout.  Two things follow, and both are checked
 here against real renders rather than stand-ins:
 
-*  a canvas frame is the same picture as the corresponding PDF page, and
-*  the fold line the canvas measures is the one a full build would measure.
+*  a live frame is the same picture as the corresponding PDF page, and
+*  the fold line it measures is the one a full build would measure.
 
 The coalescing rule is checked separately, because it is the part that keeps
 typing responsive: a request arriving mid-render replaces the pending one
@@ -63,7 +63,7 @@ def test_a_negative_index_lands_on_the_first_slide(converter, tmp_path):
 
 
 def test_a_document_with_no_slides_is_a_recoverable_refusal(converter, tmp_path):
-    """The canvas shows this as a message, so it must be ValueError, not a crash."""
+    """A slide-less document is an expected state, so ValueError, not a crash."""
     with pytest.raises(ValueError):
         converter._render_frame("", tmp_path, 0, 640)
 
@@ -81,7 +81,7 @@ def test_the_frame_is_rendered_at_the_width_it_was_asked_for(converter, tmp_path
 
 # ── One engine ────────────────────────────────────────────────────────────────
 
-def test_a_canvas_frame_is_the_same_picture_as_the_pdf_page(converter, tmp_path):
+def test_a_live_frame_is_the_same_picture_as_the_pdf_page(converter, tmp_path):
     """
     The whole point of the change: what the writer sees is what the deck is.
 
@@ -130,7 +130,7 @@ def test_an_overflowing_slide_folds_at_a_line_in_that_slide(converter, tmp_path)
 
 def test_the_live_fold_is_the_one_a_build_would_measure(converter, tmp_path):
     """
-    The canvas and the build must not disagree about where a slide runs out.
+    The live render and the build must not disagree about where a slide runs out.
 
     They cannot, now: both measure the same WeasyPrint layout.  This pins that
     down against the converter's own build so a future change cannot quietly

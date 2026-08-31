@@ -159,9 +159,9 @@ class DocumentController:
         win._editor.set_text(text)
         win._sidebar.update_from_text(text)
         # set_text() suppresses the editor's change signals, so drive the
-        # canvas directly — a freshly opened file starts at slide 1.
+        # live render directly — a freshly opened file starts at slide 1.
         win._current_slide = 0
-        win._refresh_canvas(text)
+        win._refresh_live_slide(text)
         win._update_word_count(text)
         win._update_build_chip()
         display = win._pres_path or path
@@ -191,7 +191,7 @@ class DocumentController:
         display = win._pres_path or win._file_path
         base = display.name if display else UNTITLED
         win._set_title(base + " •")
-        win._refresh_canvas(text)
+        win._refresh_live_slide(text)
         win._update_build_chip()
         win._trigger_convert()
 
@@ -202,8 +202,8 @@ class DocumentController:
         Write the document, and rebuild only if asked to on every save.
 
         Saving used to always run a full PDF build, which put seconds between
-        Ctrl+S and being able to type again.  The live canvas already shows
-        the slide, and the status chip says when the PDF has fallen behind,
+        Ctrl+S and being able to type again.  The strip already shows the
+        slide, and the status chip says when the PDF has fallen behind,
         so the build is now something you ask for — from the chip, Ctrl+Return,
         Present, or an export.
 

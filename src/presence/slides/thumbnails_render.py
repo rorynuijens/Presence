@@ -20,11 +20,28 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-# Twice the strip's display size (see sidebar.THUMBNAIL_WIDTH).  A picture
-# shown at 320 logical pixels needs 640 device pixels on a 2x display, and
-# rasterizing at the display size meant every HiDPI screen upscaled the strip.
-THUMB_W = 640
-THUMB_H = 360
+# Twice the widest the strip's size slider goes (sidebar.THUMBNAIL_MAX).
+#
+# Two reasons for the doubling, and both are needed: a picture shown at 480
+# logical pixels needs 960 device pixels on a 2x display, and the slider has
+# to be able to move without re-rendering the deck.  Rasterizing once at the
+# ceiling and letting GtkPicture scale down is what makes dragging it a
+# relayout rather than a rebuild.
+THUMB_W = 960
+THUMB_H = 540
+
+
+def rasterizer_available() -> bool:
+    """True when Poppler and Cairo can be loaded, so slides can be drawn."""
+    try:
+        import cairo  # noqa: F401
+        import gi as _gi
+        _gi.require_version("Poppler", "0.18")
+        from gi.repository import Poppler  # noqa: F401
+    except Exception as e:
+        log.warning("Slide rasterizer unavailable: %s", e)
+        return False
+    return True
 
 
 def _load_pdf_doc(pdf_bytes: bytes):
@@ -239,7 +256,7 @@ def render_page_png(
     """
     Render a single page of *pdf_bytes* to a PNG *width_px* pixels wide.
 
-    The live canvas needs one page at pane resolution rather than the whole
+    The live render needs one page at display resolution rather than the whole
     deck, so this is the one-page sibling of render_slides_hires(): same
     Poppler+Cairo pipeline, one page, no list.
 

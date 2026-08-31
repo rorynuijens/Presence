@@ -1,7 +1,7 @@
 """
 test_window_wiring.py — The window's calls into its child widgets resolve.
 
-MainWindow drives the Editor, Inspector, SlideCanvas and Sidebar by name, and
+MainWindow drives the Editor, Inspector and Sidebar by name, and
 GTK swallows an AttributeError raised inside a signal handler: the button
 simply does nothing, with no traceback and no toast. Renaming
 Editor.open_image_layout_popover() to choose_image_to_insert() left
@@ -25,14 +25,12 @@ gi.require_version("Adw", "1")
 
 from presence.editor import Editor          # noqa: E402
 from presence.inspector import Inspector    # noqa: E402
-from presence.preview import SlideCanvas    # noqa: E402
 from presence.sidebar import Sidebar        # noqa: E402
 
 # The attribute MainWindow holds each collaborator in, and the class behind it.
 COLLABORATORS = {
     "_editor":    Editor,
     "_inspector": Inspector,
-    "_canvas":    SlideCanvas,
     "_sidebar":   Sidebar,
 }
 

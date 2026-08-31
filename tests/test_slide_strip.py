@@ -183,3 +183,51 @@ def test_a_slower_speaker_gets_a_longer_estimate():
     fast = read_slides(DECK, wpm=200)[1].timing.seconds
 
     assert slow > fast
+
+
+# ── How big the strip is ──────────────────────────────────────────────────────
+#
+# The strip is where a slide is looked at now — the separate canvas is gone —
+# so its size is the writer's to set.  The sizes that make that work are
+# chained, and the chain is the thing worth pinning: break it and the slider
+# either stops widening the panel or starts costing a re-render of the deck
+# every time it moves.
+
+from presence.sidebar import (THUMBNAIL_MIN, THUMBNAIL_MAX, THUMBNAIL_DEFAULT,
+                              clamp_thumbnail_width, sidebar_width,
+                              thumbnail_height)
+from presence.slides.thumbnails_render import THUMB_W, THUMB_H
+
+
+def test_pictures_are_rasterized_at_least_twice_the_widest_the_slider_goes():
+    """
+    The invariant that lets the slider be a slider.
+
+    Thumbnails are rendered once, by a build, and scaled down by GtkPicture.
+    If the build stopped rendering them larger than the slider can ask for,
+    dragging it would either blur the strip or force a rebuild of the deck on
+    every move.  Twice over is also what a 2x display needs.
+    """
+    assert THUMB_W >= THUMBNAIL_MAX * 2
+
+
+def test_the_rendered_picture_is_the_shape_the_strip_draws():
+    assert THUMB_W / THUMB_H == pytest.approx(16 / 9)
+    assert thumbnail_height(THUMBNAIL_MAX) == round(THUMBNAIL_MAX * 9 / 16)
+
+
+def test_the_default_size_is_one_the_slider_can_return_to():
+    assert THUMBNAIL_MIN <= THUMBNAIL_DEFAULT <= THUMBNAIL_MAX
+
+
+def test_a_size_from_an_old_session_file_is_held_to_the_slider_s_range():
+    assert clamp_thumbnail_width(THUMBNAIL_MIN - 500) == THUMBNAIL_MIN
+    assert clamp_thumbnail_width(THUMBNAIL_MAX + 500) == THUMBNAIL_MAX
+    assert clamp_thumbnail_width(THUMBNAIL_DEFAULT) == THUMBNAIL_DEFAULT
+
+
+def test_the_panel_is_the_thumbnail_plus_its_margins():
+    """The window sizes the split view off this, so it has to follow."""
+    assert sidebar_width(THUMBNAIL_MIN) > THUMBNAIL_MIN
+    assert (sidebar_width(THUMBNAIL_MAX) - THUMBNAIL_MAX
+            == sidebar_width(THUMBNAIL_MIN) - THUMBNAIL_MIN)

@@ -140,7 +140,7 @@ def md_to_html_slides(
     When *only_index* is given, the returned document contains just that one
     slide's markup — slide numbering and title-slide detection still consider
     the whole deck, so the fragment is identical to the one the full document
-    would contain.  Used by the live canvas, which only ever shows one slide
+    would contain.  Used by the live render, which only ever draws one slide
     and should not pay for markup it will not display.  *slide_info* always
     covers every slide.
 

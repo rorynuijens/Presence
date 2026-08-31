@@ -15,8 +15,8 @@ Three things live here that used to be spread through the window:
    so nothing can quietly ship the previous version of the deck.
 *  **Fold lines.**  Two sources say where a slide runs out of room and they
    agree, because both come from the same WeasyPrint layout: a build measures
-   every slide at once, the canvas measures the slide being edited on every
-   keystroke.  The canvas is always the fresher of the two for the slide it
+   every slide at once, the live render measures the slide being edited on
+   every keystroke.  That one is always the fresher for the slide it
    covers, so its answer wins for that one slide and the build's holds for the
    rest.
 """
@@ -266,7 +266,7 @@ class BuildCoordinator:
         self._win._editor.set_fold_lines(self._fold_lines)
 
     def set_live_fold(self, index: int, fold_line) -> None:
-        """Update one slide's fold line from a canvas render."""
+        """Update one slide's fold line from a live render."""
         if index < 0:
             return
         # A slide added since the last build has no slot yet.

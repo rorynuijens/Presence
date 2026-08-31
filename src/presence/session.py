@@ -74,8 +74,7 @@ def save_window_state(state: dict) -> None:
         "window_height":       int(state.get("height",             860)),
         "window_maximized":    bool(state.get("maximized",         False)),
         "window_theme_panel":  bool(state.get("theme_panel_visible", False)),
-        "window_canvas":       bool(state.get("canvas_visible",    True)),
-        "window_canvas_pos":   int(state.get("canvas_position",    0)),
+        "window_thumb_size":   int(state.get("thumbnail_size",     320)),
     })
 
 
@@ -87,13 +86,11 @@ def load_window_state() -> dict:
             "height":              int(data.get("window_height",      860)),
             "maximized":           bool(data.get("window_maximized",  False)),
             "theme_panel_visible": bool(data.get("window_theme_panel", False)),
-            "canvas_visible":      bool(data.get("window_canvas",     True)),
-            "canvas_position":     int(data.get("window_canvas_pos",  0)),
+            "thumbnail_size":      int(data.get("window_thumb_size",  320)),
         }
     except (OSError, json.JSONDecodeError, TypeError, ValueError):
         return {"width": 1400, "height": 860, "maximized": False,
-                "theme_panel_visible": False, "canvas_visible": True,
-                "canvas_position": 0}
+                "theme_panel_visible": False, "thumbnail_size": 320}
 
 
 # ── Editor preferences ────────────────────────────────────────────────────────

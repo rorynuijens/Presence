@@ -8,8 +8,8 @@ silently rather than loudly:
    was waiting must run exactly once when the build lands — not twice, and
    not at all if the build failed.
 *  Fold lines come from two places that agree by construction: a build
-   measures every slide, the canvas measures the one being edited.  The
-   canvas's answer is fresher for its own slide and must not disturb the rest.
+   measures every slide, the live render measures the one being edited.  The
+   live answer is fresher for its own slide and must not disturb the rest.
 
 Widgets cannot be built under this suite's conftest (GTK 4 has no offscreen
 backend), so these drive the real coordinator against a stand-in window.
@@ -191,7 +191,7 @@ def test_a_build_replaces_every_fold_line():
     assert win._editor.folds == [None, 12, None]
 
 
-def test_the_canvas_updates_only_its_own_slide():
+def test_a_live_render_updates_only_its_own_slide():
     coord, win = coordinator()
     coord.set_build_folds([None, 12, 30])
 

@@ -1,7 +1,7 @@
 """
-test_preview_render.py — Single-slide rendering used by the live canvas.
+test_preview_render.py — Single-slide rendering used by the strip's live row.
 
-The canvas must show exactly what the PDF will contain, so the invariant
+The strip must show exactly what the PDF will contain, so the invariant
 under test is: a fragment rendered with only_index=N is byte-identical to
 that slide's fragment in the full document.
 """
@@ -47,7 +47,7 @@ def test_fragment_matches_the_full_document():
 
 
 def test_slide_info_covers_the_whole_deck():
-    """The sidebar index must not shrink just because one slide was rendered."""
+    """The strip index must not shrink just because one slide was rendered."""
     _, info = _render(DECK, only_index=2)
     assert [s["title"] for s in info] == [
         "Title slide", "Slide 2", "Slide 3", "Slide 4",

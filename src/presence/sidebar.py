@@ -17,19 +17,29 @@ from .app_utils import png_bytes_to_texture
 from .slides.script import Timing, slide_timing
 
 
-# Size a thumbnail is displayed at.  The live renderer reads the width when
-# the canvas is closed and the strip is the only thing asking for pixels.
+# How wide a thumbnail may be drawn, and where the slider starts.
 #
-# 240 was small enough that a heading was a smudge and a slide could only be
-# told apart from its neighbour by its colour — which left the canvas as the
-# only place a slide could actually be looked at.  At this size a heading
-# reads, so the strip answers "does this slide look right?" for most slides
-# and the canvas is left with the ones where the body text matters.
-THUMBNAIL_WIDTH  = 320
-THUMBNAIL_HEIGHT = 180
+# There is no separate slide canvas any more: the strip is where a slide is
+# looked at, so how much room that deserves is the writer's call and not a
+# constant.  Below MIN a slide is a colour swatch; above MAX the strip is
+# eating the text it exists to describe.
+THUMBNAIL_MIN     = 160
+THUMBNAIL_MAX     = 480
+THUMBNAIL_DEFAULT = 320
 
-# The strip's own width: a thumbnail plus the row margins either side of it.
-SIDEBAR_WIDTH = THUMBNAIL_WIDTH + 20
+# Slides are 16:9 at their widest; a 4:3 deck letterboxes inside that.
+def thumbnail_height(width: int) -> int:
+    return round(width * 9 / 16)
+
+
+def clamp_thumbnail_width(width: int) -> int:
+    """Hold a requested thumbnail width inside what the slider offers."""
+    return max(THUMBNAIL_MIN, min(THUMBNAIL_MAX, int(width)))
+
+
+def sidebar_width(thumbnail_width: int) -> int:
+    """The strip's own width: a thumbnail plus the row margins either side."""
+    return thumbnail_width + 20
 
 
 @dataclass(frozen=True)
@@ -188,13 +198,13 @@ class Sidebar(Gtk.Box):
         "slides-reordered":    (GObject.SignalFlags.RUN_FIRST, None, (int, int)),
         # Emitted when the user requests a new slide after *index* (#90)
         "slide-insert-after":  (GObject.SignalFlags.RUN_FIRST, None, (int,)),
-        # Emitted on double-click — caller opens a full-size zoom dialog
-        "slide-zoom-requested": (GObject.SignalFlags.RUN_FIRST, None, (int,)),
+        # Emitted while the size slider moves, with the new thumbnail width
+        "thumbnail-size-changed": (GObject.SignalFlags.RUN_FIRST, None, (int,)),
     }
 
     def __init__(self) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        self.set_size_request(SIDEBAR_WIDTH, -1)
+        self.set_size_request(sidebar_width(THUMBNAIL_DEFAULT), -1)
 
         # ── Toolbar with "add slide" button (#90) ─────────────────────────────
         toolbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
@@ -211,6 +221,24 @@ class Sidebar(Gtk.Box):
         add_btn.add_css_class("flat")
         add_btn.connect("clicked", self._on_add_slide_clicked)
         toolbar.append(add_btn)
+
+        # Thumbnail size.  A slider rather than a menu of steps because the
+        # thing it changes is right underneath it: the writer drags until the
+        # slides are as readable as they need to be for the deck in hand, and
+        # sees the answer while dragging rather than after committing to it.
+        self._size_slider = Gtk.Scale.new_with_range(
+            Gtk.Orientation.HORIZONTAL, THUMBNAIL_MIN, THUMBNAIL_MAX, 8
+        )
+        self._size_slider.set_draw_value(False)
+        self._size_slider.set_hexpand(True)
+        self._size_slider.set_value(THUMBNAIL_DEFAULT)
+        self._size_slider.set_tooltip_text("Thumbnail size")
+        self._size_slider.update_property(
+            [Gtk.AccessibleProperty.LABEL], ["Thumbnail size"]
+        )
+        self._size_slider.set_margin_start(6)
+        self._size_slider.connect("value-changed", self._on_size_slider)
+        toolbar.append(self._size_slider)
 
         self.append(toolbar)
         self.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
@@ -247,12 +275,46 @@ class Sidebar(Gtk.Box):
         # The document the rows were last read from, so a settings change can
         # re-time them without the window handing the text over again.
         self._source: str = ""
+        self._thumb_w: int = THUMBNAIL_DEFAULT
         # Speaking rate the per-slide timings are quoted at.  Held here so a
         # text update can time a slide without the window handing it over on
         # every keystroke; Settings pushes changes in via set_speaking_rate().
         self._wpm: int = 110
 
     # ── Public API ────────────────────────────────────────────────────────────
+
+    @property
+    def thumbnail_width(self) -> int:
+        """How wide a thumbnail is currently drawn."""
+        return self._thumb_w
+
+    def set_thumbnail_size(self, width: int, notify: bool = True) -> None:
+        """
+        Draw thumbnails *width* pixels across, and size the strip to match.
+
+        No re-rendering happens here.  Pictures are rasterized once at the
+        largest size the slider can ask for and scaled down by GtkPicture, so
+        dragging the slider is a relayout rather than a rebuild of the deck —
+        which is the whole reason the size can be a slider at all.
+
+        *notify* is False when applying a stored setting, which is reading
+        the preference rather than changing it.
+        """
+        width = clamp_thumbnail_width(width)
+        if width == self._thumb_w:
+            return
+        self._thumb_w = width
+        height = thumbnail_height(width)
+        for row in self._rows:
+            row.set_display_size(width, height)
+        self.set_size_request(sidebar_width(width), -1)
+        if self._size_slider.get_value() != width:
+            self._size_slider.set_value(width)
+        if notify:
+            self.emit("thumbnail-size-changed", width)
+
+    def _on_size_slider(self, scale: Gtk.Scale) -> None:
+        self.set_thumbnail_size(int(scale.get_value()))
 
     def set_speaking_rate(self, wpm: int) -> None:
         """Re-time every slide at a new words-per-minute setting."""
@@ -407,6 +469,7 @@ class Sidebar(Gtk.Box):
             self._list.remove(self._rows.pop())
         while len(self._rows) < count:
             row = _SlideRow(len(self._rows) + 1, self)
+            row.set_display_size(self._thumb_w, thumbnail_height(self._thumb_w))
             self._list.append(row)
             self._rows.append(row)
 
@@ -435,10 +498,10 @@ class Sidebar(Gtk.Box):
         """
         Replace one row's picture with a fresh render of the slide being edited.
 
-        The canvas has already laid this slide out with the engine that makes
-        the deck, so the strip may as well show the result: the row the writer
-        is working on stops waiting for a build, and its overflow badge is
-        measured rather than remembered.
+        The live render has already laid this slide out with the engine that
+        makes the deck, so the strip shows that result directly: the row the
+        writer is working on stops waiting for a build, and its overflow badge
+        is measured rather than remembered.
         """
         if not (0 <= index < len(self._rows)):
             return
@@ -493,9 +556,6 @@ class Sidebar(Gtk.Box):
 class _SlideRow(Gtk.ListBoxRow):
     """A single slide: thumbnail + number + title, with drag-and-drop."""
 
-    _DISPLAY_W = THUMBNAIL_WIDTH
-    _DISPLAY_H = THUMBNAIL_HEIGHT
-
     # How far a picture is faded when it is older than the words beside it.
     # Gentle, because the badge above is what actually says so: a slide on a
     # white theme barely reads as dimmed at all, and one on a black theme
@@ -519,11 +579,13 @@ class _SlideRow(Gtk.ListBoxRow):
         outer.set_margin_end(8)
 
         # Overlay: picture behind, spinner on top during conversion (#71)
-        overlay = Gtk.Overlay()
-        overlay.set_size_request(self._DISPLAY_W, self._DISPLAY_H)
+        self._overlay = overlay = Gtk.Overlay()
+        overlay.set_size_request(THUMBNAIL_DEFAULT,
+                                 thumbnail_height(THUMBNAIL_DEFAULT))
 
         self._picture = Gtk.Picture()
-        self._picture.set_size_request(self._DISPLAY_W, self._DISPLAY_H)
+        self._picture.set_size_request(THUMBNAIL_DEFAULT,
+                                       thumbnail_height(THUMBNAIL_DEFAULT))
         self._picture.set_content_fit(Gtk.ContentFit.CONTAIN)
         self._picture.add_css_class("card")
         overlay.set_child(self._picture)
@@ -614,12 +676,6 @@ class _SlideRow(Gtk.ListBoxRow):
 
         self.set_child(outer)
 
-        # Double-click opens the full-size zoom dialog
-        click_ctrl = Gtk.GestureClick()
-        click_ctrl.set_button(1)   # primary mouse button
-        click_ctrl.connect("released", self._on_click_released)
-        outer.add_controller(click_ctrl)
-
         drag_source = Gtk.DragSource()
         drag_source.set_actions(Gdk.DragAction.MOVE)
         drag_source.connect("prepare",    self._on_drag_prepare)
@@ -633,6 +689,11 @@ class _SlideRow(Gtk.ListBoxRow):
         outer.add_controller(drop_target)
 
     # ── Public helpers ────────────────────────────────────────────────────────
+
+    def set_display_size(self, width: int, height: int) -> None:
+        """Draw this row's picture *width* x *height*, scaling what it holds."""
+        self._overlay.set_size_request(width, height)
+        self._picture.set_size_request(width, height)
 
     def set_title(self, title: str) -> None:
         self._title_label.set_label(title)
@@ -709,13 +770,6 @@ class _SlideRow(Gtk.ListBoxRow):
         else:
             self._spinner.stop()
             self._spinner.set_visible(False)
-
-    # ── Click callbacks ───────────────────────────────────────────────────────
-
-    def _on_click_released(self, ctrl, n_press, x, y) -> None:
-        """Emit slide-zoom-requested on double-click."""
-        if n_press == 2:
-            self._sidebar.emit("slide-zoom-requested", self.index)
 
     # ── Drag callbacks ────────────────────────────────────────────────────────
 

@@ -131,10 +131,6 @@ def build_shortcuts_window(parent) -> Gtk.ShortcutsWindow:
               </object>
             </child>
             <child>
-              <object class="GtkShortcutsShortcut">
-                <property name="accelerator">F8</property>
-                <property name="title">Toggle live canvas</property>
-              </object>
             </child>
             <child>
               <object class="GtkShortcutsShortcut">

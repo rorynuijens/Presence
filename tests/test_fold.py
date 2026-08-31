@@ -197,7 +197,7 @@ def test_reading_folds_in_page_order_is_what_goes_wrong(laid_out):
 
 
 def test_one_slide_on_its_own_needs_no_mapping(laid_out):
-    """The canvas renders a single slide, so page 0 is that slide's page."""
+    """The live path renders a single slide, so page 0 is that slide's page."""
     from presence.converter import _measure_folds
 
     document, _n = laid_out

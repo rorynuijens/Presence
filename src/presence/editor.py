@@ -218,7 +218,7 @@ class Editor(Gtk.Box):
 
     __gsignals__ = {
         "changed": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
-        # Same edits, shorter fuse — drives the live canvas, which must keep
+        # Same edits, shorter fuse — drives the live render, which must keep
         # up with typing.  Kept separate from "changed" so the heavier
         # sidebar/word-count work stays on the longer debounce.
         "live-changed": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
@@ -906,7 +906,8 @@ class Editor(Gtk.Box):
         Slide structure only, plus an overflow menu.
 
         The bar used to carry twenty buttons and a comment conceding that it
-        clipped; with the live canvas taking half the window it clipped six of
+        clipped; with the slide canvas that used to take half the window it
+        clipped six of
         them off with no scrollbar to reach them.  What stays is the work that
         has no keystroke and no equivalent anywhere else — the separators that
         make a Markdown file a deck, and the two inserts that open a popover.

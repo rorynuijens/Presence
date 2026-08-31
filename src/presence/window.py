@@ -19,8 +19,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, Gio, GLib, Gdk, Pango
 
 from .editor     import Editor
-from .preview    import SlideCanvas
-from .sidebar    import Sidebar, THUMBNAIL_WIDTH, SIDEBAR_WIDTH
+from .sidebar    import Sidebar, sidebar_width
 from .theme_panel    import ThemePanel
 from .inspector      import Inspector
 from .settings_dialog import SettingsDialog
@@ -42,6 +41,7 @@ from .slides.themes import ASPECT_RATIOS
 from .slides.splitter import split_slides
 from .slides.script import document_timing
 from .slides.frontmatter import parse_frontmatter, raw_frontmatter
+from .slides.thumbnails_render import rasterizer_available
 
 
 # Default content shown in every new untitled document (#24).
@@ -138,8 +138,7 @@ class MainWindow(Adw.ApplicationWindow):
         if state.get("maximized"):
             self.maximize()
         self._theme_panel_open: bool = state.get("theme_panel_visible", False)
-        self._canvas_open:      bool = state.get("canvas_visible", True)
-        self._canvas_position:  int  = state.get("canvas_position", 0)
+        self._thumbnail_size:   int  = state.get("thumbnail_size", 320)
 
         self._file_path:     Path | None = None
         self._output_path:   Path | None = None
@@ -168,15 +167,21 @@ class MainWindow(Adw.ApplicationWindow):
         self._cursor_sync_source: int | None = None
         # Cache for cursor-sync: avoid re-parsing unchanged text every 300ms
         self._cursor_sync_cache: tuple[str, list[int]] | None = None
-        # Slide the cursor is currently in — drives the live canvas
+        # Slide the cursor is currently in — drives the live render
         self._current_slide: int = 0
         # Build status: the document text the last successful build contained,
         # against which the status chip decides whether a rebuild is needed.
         self._built_text:    str | None = None
         self._building_text: str | None = None
         self._converting:    bool = False
-        # Debounce source for saving the canvas divider position
-        self._canvas_pos_source: int | None = None
+        # Debounce sources for the thumbnail-size slider: one to save the
+        # setting, one to re-render the slide under the cursor at the new
+        # size.  Both are deferred so dragging stays smooth.
+        self._thumb_size_source: int | None = None
+        self._thumb_render_source: int | None = None
+        # Whether slides can be rasterized at all, so a machine without
+        # Poppler or Cairo does not ask on every keystroke.
+        self._can_rasterize: bool = rasterizer_available()
 
         prefs = load_editor_prefs()
 
@@ -218,6 +223,9 @@ class MainWindow(Adw.ApplicationWindow):
             self._theme_panel_btn.set_active(True)
 
         self._sidebar.set_speaking_rate(self._speaking_rate)
+        # notify=False: this is reading the stored setting, not changing it.
+        self._sidebar.set_thumbnail_size(self._thumbnail_size, notify=False)
+        self._apply_sidebar_width()
 
         # Apply persisted editor preferences (#50 + editor tab)
         self._editor.set_font_size(prefs.get("font_size", 13))
@@ -265,7 +273,6 @@ class MainWindow(Adw.ApplicationWindow):
 
         self._sidebar     = Sidebar()
         self._editor      = Editor()
-        self._canvas      = SlideCanvas()
         self._exports     = ExportController(self)
         self._documents   = DocumentController(self)
         self._builds      = BuildCoordinator(self)
@@ -275,7 +282,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._sidebar.connect("slide-selected",       self._on_slide_selected)
         self._sidebar.connect("slide-insert-after",   self._on_slide_insert_after)
         self._sidebar.connect("slides-reordered",     self._on_slides_reordered)
-        self._sidebar.connect("slide-zoom-requested",  self._on_slide_zoom)
+        self._sidebar.connect("thumbnail-size-changed", self._on_thumbnail_size)
         self._editor.connect_undo_notify(self._on_undo_state_changed)
         self._editor.set_insert_image_callback(self._on_insert_image)
         self._editor.connect("changed",               self._on_editor_changed)
@@ -306,39 +313,22 @@ class MainWindow(Adw.ApplicationWindow):
         panel_box.append(self._inspector)
         self._theme_revealer.set_child(panel_box)
 
-        # Editor ‖ live canvas.  A Paned rather than a fixed split so the
-        # writer decides how much of the window is source and how much is
-        # slide; the divider position is persisted between sessions.
-        self._canvas_paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        self._canvas_paned.set_hexpand(True)
-        self._canvas_paned.set_vexpand(True)
-        self._canvas_paned.set_resize_start_child(True)
-        self._canvas_paned.set_resize_end_child(True)
-        self._canvas_paned.set_shrink_start_child(False)
-        self._canvas_paned.set_shrink_end_child(False)
+        # The window is the source and the strip beside it.  There was a
+        # second pane here showing the slide under the cursor at reading
+        # size, which is now what the strip itself does — at whatever size
+        # the writer sets — so the editor gets the width back.
         self._editor.set_size_request(360, -1)
-        self._canvas.set_size_request(280, -1)
-        self._canvas_paned.set_start_child(self._editor)
-        self._canvas_paned.set_end_child(self._canvas)
-        self._canvas_paned.connect(
-            "notify::position", self._on_canvas_position_changed
-        )
-        # Catches every way the canvas can come back — the toggle, the
-        # breakpoint releasing on a wider window — so it is never restored
-        # showing a slide from before the document changed.
-        self._canvas.connect("notify::visible", self._on_canvas_visibility)
-        self._canvas.connect("render-size-changed", self._on_canvas_render_size)
+        self._editor.set_hexpand(True)
+        self._editor.set_vexpand(True)
 
         editor_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        editor_row.append(self._canvas_paned)
+        editor_row.append(self._editor)
         editor_row.append(self._theme_revealer)
 
         # Left sidebar: thumbnail strip, collapses to drawer on narrow windows.
         self._left_split = Adw.OverlaySplitView()
         self._left_split.set_sidebar_position(Gtk.PackType.START)
         self._left_split.set_sidebar(self._sidebar)
-        self._left_split.set_max_sidebar_width(SIDEBAR_WIDTH)
-        self._left_split.set_min_sidebar_width(0)
         self._left_split.connect(
             "notify::show-sidebar", self._on_left_split_show_changed
         )
@@ -352,36 +342,19 @@ class MainWindow(Adw.ApplicationWindow):
         self._toast_overlay.set_child(self._left_split)
         root.set_content(self._toast_overlay)
 
-        # Apply persisted canvas visibility.  Hiding the widget is enough —
-        # GtkPaned gives the whole width to the remaining child.
-        self._canvas.set_visible(self._canvas_open)
-        if self._canvas_position > 0:
-            self._canvas_paned.set_position(self._canvas_position)
-
-        # Only one breakpoint applies at a time, so the narrower condition
-        # must repeat what the wider one does and be added last.
-        #
-        # Below 1180 px there is not enough room for source and slide
-        # side by side, so the canvas steps aside; below 800 px the
-        # thumbnail sidebar becomes a drawer as well.  Both are restored
-        # to their previous state when the window grows again.
-        bp_canvas = Adw.Breakpoint.new(
-            Adw.BreakpointCondition.parse("max-width: 1180px")
+        # Below this there is not enough room for the source and the strip
+        # side by side, so the strip becomes a drawer and the chip drops its
+        # label.  The threshold follows the chosen thumbnail size, because
+        # what matters is the room left for the text rather than the width of
+        # the window; _apply_sidebar_width() moves it when the slider does.
+        self._narrow_bp = Adw.Breakpoint.new(
+            Adw.BreakpointCondition.parse("max-width: 1px")
         )
-        bp_canvas.add_setter(self._canvas, "visible", False)
-        self.add_breakpoint(bp_canvas)
-
-        # Raised with the strip: a wider sidebar reaches the point where it
-        # crowds the editor sooner, and the number that matters is how much
-        # room is left for the text, not how wide the window is.
-        bp_sidebar = Adw.Breakpoint.new(
-            Adw.BreakpointCondition.parse("max-width: 880px")
-        )
-        bp_sidebar.add_setter(self._canvas, "visible", False)
-        bp_sidebar.add_setter(self._left_split, "collapsed", True)
+        self._narrow_bp.add_setter(self._left_split, "collapsed", True)
         # Header gets crowded; the chip's icon still carries the state.
-        bp_sidebar.add_setter(self._chip_label, "visible", False)
-        self.add_breakpoint(bp_sidebar)
+        self._narrow_bp.add_setter(self._chip_label, "visible", False)
+        self.add_breakpoint(self._narrow_bp)
+        self._apply_sidebar_width()
 
     def _build_header(self) -> Adw.HeaderBar:
         bar = Adw.HeaderBar()
@@ -415,18 +388,6 @@ class MainWindow(Adw.ApplicationWindow):
         bar.set_title_widget(self._title_label)
 
         self._build_chip = self._build_status_chip()
-
-        # Live canvas toggle — shows the slide the cursor is in (F8)
-        self._canvas_btn = Gtk.ToggleButton()
-        self._canvas_btn.set_icon_name("view-reveal-symbolic")
-        self._canvas_btn.set_tooltip_text("Show live canvas (F8)")
-        self._canvas_btn.update_property(
-            [Gtk.AccessibleProperty.LABEL], ["Show live canvas"]
-        )
-        self._canvas_btn.add_css_class("flat")
-        self._canvas_btn.set_active(self._canvas_open)
-        self._canvas_btn.connect("toggled", self._on_canvas_toggled)
-        bar.pack_end(self._canvas_btn)
 
         # Theme panel toggle — right sidebar visibility (F10)
         self._theme_panel_btn = Gtk.ToggleButton()
@@ -711,9 +672,8 @@ class MainWindow(Adw.ApplicationWindow):
             ("bold",   lambda *_: self._editor.bold(),         "<primary>b"),
             ("italic", lambda *_: self._editor.italic(),       "<primary>i"),
             ("link",   lambda *_: self._editor.insert_link(),  "<primary>k"),
-            # Panel toggles: slides F9, canvas F8, themes F10 (#75)
+            # Panel toggles: slides F9, themes F10 (#75)
             ("toggle-sidebar",       self._on_toggle_sidebar,       "F9"),
-            ("toggle-canvas",        self._on_toggle_canvas,        "F8"),
             ("toggle-theme-panel",   self._on_toggle_theme_panel,   "F10"),
         ]
         for name, cb, accel in actions:
@@ -779,7 +739,8 @@ class MainWindow(Adw.ApplicationWindow):
         self._converter.stop_watch()
         for attr in ("_autosave_source", "_size_save_source",
                      "_initial_convert_source", "_sidebar_update_source",
-                     "_cursor_sync_source", "_canvas_pos_source"):
+                     "_cursor_sync_source", "_thumb_size_source",
+                     "_thumb_render_source"):
             src = getattr(self, attr, None)
             if src is not None:
                 GLib.source_remove(src)
@@ -947,41 +908,52 @@ class MainWindow(Adw.ApplicationWindow):
         self._sidebar.update_from_text(text)
         return GLib.SOURCE_REMOVE
 
-    # ── Live canvas ───────────────────────────────────────────────────────────
+    # ── The live slide ────────────────────────────────────────────────────────
 
     def _on_editor_live_changed(self, editor: Editor, text: str) -> None:
         """Editor settled for 150 ms — re-render the slide under the cursor."""
-        self._refresh_canvas(text)
+        self._refresh_live_slide(text)
 
-    def _canvas_base_dir(self) -> Path:
+    def _document_base_dir(self) -> Path:
         """Directory relative image paths in the document resolve against."""
         if self._file_path is not None:
             return self._file_path.parent
         return Path.home()
 
+    def _apply_sidebar_width(self) -> None:
+        """
+        Size the strip to the chosen thumbnail size, and move the breakpoint.
+
+        Both bounds are set to the same number so the strip is exactly that
+        wide: OverlaySplitView otherwise sizes its sidebar as a fraction of
+        the window and the maximum alone would not widen it.
+        """
+        width = sidebar_width(self._sidebar.thumbnail_width)
+        self._left_split.set_min_sidebar_width(width)
+        self._left_split.set_max_sidebar_width(width)
+        # Collapse to a drawer once the editor would be left under ~540px.
+        self._narrow_bp.set_condition(
+            Adw.BreakpointCondition.parse(f"max-width: {width + 540}px")
+        )
+
     def _live_render_width(self) -> int | None:
         """
         Width to rasterize the slide under the cursor at, or None for nobody.
 
-        Two surfaces want that render and either one is reason enough to pay
-        for it: the canvas wants it at pane width, and with the canvas closed
-        the thumbnail strip still wants it, at thumbnail width, so the row
-        being edited keeps up either way.  With both away there is nothing to
-        show it on and the writer pays nothing.
+        The strip is the only thing that shows it now, so this is its
+        thumbnail size in device pixels — and None whenever the strip is put
+        away or the machine cannot rasterize, so a writer who has hidden it
+        pays nothing for it.
         """
-        if not self._canvas.available:
+        if not self._can_rasterize or not self._left_split.get_show_sidebar():
             return None
-        if self._canvas.get_visible():
-            return self._canvas.render_width
-        if self._left_split.get_show_sidebar():
-            return THUMBNAIL_WIDTH * max(1, self.get_scale_factor())
-        return None
+        return self._sidebar.thumbnail_width * max(1, self.get_scale_factor())
 
-    def _refresh_canvas(self, text: str | None = None) -> None:
+    def _refresh_live_slide(self, text: str | None = None) -> None:
         """
-        Ask for the current slide to be rendered, for whoever is showing it.
+        Ask for the slide under the cursor to be re-rendered for the strip.
 
-        The render runs on a background thread and lands in _on_canvas_frame;
+        The render runs on a background thread and lands in _on_live_frame;
         requests coalesce, so typing quickly never queues stale frames.
         """
         width = self._live_render_width()
@@ -996,25 +968,20 @@ class MainWindow(Adw.ApplicationWindow):
         # whatever does arrive belongs to this text.
         self._live_render_text = text
         self._converter.render_slide_async(
-            text, self._canvas_base_dir(), self._current_slide,
-            width, self._on_canvas_frame,
+            text, self._document_base_dir(), self._current_slide,
+            width, self._on_live_frame,
         )
 
-    def _on_canvas_frame(self, frame, error) -> None:
-        """Receive a rendered slide on the main thread and show it."""
+    def _on_live_frame(self, frame, error) -> None:
+        """Receive a rendered slide on the main thread and hand it to the strip."""
         if error is not None:
-            if isinstance(error, ValueError):
-                # Expected, recoverable states — an empty or slide-less document.
-                self._canvas.show_message("Nothing to show yet", str(error))
-            else:
-                log.debug("Canvas render failed", exc_info=error)
-                self._canvas.show_message(
-                    "Cannot render this slide", _friendly_error(str(error))
-                )
+            # Nothing is shown for this: a slide that will not render leaves
+            # its row marked out of date, which is true and is already
+            # visible, and a banner raised on every keystroke while a slide
+            # is halfway typed would be noise.  A real fault in the document
+            # is reported by the build, which is where it can be acted on.
+            log.debug("Live slide render failed", exc_info=error)
             return
-
-        if self._canvas.get_visible():
-            self._canvas.show_slide(frame.png, frame.width, frame.height)
 
         # Bring the strip up to the text this frame was rendered from before
         # handing the picture over.  The strip's text update is debounced
@@ -1025,16 +992,12 @@ class MainWindow(Adw.ApplicationWindow):
         if self._sidebar_update_source is not None:
             GLib.source_remove(self._sidebar_update_source)
         self._flush_sidebar_update(self._live_render_text)
-        # The canvas laid this slide out with the same engine the build uses,
-        # so its fold is as authoritative as the build's — and it is fresher.
-        # The strip gets the picture for the same reason: the row being
-        # edited need not wait for a build to stop being out of date.
+        # This slide was laid out by the same engine the build uses, so its
+        # fold is as authoritative as the build's — and it is fresher.  The
+        # strip gets the picture for the same reason: the row being edited
+        # need not wait for a build to stop being out of date.
         self._sidebar.set_live_slide(frame.index, frame.png, frame.fold_line)
         self._set_live_fold(frame.index, frame.fold_line)
-
-    def _on_canvas_render_size(self, _canvas) -> None:
-        """The pane resized enough that the slide needs re-rasterizing."""
-        self._refresh_canvas()
 
     def _set_build_folds(self, folds: list) -> None:
         self._builds.set_build_folds(folds)
@@ -1042,31 +1005,30 @@ class MainWindow(Adw.ApplicationWindow):
     def _set_live_fold(self, index: int, fold_line) -> None:
         self._builds.set_live_fold(index, fold_line)
 
-    def _on_canvas_toggled(self, btn: Gtk.ToggleButton) -> None:
-        """Show or hide the live canvas (F8)."""
-        visible = btn.get_active()
-        self._canvas.set_visible(visible)
-        self._canvas_open = visible
+    def _on_thumbnail_size(self, _sidebar, width: int) -> None:
+        """
+        The size slider moved: widen the strip, then catch up behind it.
+
+        The resize itself is immediate — the pictures are already rasterized
+        larger than the slider can ask for, so this is a relayout.  The two
+        slower consequences are deferred so a drag stays smooth: writing the
+        setting down, and re-rendering the slide under the cursor, whose
+        picture came from the live path at the old size rather than from the
+        build's oversized one.
+        """
+        self._thumbnail_size = width
+        self._apply_sidebar_width()
+        self._debounce("_thumb_size_source", 400, self._flush_thumbnail_size)
+        self._debounce("_thumb_render_source", 250, self._flush_thumbnail_render)
+
+    def _flush_thumbnail_size(self) -> bool:
+        self._thumb_size_source = None
         self._save_window_state()
+        return GLib.SOURCE_REMOVE
 
-    def _on_canvas_visibility(self, canvas: SlideCanvas, _param) -> None:
-        """Re-render whenever the canvas becomes visible again."""
-        if canvas.get_visible():
-            self._refresh_canvas()
-
-    def _on_toggle_canvas(self, *_) -> None:
-        self._canvas_btn.set_active(not self._canvas_btn.get_active())
-
-    def _on_canvas_position_changed(self, paned: Gtk.Paned, _param) -> None:
-        """Persist the divider position, debounced against drag jitter."""
-        if not self._canvas.get_visible():
-            return
-        self._canvas_position = paned.get_position()
-        self._debounce("_canvas_pos_source", 400, self._flush_canvas_position)
-
-    def _flush_canvas_position(self) -> bool:
-        self._canvas_pos_source = None
-        self._save_window_state()
+    def _flush_thumbnail_render(self) -> bool:
+        self._thumb_render_source = None
+        self._refresh_live_slide()
         return GLib.SOURCE_REMOVE
 
     def _sync_sidebar_to_cursor(self) -> bool:
@@ -1078,8 +1040,8 @@ class MainWindow(Adw.ApplicationWindow):
         when the text has actually changed — avoids calling split_slides()
         3× per second on every keystroke.
 
-        The same position drives the live canvas, which always shows the
-        slide the cursor is in.
+        The same position drives the live render, so the strip's row for the
+        slide the cursor is in is the one kept current.
         """
         try:
             from .slides.utils import compute_slide_offsets
@@ -1110,7 +1072,7 @@ class MainWindow(Adw.ApplicationWindow):
             # slide are handled by the live-changed signal instead.
             if current != self._current_slide:
                 self._current_slide = current
-                self._refresh_canvas(text)
+                self._refresh_live_slide(text)
         except Exception:
             log.debug("Cursor sync error", exc_info=True)
         return GLib.SOURCE_CONTINUE
@@ -1124,10 +1086,10 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_slide_selected(self, sidebar: Sidebar, index: int) -> None:
         self._editor.scroll_to_slide(index)
-        # Update the canvas now rather than waiting for the cursor poll —
-        # a click should land on the slide immediately.
+        # Re-render now rather than waiting for the cursor poll — a click
+        # should land on the slide immediately.
         self._current_slide = index
-        self._refresh_canvas()
+        self._refresh_live_slide()
 
     def _on_slide_insert_after(self, sidebar: Sidebar, after_index: int) -> None:
         """
@@ -1157,7 +1119,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._set_title(base + " •")
         self._sidebar.update_from_text(new_text)
         self._current_slide = insert_at
-        self._refresh_canvas(new_text)
+        self._refresh_live_slide(new_text)
         self._update_build_chip()
         # Scroll editor to the newly inserted slide
         GLib.idle_add(lambda: (self._editor.scroll_to_slide(insert_at), False))
@@ -1185,7 +1147,7 @@ class MainWindow(Adw.ApplicationWindow):
         base = display.name if display else UNTITLED
         self._set_title(base + " •")
         self._sidebar.update_from_text(new_text)
-        self._refresh_canvas(new_text)
+        self._refresh_live_slide(new_text)
         self._update_build_chip()
 
     def _with_current_build(self, action, on_wait=None) -> None:
@@ -1383,29 +1345,16 @@ class MainWindow(Adw.ApplicationWindow):
         display = self._pres_path or self._file_path
         self._set_title((display.name if display else UNTITLED) + " •")
         self._sidebar.update_from_text(new_text)
-        self._refresh_canvas(new_text)
+        self._refresh_live_slide(new_text)
         self._update_build_chip()
 
     def _on_theme_panel_rebuild(self, panel) -> None:
-        """ThemePanel emitted rebuild-needed — restyle the canvas, rebuild the PDF."""
+        """ThemePanel emitted rebuild-needed — restyle the strip, rebuild the PDF."""
         # Theme files may have been edited in place, so drop the cached CSS
         # rather than relying on the cache key alone.
         self._converter.invalidate_render_cache()
-        self._canvas.clear()
-        self._refresh_canvas()
+        self._refresh_live_slide()
         self._trigger_convert()
-
-    def _on_slide_zoom(self, sidebar, index: int) -> None:
-        """Open a full-size view of slide *index* (double-click on thumbnail)."""
-        if not self._thumbnails or index >= len(self._thumbnails):
-            return
-        png = self._thumbnails[index]
-        if not png:
-            return
-        title = (self._slide_info[index]["title"]
-                 if index < len(self._slide_info) else f"Slide {index + 1}")
-        dlg = _SlideZoomDialog(self, index + 1, title, png)
-        dlg.present(self)
 
     # ── Menu action handlers ──────────────────────────────────────────────────
 
@@ -1417,8 +1366,8 @@ class MainWindow(Adw.ApplicationWindow):
             win._sidebar.update_from_text(_STARTER_TEMPLATE)
             win._modified = False          # template is not a user edit
             win.present()
-            # After present(), so the canvas has an allocation to scale into.
-            win._refresh_canvas(_STARTER_TEMPLATE)
+            # After present(), so the strip has an allocation to scale into.
+            win._refresh_live_slide(_STARTER_TEMPLATE)
         self._check_unsaved(_open_new)
 
     def show_open_dialog(self) -> None:
@@ -1571,8 +1520,7 @@ class MainWindow(Adw.ApplicationWindow):
             "height":              self.get_height(),
             "maximized":           self.is_maximized(),
             "theme_panel_visible": self._theme_panel_btn.get_active(),
-            "canvas_visible":      self._canvas_btn.get_active(),
-            "canvas_position":     self._canvas_position,
+            "thumbnail_size":      self._thumbnail_size,
         })
 
     # ── Autosave ──────────────────────────────────────────────────────────────

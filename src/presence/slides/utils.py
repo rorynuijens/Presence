@@ -162,7 +162,7 @@ def image_aspect(src: str, base_url: "str | None") -> "float | None":
     Width / height of *src*, or None when it cannot be determined.
 
     Pillow reads only the header for .size, and the result is cached against
-    the file's mtime, so this stays cheap enough for the live canvas — which
+    the file's mtime, so this stays cheap enough for the live render — which
     re-renders on a 150 ms debounce and would otherwise reopen every image on
     every keystroke.
     """

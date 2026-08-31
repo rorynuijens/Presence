@@ -4,7 +4,7 @@ converter.py — Bridge between the GTK UI and the md_to_slides library.
 One engine, three speeds
 ------------------------
 Everything the writer, the room and the reader see is laid out by WeasyPrint,
-so the canvas, the slideshow, the thumbnails and the PDF are the same picture.
+so the strip, the slideshow, the thumbnails and the PDF are the same picture.
 What differs is only how much of the document each pass covers:
 
 *  ``build_preview()``      — Markdown → HTML for a single slide.  Sub-millisecond,
@@ -12,7 +12,7 @@ What differs is only how much of the document each pass covers:
    markup is, and whether the document has any slides at all.
 *  ``render_slide_async()`` — Markdown → HTML → PDF → PNG for a single slide.
    Tens of milliseconds for text, a few hundred for a gallery; runs on a
-   background thread and drives the live canvas and the live fold marker.
+   background thread and drives the strip's live row and the fold marker.
 *  ``convert()``            — the whole deck → HTML → PDF → thumbnail bitmaps.
    Seconds, background thread, drives the sidebar, export and presenter.
 
@@ -63,7 +63,7 @@ class RenderContext:
 
 @dataclasses.dataclass(frozen=True)
 class Preview:
-    """One rendered slide, ready for the canvas."""
+    """One rendered slide, ready for the strip."""
     html:       str
     index:      int
     n_slides:   int
@@ -74,7 +74,7 @@ class Preview:
 
 @dataclasses.dataclass(frozen=True)
 class SlideFrame:
-    """One slide laid out by WeasyPrint and rasterized, ready for the canvas."""
+    """One slide laid out by WeasyPrint and rasterized, ready for the strip."""
     png:        bytes
     fold_line:  int | None
     index:      int
@@ -100,7 +100,7 @@ def _measure_folds(document, n_slides: int,
     the n-th page stops being the n-th slide and every fold measured after it
     would be read off the wrong page — naming a line in a slide the writer
     was not told about, and leaving the slide that really overflows unmarked.
-    Omitting it means one page per slide, which is what a single-slide canvas
+    Omitting it means one page per slide, which is what a single-slide render
     render has.
 
     Returns one entry per slide: the line number, or None when it all fits.
@@ -277,9 +277,9 @@ class Converter(GObject.Object):
         self._ctx_lock:  threading.Lock       = threading.Lock()
         self._ctx_key:   tuple | None         = None
         self._ctx_value: RenderContext | None = None
-        # Canvas frames.  One worker at a time and at most one waiting
+        # Live frames.  One worker at a time and at most one waiting
         # request: a keystroke arriving mid-render replaces the pending
-        # request rather than queueing behind it, so the canvas can never
+        # request rather than queueing behind it, so the strip can never
         # fall a burst of stale frames behind the cursor.
         self._frame_lock:    threading.Lock = threading.Lock()
         self._frame_serial:  int            = 0
@@ -387,7 +387,7 @@ class Converter(GObject.Object):
         """
         Lay out and rasterize a single slide, off the main thread.
 
-        This is the canvas's path, and it goes through the same WeasyPrint
+        This is the strip's live path, and it goes through the same WeasyPrint
         layout the PDF does — so what the writer sees is what the deck will
         be, down to where the slide runs out of room.
 
@@ -408,7 +408,7 @@ class Converter(GObject.Object):
         threading.Thread(target=self._frame_worker, daemon=True).start()
 
     def _frame_worker(self) -> None:
-        """Render pending canvas frames until none is waiting, then retire."""
+        """Render pending live frames until none is waiting, then retire."""
         while True:
             with self._frame_lock:
                 request = self._frame_pending
@@ -422,7 +422,7 @@ class Converter(GObject.Object):
             error: Exception | None  = None
             try:
                 frame = self._render_frame(text, base_dir, index, width_px)
-            except Exception as exc:              # surfaced to the canvas
+            except Exception as exc:              # surfaced to the caller
                 error = exc
 
             with self._frame_lock:

@@ -77,7 +77,7 @@ class FakeWindow:
     def _show_error(self, message):  self.errors.append(message)
     def _show_toast(self, message, timeout=None): self.toasts.append(message)
     def _set_title(self, title):     self.title = title
-    def _refresh_canvas(self, text=None): pass
+    def _refresh_live_slide(self, text=None): pass
     def _update_word_count(self, text):   pass
     def _update_build_chip(self):    pass
     def _refresh_recent_actions(self):    pass
