@@ -20,8 +20,11 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-THUMB_W = 320
-THUMB_H = 180
+# Twice the strip's display size (see sidebar.THUMBNAIL_WIDTH).  A picture
+# shown at 320 logical pixels needs 640 device pixels on a 2x display, and
+# rasterizing at the display size meant every HiDPI screen upscaled the strip.
+THUMB_W = 640
+THUMB_H = 360
 
 
 def _load_pdf_doc(pdf_bytes: bytes):

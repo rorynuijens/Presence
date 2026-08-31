@@ -20,7 +20,7 @@ from gi.repository import Gtk, Adw, Gio, GLib, Gdk, Pango
 
 from .editor     import Editor
 from .preview    import SlideCanvas
-from .sidebar    import Sidebar, THUMBNAIL_WIDTH
+from .sidebar    import Sidebar, THUMBNAIL_WIDTH, SIDEBAR_WIDTH
 from .theme_panel    import ThemePanel
 from .inspector      import Inspector
 from .settings_dialog import SettingsDialog
@@ -337,7 +337,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._left_split = Adw.OverlaySplitView()
         self._left_split.set_sidebar_position(Gtk.PackType.START)
         self._left_split.set_sidebar(self._sidebar)
-        self._left_split.set_max_sidebar_width(260)
+        self._left_split.set_max_sidebar_width(SIDEBAR_WIDTH)
         self._left_split.set_min_sidebar_width(0)
         self._left_split.connect(
             "notify::show-sidebar", self._on_left_split_show_changed
@@ -371,8 +371,11 @@ class MainWindow(Adw.ApplicationWindow):
         bp_canvas.add_setter(self._canvas, "visible", False)
         self.add_breakpoint(bp_canvas)
 
+        # Raised with the strip: a wider sidebar reaches the point where it
+        # crowds the editor sooner, and the number that matters is how much
+        # room is left for the text, not how wide the window is.
         bp_sidebar = Adw.Breakpoint.new(
-            Adw.BreakpointCondition.parse("max-width: 800px")
+            Adw.BreakpointCondition.parse("max-width: 880px")
         )
         bp_sidebar.add_setter(self._canvas, "visible", False)
         bp_sidebar.add_setter(self._left_split, "collapsed", True)

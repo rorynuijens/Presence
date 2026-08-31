@@ -17,10 +17,19 @@ from .app_utils import png_bytes_to_texture
 from .slides.script import Timing, slide_timing
 
 
-# Width a thumbnail is displayed at.  The live renderer reads this when the
-# canvas is closed and the strip is the only thing asking for pixels.
-THUMBNAIL_WIDTH  = 240
-THUMBNAIL_HEIGHT = 135
+# Size a thumbnail is displayed at.  The live renderer reads the width when
+# the canvas is closed and the strip is the only thing asking for pixels.
+#
+# 240 was small enough that a heading was a smudge and a slide could only be
+# told apart from its neighbour by its colour — which left the canvas as the
+# only place a slide could actually be looked at.  At this size a heading
+# reads, so the strip answers "does this slide look right?" for most slides
+# and the canvas is left with the ones where the body text matters.
+THUMBNAIL_WIDTH  = 320
+THUMBNAIL_HEIGHT = 180
+
+# The strip's own width: a thumbnail plus the row margins either side of it.
+SIDEBAR_WIDTH = THUMBNAIL_WIDTH + 20
 
 
 @dataclass(frozen=True)
@@ -185,7 +194,7 @@ class Sidebar(Gtk.Box):
 
     def __init__(self) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        self.set_size_request(260, -1)
+        self.set_size_request(SIDEBAR_WIDTH, -1)
 
         # ── Toolbar with "add slide" button (#90) ─────────────────────────────
         toolbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
@@ -484,8 +493,6 @@ class Sidebar(Gtk.Box):
 class _SlideRow(Gtk.ListBoxRow):
     """A single slide: thumbnail + number + title, with drag-and-drop."""
 
-    # Display at 240×135 — fits a 260px-wide panel with comfortable margins
-    # and is large enough to read heading text and see colour accurately.
     _DISPLAY_W = THUMBNAIL_WIDTH
     _DISPLAY_H = THUMBNAIL_HEIGHT
 
