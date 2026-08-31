@@ -76,10 +76,12 @@ def test_a_size_token_no_longer_sets_the_width():
     assert "30%" not in html
 
 
-def test_background_is_now_decided_by_how_much_text_there_is():
-    """The token no longer picks it; the length of the text does."""
+def test_background_is_now_decided_by_whether_there_is_any_text():
+    """The token no longer picks it, and neither does short text: only a
+    slide with nothing to set the picture beside gets one."""
     assert 'data-img-pos="right"' in _render(PROSE + "\n\n![a|background](a.png)")
-    assert 'data-img-pos="background"' in _render("## Short\n\n![a](a.png)")
+    assert 'data-img-pos="right"' in _render("## Short\n\n![a](a.png)")
+    assert 'data-img-pos="background"' in _render("![a|right|30](a.png)")
 
 
 def test_a_flanking_pair_is_no_longer_chosen_by_its_tokens():
@@ -117,18 +119,12 @@ def test_an_image_with_prose_shares_the_slide():
     assert 'data-img-pos="right"' in html
 
 
-def test_a_caption_sits_on_the_picture():
-    """The arrangement that used to need |background|."""
+def test_a_heading_and_a_picture_sit_side_by_side():
+    """This used to render as a caption laid over a full-bleed image."""
     html = _render("## A statement\n\n![a](a.png)")
-    assert 'data-img-pos="background"' in html
+    assert 'data-img-pos="right"' in html
+    assert 'data-img-pos="background"' not in html
     assert "A statement" in html
-
-
-def test_a_caption_gets_a_scrim_so_it_can_be_read():
-    """Nothing guarantees a photograph contrasts with the theme's text."""
-    html = _render("## A statement\n\n![a](a.png)")
-    assert "slide-image-gradient" in html
-    assert 'data-img-fade="left"' in html
 
 
 def test_a_wordless_bleed_gets_no_scrim():

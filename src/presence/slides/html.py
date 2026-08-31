@@ -150,6 +150,9 @@ def md_to_html_slides(
     """
     slide_htmls = []
     slide_info  = []
+    # How many lone pictures have been laid out so far, which is what decides
+    # the side the next one takes.
+    lone_images = 0
 
     first_is_title = bool(slides) and is_title_slide(slides[0], 0)
     total_numbered = len(slides) - (1 if first_is_title else 0)
@@ -176,6 +179,16 @@ def md_to_html_slides(
                        if line_offsets is not None and i < len(line_offsets)
                        else None)
 
+        # Counted before the skip below, and over every slide rather than
+        # the rendered one: which side a lone picture takes depends on how
+        # many came before it, so a single-slide render has to arrive at the
+        # same answer the whole deck does or the strip and the PDF would put
+        # the same picture on opposite sides.  The condition is exactly
+        # choose_layout()'s test for a "single", and needs no image shapes.
+        side_ordinal = lone_images
+        if len(images) == 1 and cleaned_md.strip():
+            lone_images += 1
+
         # Markdown rendering is the only costly step here; skip it entirely
         # for slides the caller will not display.
         if only_index is not None and i != only_index:
@@ -191,7 +204,7 @@ def md_to_html_slides(
             # is what lets the pair layout be chosen rather than written.
             aspects = [image_aspect(img.get("src", ""), base_url)
                        for img in images]
-            plan = choose_layout(cleaned_md, images, aspects)
+            plan = choose_layout(cleaned_md, images, aspects, side_ordinal)
             if plan.kind == "gallery":
                 html_frag = _render_gallery_slide(
                     cleaned_md, images, plan,
@@ -220,17 +233,12 @@ def md_to_html_slides(
                 layout = dict(AUTO_IMAGE_LAYOUT)
                 if plan.size is not None:
                     layout["size"] = plan.size
-                if plan.kind in ("bleed", "caption"):
-                    # An image alone on a slide fills it.
+                if plan.position is not None:
+                    layout["position"] = plan.position
+                if plan.kind == "bleed":
+                    # An image with nothing to sit beside fills the slide.
                     layout.update(position="background",
                                   size="100", gradient=False)
-                if plan.kind == "caption":
-                    # Words on a picture are only words if they can be read,
-                    # and nothing guarantees a photograph contrasts with the
-                    # theme's text colour. The gradient lays the theme's own
-                    # background under the caption and clears off the
-                    # picture to the right of it.
-                    layout.update(gradient=True, fade="left")
                 html_frag = _render_image_slide(
                     cleaned_md, images[0]["src"], layout,
                     page_num, total_numbered, logo_b64, theme_override,

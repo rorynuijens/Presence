@@ -11,7 +11,7 @@ import pytest
 
 from presence.slides.layout import (AUTO_IMAGE_LAYOUT, PAIR_SIZE, LayoutPlan,
                                     auto_size, cell_fit, choose_layout,
-                                    gallery_columns, is_caption)
+                                    gallery_columns, single_side)
 
 # Text long enough that it wants a column of its own rather than a picture
 # to sit on. Used wherever a test is about something other than length.
@@ -54,42 +54,51 @@ def test_more_than_two_images_always_reaches_the_gallery(count):
     assert choose_layout(PROSE, imgs, [0.6] * count).kind == "gallery"
 
 
-# ── A caption sits on the picture ────────────────────────────────────────────
-
-def test_a_heading_alone_is_a_caption():
-    assert is_caption("## Just a heading")
-
-
-def test_a_paragraph_is_not_a_caption():
-    assert not is_caption("## H\n\n" + "word " * 40)
-
+# ── A picture goes beside the words, not behind them ─────────────────────────
+#
+# A heading and a picture used to be laid out as a caption over a full-bleed
+# image.  That is a strong effect to apply to a slide whose author only wrote
+# a title and dropped a photograph in, and it is what these pin down instead.
 
 @pytest.mark.parametrize("md", [
+    "## Just a heading",
+    "## H\n\nA short line under it.",
     "## H\n\n- a\n- b",
-    "## H\n\n1. first\n2. second",
     "## H\n\n> quoted",
-    "## H\n\n| a | b |",
-    "## H\n\n```\ncode\n```",
 ])
-def test_structure_is_never_a_caption(md):
-    """Few words, but a list or table over a photo is unreadable."""
-    assert not is_caption(md)
+def test_any_text_beside_a_lone_picture_shares_the_slide(md):
+    assert choose_layout(md, [_img()]).kind == "single"
 
 
-def test_empty_text_is_not_a_caption():
-    """Nothing to caption with — that slide is a bleed for another reason."""
-    assert not is_caption("   ")
+def test_a_heading_and_a_picture_split_the_slide_in_half():
+    plan = choose_layout("## Our new office", [_img()])
+    assert plan.kind == "single"
+    assert plan.size == "50"
 
 
-def test_a_captioned_image_fills_the_slide():
-    """The automatic form of the old |background| token."""
-    assert choose_layout("## A statement", [_img()]).kind == "caption"
-
-
-def test_a_caption_is_a_different_kind_from_a_wordless_bleed():
-    """They render differently: only the caption gets a scrim under it."""
+def test_only_a_wordless_slide_lets_the_picture_take_all_of_it():
+    """There is nothing to set it beside, so a half-empty slide is worse."""
     assert choose_layout("", [_img()]).kind == "bleed"
-    assert choose_layout("## Words", [_img()]).kind == "caption"
+    assert choose_layout("   ", [_img()]).kind == "bleed"
+
+
+# ── Which side it takes ──────────────────────────────────────────────────────
+
+def test_the_first_lone_picture_goes_on_the_right():
+    assert choose_layout("## H", [_img()]).position == "right"
+
+
+def test_the_next_one_goes_on_the_other_side():
+    assert choose_layout("## H", [_img()], side_ordinal=1).position == "left"
+
+
+def test_the_sides_keep_alternating_down_the_deck():
+    assert [single_side(i) for i in range(5)] == [
+        "right", "left", "right", "left", "right"]
+
+
+def test_a_wordless_bleed_has_no_side_to_take():
+    assert choose_layout("", [_img()]).position is None
 
 
 def test_prose_takes_a_column_back_from_the_picture():
@@ -206,16 +215,14 @@ def test_even_grids_have_no_spanning_cells():
 
 # ── Width chosen from how much text shares the slide ─────────────────────────
 
-def test_a_line_of_text_leaves_the_image_most_of_the_slide():
-    assert auto_size(6) == "60"
+def test_a_short_slide_is_split_down_the_middle():
+    """A heading beside a picture is half and half, not a big photograph."""
+    assert auto_size(6) == "50"
+    assert auto_size(25) == "50"
 
 
 def test_a_paragraph_takes_room_back_from_the_image():
     assert auto_size(90) == "40"
-
-
-def test_the_middle_case_is_the_old_fixed_half():
-    assert auto_size(25) == "50"
 
 
 def test_the_width_always_comes_from_the_word_count():

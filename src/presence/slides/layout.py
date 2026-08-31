@@ -21,10 +21,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-import re
-
 __all__ = ["LayoutPlan", "AUTO_IMAGE_LAYOUT", "choose_layout",
-           "gallery_columns", "auto_size", "cell_fit", "is_caption",
+           "gallery_columns", "auto_size", "cell_fit", "single_side",
            "PAIR_SIZE"]
 
 
@@ -32,15 +30,8 @@ __all__ = ["LayoutPlan", "AUTO_IMAGE_LAYOUT", "choose_layout",
 # between them.
 PAIR_SIZE = "30"
 
-# Text this short can sit on a picture without competing with it. Above it,
-# the words need a column of their own. The step matches auto_size()'s first
-# one, where a slide is already judged to be mostly picture.
-_CAPTION_WORDS = 12
-
-# Markdown that wants to be read rather than glanced at. A list or a table
-# over a photograph is a legibility problem however few words it holds.
-_STRUCTURED_MD = re.compile(
-    r"^\s*(?:[-*+]\s|\d+\.\s|>|\||```|    \S)", re.MULTILINE)
+# The two sides a lone picture can take, in the order they are handed out.
+_SIDES = ("right", "left")
 
 # Below this, a picture is taller than it is wide by enough to want a column
 # rather than a row. Two of them either side of the text is the arrangement
@@ -79,34 +70,32 @@ class LayoutPlan:
 
     *kind* selects the renderer:
       "text"    — no images
-      "single"  — one image beside text, its own position honoured
+      "single"  — one image beside text, on the side the plan names
       "bleed"   — one image, no text, filling the slide
       "pair"    — two images flanking text, positions honoured
       "gallery" — a grid; the only arrangement that can hold every image
     """
-    kind:    str
-    columns: int = 0          # gallery only
-    spans:   tuple = field(default_factory=tuple)   # gallery: cells spanning 2
-    size:    str | None = None   # single: chosen width, when none was written
+    kind:     str
+    columns:  int = 0          # gallery only
+    spans:    tuple = field(default_factory=tuple)  # gallery: cells spanning 2
+    size:     str | None = None  # single: chosen width
+    position: str | None = None  # single: which side the picture takes
 
 
-def is_caption(cleaned_md: str) -> bool:
+def single_side(ordinal: int) -> str:
     """
-    Whether a slide's text is brief and plain enough to sit on a picture.
+    Which side the *ordinal*-th lone picture in the deck takes.
 
-    This is the automatic form of the old ``|background|`` token: a heading
-    and a few words over a full-bleed image is a deliberate kind of slide,
-    and the only thing that made it one was the writer saying so. What makes
-    it work is that there is little enough text to read at a glance, and that
-    the text is prose rather than a structure that needs alignment to be
-    read.
+    Right first, then left, then right again. A deck whose every picture sat
+    on the same edge read as a template being filled in; alternating gives
+    the eye somewhere else to go on the next slide.
+
+    This is the one thing here that is not a function of the slide's own
+    content, and it costs what that implies: insert a picture slide near the
+    top and every one below it swaps sides. That is the price of the
+    alternation, and it was chosen knowing it.
     """
-    text = cleaned_md.strip()
-    if not text:
-        return False
-    if _STRUCTURED_MD.search(text):
-        return False
-    return len(text.split()) <= _CAPTION_WORDS
+    return _SIDES[ordinal % len(_SIDES)]
 
 
 def _is_portrait(aspect: "float | None") -> bool:
@@ -118,13 +107,14 @@ def auto_size(word_count: int) -> str:
     """
     How much width an unsized image should take beside *word_count* words.
 
-    A fixed half-and-half wastes the slide when there is a line of text, and
-    crowds it when there is a paragraph. The steps are coarse on purpose:
-    layout that shifts with every word typed would be worse than one that is
-    merely imperfect.
+    Half and half is the answer until the words stop fitting in half a
+    slide, at which point the text takes the extra. A short slide used to
+    give the picture 60% — a heading beside a big photograph — but that is
+    the same instinct that used to put the heading *on* the photograph, and
+    it is not what a title and a picture should look like. The steps are
+    coarse on purpose: layout that shifts with every word typed would be
+    worse than one that is merely imperfect.
     """
-    if word_count <= 12:
-        return "60"
     if word_count <= 40:
         return "50"
     return "40"
@@ -170,7 +160,8 @@ def gallery_columns(count: int) -> tuple[int, tuple]:
 
 
 def choose_layout(cleaned_md: str, images: list,
-                  aspects: "list | None" = None) -> LayoutPlan:
+                  aspects: "list | None" = None,
+                  side_ordinal: int = 0) -> LayoutPlan:
     """
     Pick a layout for a slide.
 
@@ -178,12 +169,14 @@ def choose_layout(cleaned_md: str, images: list,
     the list extract_images() returned; *aspects* holds each image's width /
     height where it could be read, and None where it could not.
 
-    Both arrangements that used to need a token are chosen here instead:
-    a full-bleed picture under a caption, and two portraits flanking the
-    text. Where the shapes cannot be measured the answer falls back to the
-    gallery, which shows everything.
+    *side_ordinal* is how many lone pictures come before this slide in the
+    deck, which decides which side this one takes; see single_side().
 
-    Kinds: "text", "bleed", "caption", "single", "pair", "gallery".
+    Two portraits flanking the text is chosen here rather than written. Where
+    the shapes cannot be measured the answer falls back to the gallery, which
+    shows everything.
+
+    Kinds: "text", "bleed", "single", "pair", "gallery".
     """
     count = len(images)
     if count == 0:
@@ -195,15 +188,17 @@ def choose_layout(cleaned_md: str, images: list,
         return aspects[i] if i < len(aspects) else None
 
     if count == 1:
+        # Nothing to set the picture beside, so it takes the slide. Anything
+        # else would be a half-empty slide.
         if not cleaned_md.strip():
             return LayoutPlan("bleed")
-        # A caption sits on the picture rather than beside it. It is a
-        # separate kind from a wordless bleed because it has to be readable:
-        # the renderer lays a scrim under the words, which a picture with no
-        # words on it must not get.
-        if is_caption(cleaned_md):
-            return LayoutPlan("caption")
-        return LayoutPlan("single", size=auto_size(len(cleaned_md.split())))
+        # Everything else goes beside the words rather than behind them.
+        # A heading and a picture used to be laid out as a caption over a
+        # full-bleed image, which is a strong effect to apply to a slide
+        # whose author only wrote a title and dropped in a photograph.
+        return LayoutPlan("single",
+                          size=auto_size(len(cleaned_md.split())),
+                          position=single_side(side_ordinal))
 
     if count == 2 and cleaned_md.strip():
         # Two tall pictures with text between them is a row of three
