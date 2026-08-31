@@ -117,11 +117,12 @@ def build_themes_page(parent_window, converter,
     Build the "Manage themes" preferences page.
 
     This page handles installing, uninstalling and locating theme packages.
-    Theme *selection* now lives in the Slides tab of SettingsDialog — there
-    is no "Use this theme" button here to avoid the split-controls anti-pattern.
+    Theme *selection* lives in the inspector, beside the document whose
+    frontmatter it writes — there is no "Use this theme" button here, to
+    avoid the split-controls anti-pattern.
 
     *settings_dialog* is the SettingsDialog that owns this page; it is used
-    to refresh the theme grid after install/uninstall.
+    to refresh the inspector's swatches after install/uninstall.
     """
     page = Adw.PreferencesPage()
     page.set_title("Manage themes")
@@ -145,7 +146,7 @@ def build_themes_page(parent_window, converter,
         lambda *_: ThemeEditor(
             parent_window,
             on_installed=lambda t: _on_installed(t, page, converter),
-        ).present(),
+        ).present(parent_window),
     )
     new_theme_row.add_suffix(new_theme_btn)
     install_group.add(new_theme_row)
@@ -280,7 +281,7 @@ def _build_theme_row(theme: Theme, parent_window, converter,
                 parent_window,
                 existing_theme=theme,
                 on_installed=lambda t: _populate_themes(group, parent_window, converter),
-            ).present(),
+            ).present(parent_window),
         )
         actions_row.add_suffix(edit_btn)
 
@@ -341,7 +342,7 @@ def _on_install_response(dialog, result, page, converter) -> None:
 def _on_installed(theme: Theme, page, converter) -> bool:
     _populate_themes(page._themes_group, page._parent_window, converter)
     if page._settings_dialog is not None:
-        page._settings_dialog.refresh_theme_grid()
+        page._settings_dialog.refresh_themes()
     # Show a toast via the window's toast overlay (fixes #2)
     toast = Adw.Toast(title=f"Theme '{theme.name}' installed")
     toast.set_timeout(3)
@@ -384,11 +385,11 @@ def _on_uninstall(slug: str, parent_window, group, converter) -> None:
                 _thumb_cache.invalidate(slug)
                 uninstall_theme(slug)
                 _populate_themes(group, parent_window, converter)
-                # Sync the Appearance ComboRow via the stored dialog ref (#2)
+                # Sync the inspector's swatches via the stored dialog ref (#2)
                 if hasattr(parent_window, "_settings_dialog_ref"):
                     sd = parent_window._settings_dialog_ref
                     if sd is not None:
-                        sd.refresh_theme_grid()
+                        sd.refresh_themes()
             except (ValueError, OSError) as exc:
                 _show_install_error(str(exc), parent_window)
 

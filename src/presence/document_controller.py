@@ -158,6 +158,7 @@ class DocumentController:
         win._editor.set_base_path(path)
         win._editor.set_text(text)
         win._sidebar.update_from_text(text)
+        win._sync_panel_to_document(text)
         # set_text() suppresses the editor's change signals, so drive the
         # live render directly — a freshly opened file starts at slide 1.
         win._current_slide = 0
@@ -187,6 +188,7 @@ class DocumentController:
         """Put a recovered draft back in the editor, still unsaved."""
         win = self._win
         win._editor.set_text(text)
+        win._sync_panel_to_document(text)
         win._modified = True
         display = win._pres_path or win._file_path
         base = display.name if display else UNTITLED

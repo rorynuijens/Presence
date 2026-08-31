@@ -1,5 +1,5 @@
 """
-inspector.py — Right panel holding the current slide's settings.
+inspector.py — Right panel holding the deck's own settings.
 
 The panel used to be a permanent theme browser: 27 swatches occupying the
 window's third column whether or not you were choosing a theme.  Theme
@@ -10,6 +10,11 @@ It briefly carried a second context — the layout of the image under the
 cursor — but images arrange themselves now, so there is nothing to set and
 the stack that switched between the two is gone with it.  Restoring a
 second context means bringing that stack back.
+
+The heading says "Deck" rather than "Slide": theme, aspect ratio and logo
+apply to every slide in the document, and the panel writes them into its
+frontmatter.  This is the one heading — ThemePanel used to draw a second,
+"Current theme", immediately below it.
 """
 
 import logging
@@ -23,7 +28,7 @@ log = logging.getLogger(__name__)
 
 class Inspector(Gtk.Box):
     """
-    The slide-settings page plus a header naming it.
+    The deck-settings page plus the one header naming it.
 
     The caller owns the page widget and keeps talking to it directly (it is
     still the ThemePanel); the Inspector supplies the width, the title and
@@ -36,7 +41,7 @@ class Inspector(Gtk.Box):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.set_size_request(self._WIDTH, -1)
 
-        self._title = Gtk.Label(label="Slide")
+        self._title = Gtk.Label(label="Deck")
         self._title.add_css_class("heading")
         self._title.set_xalign(0)
         self._title.set_hexpand(True)

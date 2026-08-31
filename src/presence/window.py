@@ -182,6 +182,10 @@ class MainWindow(Adw.ApplicationWindow):
         # Whether slides can be rasterized at all, so a machine without
         # Poppler or Cairo does not ask on every keystroke.
         self._can_rasterize: bool = rasterizer_available()
+        # What the inspector is currently showing, so a keystroke that
+        # changes neither does not restart its thumbnail render.
+        self._panel_shown_theme: str = ""
+        self._panel_shown_ratio: str = ""
 
         prefs = load_editor_prefs()
 
@@ -906,7 +910,38 @@ class MainWindow(Adw.ApplicationWindow):
     def _flush_sidebar_update(self, text: str) -> bool:
         self._sidebar_update_source = None
         self._sidebar.update_from_text(text)
+        self._sync_panel_to_document(text)
         return GLib.SOURCE_REMOVE
+
+    def _sync_panel_to_document(self, text: str) -> None:
+        """
+        Show the inspector the theme and ratio this document renders at.
+
+        Frontmatter outranks the app's own setting — `_render_context()`
+        reads `meta.get("theme", self.theme)` — so a deck carrying
+        `theme: berlin` comes out berlin whatever this machine last chose,
+        while the panel went on showing this machine's choice.  Which meant
+        the panel could name one theme and the slides beside it be another.
+
+        Display only: `select_theme()` and `select_ratio()` set the controls
+        without touching the converter or emitting, so nothing here starts a
+        build.  Both are skipped when the value has not moved, because
+        showing a theme re-renders its preview thumbnail.
+        """
+        try:
+            meta, _ = parse_frontmatter(text)
+        except Exception:            # a half-typed block is not an error here
+            meta = {}
+
+        theme = str(meta.get("theme") or self._converter.theme)
+        if theme != self._panel_shown_theme and self._theme_panel.has_theme(theme):
+            self._panel_shown_theme = theme
+            self._theme_panel.select_theme(theme)
+
+        ratio = str(meta.get("ratio") or self._converter.ratio)
+        if ratio != self._panel_shown_ratio:
+            self._panel_shown_ratio = ratio
+            self._theme_panel.select_ratio(ratio)
 
     # ── The live slide ────────────────────────────────────────────────────────
 
@@ -1308,9 +1343,11 @@ class MainWindow(Adw.ApplicationWindow):
         self._sidebar_btn.set_active(split.get_show_sidebar())
 
     def _on_panel_theme_changed(self, panel, slug: str) -> None:
+        self._panel_shown_theme = slug
         self._sync_frontmatter_key("theme", slug)
 
     def _on_panel_ratio_changed(self, panel, ratio: str) -> None:
+        self._panel_shown_ratio = ratio
         self._sync_frontmatter_key("ratio", ratio)
 
     def _sync_frontmatter_key(self, key: str, value: str) -> None:

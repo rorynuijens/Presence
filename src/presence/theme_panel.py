@@ -1,21 +1,25 @@
 """
-theme_panel.py — Right-sidebar theme inspector panel.
+theme_panel.py — The deck's own settings, in the right-hand inspector.
+
+Everything here is a property of the document rather than of the app: the
+theme, the aspect ratio and the logo, which the window writes back into the
+frontmatter of any deck that pins them.  The app's own preferences —
+target duration, speaking rate, convert on save — are in Preferences, and
+are not repeated here; two homes for one setting is how a control ends up
+lying about what it does.
 
 Layout (top to bottom):
-  Adw.HeaderBar "Theme"
   Active theme preview (full-width thumbnail + name)
-  Colour swatch grid (3 columns, instant CSS rendering)
-  Slide settings (ratio, logo)
-  Presentation settings (duration scale, auto-convert checkbox)
+  Appearance (theme, ratio, logo, logo size)
+  Syntax reference (collapsed)
+
+The heading above it all belongs to the Inspector, not to this panel.
 
 Design decisions vs the previous version:
-  - Adw.HeaderBar gives the panel a proper GNOME inspector identity
   - Active theme shown large (full-width thumbnail) rather than as a card
   - Colour swatch cards replace thumbnail cards: two rectangles (bg+accent)
     render instantly with no async I/O
   - 3-column swatch grid is denser and easier to scan than 2-column thumbs
-  - Gtk.Scale for duration instead of SpinRow — more spatial, less dialog-like
-  - Gtk.CheckButton for auto-convert instead of SwitchRow
   - Width: 300px
 
 Signals
@@ -69,21 +73,10 @@ class ThemePanel(Gtk.Box):
     # ── Construction ──────────────────────────────────────────────────────────
 
     def _build(self) -> None:
-        # Section header — plain label + separator per GNOME HIG inspector
-        # panel pattern (Builder, Loupe etc.). Adw.HeaderBar wastes 48 px
-        # of vertical space in a 300 px-wide panel.
-        title_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
-        title_box.set_margin_top(10)
-        title_box.set_margin_bottom(10)
-        title_box.set_margin_start(12)
-        title_box.set_margin_end(12)
-        title_lbl = Gtk.Label(label="Current theme")
-        title_lbl.add_css_class("heading")
-        title_lbl.set_xalign(0)
-        title_lbl.set_hexpand(True)
-        title_box.append(title_lbl)
-        self.append(title_box)
-        self.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+        # No heading of its own.  The Inspector that holds this panel draws
+        # one — a label and a separator, the GNOME inspector pattern — and
+        # for a while both were drawn, stacking "Deck" above "Current theme"
+        # over two rules.  Left over from when the panel stood alone.
 
         # Scrollable body
         scroll = Gtk.ScrolledWindow()
@@ -135,7 +128,7 @@ class ThemePanel(Gtk.Box):
         self._theme_dialog: Adw.Dialog | None = None
 
         slide_group = Adw.PreferencesGroup()
-        slide_group.set_title("Slide settings")
+        slide_group.set_title("Appearance")
         slide_group.set_margin_start(12)
         slide_group.set_margin_end(12)
         slide_group.set_margin_top(8)
@@ -218,43 +211,12 @@ class ThemePanel(Gtk.Box):
         logo_drop.connect("leave", self._on_logo_drop_leave)
         self._logo_row.add_controller(logo_drop)
 
-        pres_group = Adw.PreferencesGroup()
-        pres_group.set_title("Presentation settings")
-        pres_group.set_margin_start(12)
-        pres_group.set_margin_end(12)
-        pres_group.set_margin_bottom(8)
-
-        # Duration as ActionRow with scale suffix
-        dur_row = Adw.ActionRow(title="Duration")
-        scale_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        scale_box.set_valign(Gtk.Align.CENTER)
-        self._dur_scale = Gtk.Scale.new_with_range(
-            Gtk.Orientation.HORIZONTAL, 0, 120, 5
-        )
-        self._dur_scale.set_size_request(120, -1)
-        self._dur_scale.set_draw_value(False)
-        self._dur_scale.set_increments(5, 15)
-        self._dur_scale.connect("value-changed", self._on_duration_changed)
-        self._dur_val_label = Gtk.Label(label="∞")
-        self._dur_val_label.set_width_chars(6)
-        self._dur_val_label.set_xalign(1)
-        self._dur_val_label.add_css_class("numeric")
-        self._dur_val_label.add_css_class("caption")
-        scale_box.append(self._dur_scale)
-        scale_box.append(self._dur_val_label)
-        dur_row.add_suffix(scale_box)
-        pres_group.add(dur_row)
-
-        # Auto-convert as ActionRow with CheckButton suffix
-        auto_row = Adw.ActionRow(title="Convert on save")
-        self._auto_check = Gtk.CheckButton()
-        self._auto_check.set_valign(Gtk.Align.CENTER)
-        self._auto_check.connect("toggled", self._on_auto_convert_toggled)
-        auto_row.add_suffix(self._auto_check)
-        auto_row.set_activatable_widget(self._auto_check)
-        pres_group.add(auto_row)
-
-        body.append(pres_group)
+        # Target duration and "Convert on save" used to sit here as well as
+        # in Preferences — the same two settings, with a Gtk.Scale and a
+        # Gtk.CheckButton against Preferences' SpinRow and SwitchRow.  Both
+        # are app preferences: they are stored in presentation_prefs, not in
+        # the document, and apply to whatever deck is open.  Preferences is
+        # their one home; what stays here belongs to the document.
 
         body.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
 
@@ -352,13 +314,24 @@ class ThemePanel(Gtk.Box):
         self._refresh_preview(self._converter.theme)
         self._sync_controls()
 
+    def has_theme(self, slug: str) -> bool:
+        """True when *slug* names a theme this panel can display."""
+        return slug in self._all_themes
+
     def select_theme(self, slug: str) -> None:
-        """Update display without emitting theme-changed (called by Settings)."""
+        """
+        Show *slug* as the current theme without emitting theme-changed.
+
+        The window calls this with the theme the document will actually
+        render at — its frontmatter's, where it pins one, and the app's
+        default otherwise.  A deck carrying `theme: berlin` used to leave
+        this panel showing whatever this machine last chose.
+        """
         self._refresh_preview(slug)
         self._update_swatch_selection(slug)
 
     def select_ratio(self, ratio: str) -> None:
-        """Update ratio ComboRow without triggering a rebuild."""
+        """Show *ratio* — the document's, where it pins one — without rebuilding."""
         if ratio in self._ratios:
             try:
                 self._ratio_row.handler_block_by_func(self._on_ratio_changed)
@@ -457,7 +430,6 @@ class ThemePanel(Gtk.Box):
     def _sync_controls(self) -> None:
         """Sync all controls to current state without triggering handlers."""
         c = self._converter
-        w = self._window
         # Ratio
         try:
             self._ratio_row.handler_block_by_func(self._on_ratio_changed)
@@ -478,25 +450,6 @@ class ThemePanel(Gtk.Box):
             self._logo_scale.handler_unblock_by_func(self._on_logo_size_changed)
         except TypeError:
             self._logo_scale.set_value(logo_scale)
-        # Duration
-        if w is not None:
-            minutes = min(w._timer_minutes, 120)
-            try:
-                self._dur_scale.handler_block_by_func(self._on_duration_changed)
-                self._dur_scale.set_value(float(minutes))
-                self._dur_scale.handler_unblock_by_func(self._on_duration_changed)
-            except TypeError:
-                self._dur_scale.set_value(float(minutes))
-            self._dur_val_label.set_label(
-                f"{minutes} min" if minutes > 0 else "∞"
-            )
-            # Auto-convert
-            try:
-                self._auto_check.handler_block_by_func(self._on_auto_convert_toggled)
-                self._auto_check.set_active(w._auto_convert)
-                self._auto_check.handler_unblock_by_func(self._on_auto_convert_toggled)
-            except TypeError:
-                self._auto_check.set_active(w._auto_convert)
 
     # ── Signal handlers ───────────────────────────────────────────────────────
 
@@ -506,7 +459,6 @@ class ThemePanel(Gtk.Box):
         self._converter.theme = slug
         self._refresh_preview(slug)
         self._save_editor_prefs()
-        self._sync_settings_dialog_theme(slug)
         self.emit("theme-changed", slug)
         self.emit("rebuild-needed")
 
@@ -516,7 +468,6 @@ class ThemePanel(Gtk.Box):
         ratio = self._ratios[row.get_selected()]
         self._converter.ratio = ratio
         self._save_editor_prefs()
-        self._sync_settings_dialog_ratio(ratio)
         self.emit("ratio-changed", ratio)
         self.emit("rebuild-needed")
 
@@ -607,21 +558,6 @@ class ThemePanel(Gtk.Box):
         self._save_editor_prefs()
         self.emit("rebuild-needed")
 
-    def _on_duration_changed(self, scale: Gtk.Scale) -> None:
-        minutes = round(int(scale.get_value()) / 5) * 5
-        self._dur_val_label.set_label(
-            f"{minutes} min" if minutes > 0 else "∞"
-        )
-        if self._window is not None:
-            self._window._timer_minutes = minutes
-            self._save_presentation_prefs()
-
-    def _on_auto_convert_toggled(self, btn: Gtk.CheckButton) -> None:
-        if self._window is None:
-            return
-        self._window._auto_convert = btn.get_active()
-        self._save_presentation_prefs()
-
     # ── Persistence ───────────────────────────────────────────────────────────
 
     def _save_editor_prefs(self) -> None:
@@ -634,47 +570,6 @@ class ThemePanel(Gtk.Box):
             "logo":      str(self._converter.logo_path or ""),
             "font_size": self._window._editor.get_font_size(),
         })
-
-    def _save_presentation_prefs(self) -> None:
-        if self._window is None:
-            return
-        from .session import save_presentation_prefs
-        # Always write all four fields so no value is silently zeroed out
-        # when only one of them changes (e.g. timer or auto-convert).
-        save_presentation_prefs({
-            "timer_minutes":        self._window._timer_minutes,
-            "auto_convert":         self._window._auto_convert,
-            "presenter_notes_font": self._window._presenter_notes_font,
-            "speaking_rate":        self._window._speaking_rate,
-        })
-
-    # ── Settings dialog sync ──────────────────────────────────────────────────
-
-    def _sync_settings_dialog_theme(self, slug: str) -> None:
-        if self._window is None:
-            return
-        dlg = getattr(self._window, "_settings_dialog_ref", None)
-        if dlg is None:
-            return
-        try:
-            for s, card in dlg._theme_cards.items():
-                card.handler_block_by_func(dlg._on_theme_card_toggled)
-                card.set_active(s == slug)
-                card.handler_unblock_by_func(dlg._on_theme_card_toggled)
-        except Exception:
-            pass
-
-    def _sync_settings_dialog_ratio(self, ratio: str) -> None:
-        if self._window is None:
-            return
-        dlg = getattr(self._window, "_settings_dialog_ref", None)
-        if dlg is None:
-            return
-        try:
-            if ratio in self._ratios:
-                dlg._ratio_row.set_selected(self._ratios.index(ratio))
-        except Exception:
-            pass
 
 
 # ── Colour swatch card ────────────────────────────────────────────────────────

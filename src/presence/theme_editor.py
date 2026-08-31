@@ -18,14 +18,21 @@ Theme dataclass fields:
 
 A persistent two-thumbnail live preview sits at the bottom of the right
 panel at all times.  "Skip to advanced editor" is always visible in the
-footer and opens the full-field Adw.PreferencesPage in a second window.
+footer and opens the full-field Adw.PreferencesPage as a second dialog,
+closing this one — which stays alive, referenced by the advanced editor,
+so "← Wizard" can present it again with the edits carried across.
 
 GNOME HIG compliance notes
 ---------------------------
-- Adw.Window (not Adw.Dialog) so it gets its own window ID and taskbar entry
-  for a document-like workflow.
+- Adw.Dialog, presented against the main window.  It was an Adw.Window,
+  for "its own window ID and taskbar entry", but it was also modal and
+  transient for its parent — so it never behaved like the independent
+  document window that claim describes, and modal-and-transient is exactly
+  what GNOME 45 replaced with Adw.Dialog.
 - Adw.ToolbarView with Adw.HeaderBar — Cancel leading, [Export zip] then
-  [Install] trailing (two separate pack_end calls, primary rightmost).
+  [Install] trailing (two separate pack_end calls, primary rightmost).  The
+  header's own close button is hidden wherever Cancel is shown; Escape
+  closes either way.
 - Navigation bar uses Gtk.ListBox (boxed-list style) rather than custom
   widgets — accessible roles come for free.
 - Each wizard page is a Gtk.ScrolledWindow wrapping a Gtk.Box of
@@ -42,7 +49,7 @@ GNOME HIG compliance notes
   Adwaita semantic CSS classes (success / warning / error).
 - The "show advanced colours" section is a Gtk.Revealer — not display:none.
 - Slug is auto-derived from the name and validated on every change.
-- "Skip to advanced editor" opens a second ThemeEditorAdvanced window
+- "Skip to advanced editor" opens a second ThemeEditorAdvanced dialog
   pre-populated from the current wizard state.
 - Built-in themes open with the entire form insensitive and an Adw.Banner
   in the ToolbarView header region offering "Fork as new theme".
@@ -159,7 +166,7 @@ _TITLE_STYLES: list[tuple[str, str, bool]] = [
 
 # ── Wizard window ─────────────────────────────────────────────────────────────
 
-class ThemeEditor(Adw.Window):
+class ThemeEditor(Adw.Dialog):
     """
     Four-step wizard for creating or editing a theme.
 
@@ -209,15 +216,18 @@ class ThemeEditor(Adw.Window):
         # Slug validation error icon (lazily added to the name/slug row)
         self._slug_error_icon = None
 
-        self.set_transient_for(parent_window)
-        self.set_modal(True)
-        self.set_default_size(960, 640)
+        self.set_content_width(960)
+        self.set_content_height(640)
         self.set_title(
             f"Edit theme — {existing_theme.name}" if existing_theme else "New theme"
         )
 
         self._build_ui()
-        self.connect("destroy", self._on_destroy)
+        # "closed" rather than "destroy": a dialog that is closed is
+        # unparented, not disposed, and something still holding a reference
+        # to it — the advanced editor keeps one on the wizard — would keep
+        # the cleanup from ever running.
+        self.connect("closed", self._on_destroy)
         GLib.idle_add(self._schedule_preview)
 
     # ── Static helpers ────────────────────────────────────────────────────────
@@ -245,7 +255,7 @@ class ThemeEditor(Adw.Window):
 
     def _build_ui(self) -> None:
         toolbar_view = Adw.ToolbarView()
-        self.set_content(toolbar_view)
+        self.set_child(toolbar_view)
         toolbar_view.add_top_bar(self._build_header())
 
         if self._is_builtin:
@@ -304,6 +314,9 @@ class ThemeEditor(Adw.Window):
         cancel_btn = Gtk.Button(label="Cancel")
         cancel_btn.connect("clicked", lambda *_: self.close())
         bar.pack_start(cancel_btn)
+        # A dialog's header draws a close button of its own, which beside an
+        # explicit Cancel is the same door twice.  Escape still closes.
+        bar.set_show_end_title_buttons(False)
 
         if not self._is_builtin:
             # Primary action rightmost; pack_end inserts right-to-left
@@ -493,9 +506,10 @@ class ThemeEditor(Adw.Window):
             on_installed=self._on_installed,
             wizard=self,          # so the advanced editor can return here
         )
-        adv.present()
-        # Keep the wizard alive but hide it — the advanced editor may return
-        self.set_visible(False)
+        adv.present(self._parent_window)
+        # The advanced editor holds a reference back, so closing the wizard
+        # here does not destroy it: _on_back_to_wizard presents it again.
+        self.close()
 
     def _on_fork(self, *_) -> None:
         forked = dataclasses.replace(
@@ -509,7 +523,7 @@ class ThemeEditor(Adw.Window):
             existing_theme=forked,
             on_installed=self._on_installed,
         )
-        editor.present()
+        editor.present(self._parent_window)
         self.close()
 
     # ── Step 1: Name ──────────────────────────────────────────────────────────
@@ -1333,7 +1347,7 @@ class ThemeEditor(Adw.Window):
         f.add_pattern("*.zip")
         store.append(f)
         dialog.set_filters(store)
-        dialog.save(self, None, self._on_export_zip_chosen)
+        dialog.save(self.get_root(), None, self._on_export_zip_chosen)
 
     def _on_export_zip_chosen(self, dialog, result) -> None:
         try:
@@ -1407,7 +1421,7 @@ class ThemeEditor(Adw.Window):
 
 # ── Advanced editor (escape hatch from the wizard) ────────────────────────────
 
-class ThemeEditorAdvanced(Adw.Window):
+class ThemeEditorAdvanced(Adw.Dialog):
     """
     Full-field editor opened via "Skip to advanced editor" in the wizard,
     or via "Edit" on an installed user theme.
@@ -1451,15 +1465,17 @@ class ThemeEditorAdvanced(Adw.Window):
         self._fonts_group_ref: Adw.PreferencesGroup | None = None
         self._font_rows: dict[Path, Adw.ActionRow] = {}
 
-        self.set_transient_for(parent_window)
-        self.set_modal(True)
-        self.set_default_size(1100, 720)
+        self.set_content_width(1100)
+        self.set_content_height(720)
         self.set_title(
             f"Edit theme — {existing_theme.name}" if existing_theme
             else "Advanced theme editor"
         )
+        # Set when leaving for the wizard, so closing this editor does not
+        # take the wizard down on the way back to it.
+        self._returning_to_wizard = False
         self._build_ui()
-        self.connect("destroy", self._on_destroy)
+        self.connect("closed", self._on_destroy)
         GLib.idle_add(self._schedule_preview)
 
     @staticmethod
@@ -1473,7 +1489,7 @@ class ThemeEditorAdvanced(Adw.Window):
 
     def _build_ui(self) -> None:
         toolbar_view = Adw.ToolbarView()
-        self.set_content(toolbar_view)
+        self.set_child(toolbar_view)
         toolbar_view.add_top_bar(self._build_header())
 
         if self._is_builtin:
@@ -1518,6 +1534,8 @@ class ThemeEditorAdvanced(Adw.Window):
             cancel_btn = Gtk.Button(label="Cancel")
             cancel_btn.connect("clicked", lambda *_: self.close())
             bar.pack_start(cancel_btn)
+            # See ThemeEditor._build_header: Cancel is the way out here.
+            bar.set_show_end_title_buttons(False)
 
         if not self._is_builtin:
             install_label = "Save" if self._editing else "Install"
@@ -1539,8 +1557,8 @@ class ThemeEditorAdvanced(Adw.Window):
             self._wizard._theme      = dataclasses.replace(self._theme)
             self._wizard._custom_css = self._custom_css
             self._wizard._font_files = list(self._font_files)
-            self._wizard.set_visible(True)
-            self._wizard.present()
+            self._returning_to_wizard = True
+            self._wizard.present(self._parent_window)
         self.close()
 
     def _build_left_panel(self) -> Adw.PreferencesPage:
@@ -1980,7 +1998,7 @@ class ThemeEditorAdvanced(Adw.Window):
         store = Gio.ListStore.new(Gtk.FileFilter)
         store.append(f)
         dialog.set_filters(store)
-        dialog.open(self, None, self._on_font_chosen)
+        dialog.open(self.get_root(), None, self._on_font_chosen)
 
     def _on_font_chosen(self, dialog, result) -> None:
         try:
@@ -2037,7 +2055,7 @@ class ThemeEditorAdvanced(Adw.Window):
             existing_theme=forked,
             on_installed=self._on_installed,
         )
-        editor.present()
+        editor.present(self._parent_window)
         self.close()
 
     # ── Slug validation ───────────────────────────────────────────────────────
@@ -2275,7 +2293,7 @@ class ThemeEditorAdvanced(Adw.Window):
         f.add_pattern("*.zip")
         store.append(f)
         dialog.set_filters(store)
-        dialog.save(self, None, self._on_export_zip_chosen)
+        dialog.save(self.get_root(), None, self._on_export_zip_chosen)
 
     def _on_export_zip_chosen(self, dialog, result) -> None:
         try:
@@ -2328,9 +2346,9 @@ class ThemeEditorAdvanced(Adw.Window):
         if self._preview_tmp_css is not None:
             Path(self._preview_tmp_css).unlink(missing_ok=True)
             self._preview_tmp_css = None
-        # If the user closes this window without returning to the wizard,
-        # close the hidden wizard too so it doesn't linger invisibly.
-        if self._wizard is not None and not self._wizard.get_visible():
+        # Closing this editor outright ends the whole session, so take the
+        # wizard behind it with us — unless we are on our way back to it.
+        if self._wizard is not None and not self._returning_to_wizard:
             self._wizard.close()
 
 

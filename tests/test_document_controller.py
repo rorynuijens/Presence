@@ -72,12 +72,14 @@ class FakeWindow:
         self.converts = 0
         self.packed = 0
         self.pres_saves = []
+        self.panel_syncs = []
 
     # collaborators the controller calls back into
     def _show_error(self, message):  self.errors.append(message)
     def _show_toast(self, message, timeout=None): self.toasts.append(message)
     def _set_title(self, title):     self.title = title
     def _refresh_live_slide(self, text=None): pass
+    def _sync_panel_to_document(self, text): self.panel_syncs.append(text)
     def _update_word_count(self, text):   pass
     def _update_build_chip(self):    pass
     def _refresh_recent_actions(self):    pass
