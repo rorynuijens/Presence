@@ -31,7 +31,9 @@ import os
 import shutil
 import tempfile
 import zipfile
+from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 from typing import TYPE_CHECKING, Protocol
 
 import gi
@@ -40,8 +42,10 @@ gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, Gio, GLib
 
 from .app_utils import make_file_filter, make_filter_store
-from .session import (save_last_file, save_recent_file, delete_recovery_file,
-                      recovery_path_for, recovery_dir)
+from .session import (save_last_file, load_last_file, save_recent_file,
+                      delete_recovery_file, recovery_path_for, recovery_dir,
+                      untitled_recovery_path, list_untitled_recoveries,
+                      delete_untitled_recovery)
 
 if TYPE_CHECKING:                       # imported for the annotations only
     from .build_coordinator import BuildCoordinator
@@ -77,6 +81,10 @@ class DocumentHost(Protocol):
     def hold_file_dialog(self, dialog: Gtk.FileDialog | None) -> None: ...
     def refresh_recent_actions(self) -> None: ...
     def get_application(self) -> Gtk.Application: ...
+    # A recovered draft is a second document, so it needs somewhere to go
+    # when this window is already holding one.  Restoring it in place would
+    # overwrite whatever the writer just opened.
+    def new_window(self) -> "DocumentHost": ...
 
 
 class DocumentController:
@@ -96,6 +104,12 @@ class DocumentController:
         self.pres_temp_dir: Path | None = None
         # Whether the buffer has moved on from what is on disk.
         self.modified:      bool        = False
+
+        # This draft's own name in the recovery directory, for as long as it
+        # has no name of its own on disk.  Every unsaved document used to
+        # share one file, so two windows overwrote each other every thirty
+        # seconds — see session.untitled_recovery_path().
+        self._untitled_token = uuid4().hex[:12]
 
         # Set while a Save As chooser is open: what to run once the document
         # actually reaches disk.
@@ -178,6 +192,13 @@ class DocumentController:
 
         is_pres = path.suffix.lower() == ".pres"
 
+        # Read before the load, which overwrites it.  application.py checks
+        # for a newer autosave of exactly one document — load_last_file()'s,
+        # and only when it opens the window itself.  A file from the file
+        # manager, the command line, Open… or the recent list got no check at
+        # all, so this covers those without asking about the same file twice.
+        app_will_check = (path == load_last_file())
+
         if self._already_open_elsewhere(path, is_pres):
             self._ask_open_anyway(path, is_pres)
             return
@@ -186,6 +207,9 @@ class DocumentController:
             self.open_pres_file(path)
         else:
             self.load_into_editor(path)
+
+        if not app_will_check:
+            GLib.idle_add(self._check_recovery_after_open, path)
 
     def _already_open_elsewhere(self, path: Path, is_pres: bool) -> bool:
         """True when another window of this app already holds *path* (#88)."""
@@ -231,6 +255,10 @@ class DocumentController:
             win.show_error(f"Could not open file: {e}")
             return
 
+        # This window has moved on to a real document; whatever nameless
+        # draft it was autosaving is not coming back here.
+        delete_untitled_recovery(self._untitled_token)
+
         self.file_path   = path
         self.output_path = path.with_suffix(".pdf")
         win.editor.set_base_path(path)
@@ -266,6 +294,134 @@ class DocumentController:
         self.modified = True
         win.set_document_title(self.display_name + " •")
         win.builds.trigger()
+
+    # ── Recovery ──────────────────────────────────────────────────────────────
+    #
+    # Autosave is a promise, and it used to be kept for only some documents.
+    # A named document's recovery file is offered back by application.py, but
+    # only the one that was open at the last exit, and only when the app is
+    # launched with no file.  A document that was never named was offered
+    # back by nothing at all: recovery_path_for() keys on a path and a draft
+    # has none, so the toast said "Autosaved" over a file no code would read.
+    # Both gaps are closed here, because application.py is mode 444.
+
+    def _check_recovery_after_open(self, path: Path) -> bool:
+        """Offer an autosave of the document that just opened, if it is newer."""
+        if self.display_path != path:
+            return GLib.SOURCE_REMOVE          # the open did not land
+        recovery = recovery_path_for(path)
+        try:
+            if recovery.stat().st_mtime <= path.stat().st_mtime:
+                return GLib.SOURCE_REMOVE
+        except OSError:
+            return GLib.SOURCE_REMOVE
+
+        def _restore() -> None:
+            try:
+                self.restore_autosave(recovery.read_text(encoding="utf-8"))
+            except OSError as e:
+                self._win.show_error(f"Could not read the autosave: {e}")
+
+        dialog = Adw.AlertDialog(
+            heading="Restore autosaved version?",
+            body=(f"An autosave of '{path.name}' is newer than the saved "
+                  "file. Restore it to avoid losing work?"),
+        )
+        dialog.add_response("cancel",  "Keep saved version")
+        dialog.add_response("restore", "Restore autosave")
+        dialog.set_response_appearance("restore", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("cancel")
+        dialog.set_close_response("cancel")
+        dialog.connect(
+            "response",
+            lambda _dlg, response: _restore() if response == "restore" else None,
+        )
+        dialog.present(self._win)
+        return GLib.SOURCE_REMOVE
+
+    def pending_untitled_draft(self) -> Path | None:
+        """
+        The newest draft left behind that was never saved anywhere.
+
+        This controller's own file is excluded — it is not lost, it is open.
+        """
+        mine = untitled_recovery_path(self._untitled_token)
+        for draft in list_untitled_recoveries():
+            if draft != mine:
+                return draft
+        return None
+
+    def ask_restore_draft(self, draft: Path, on_settled=None) -> None:
+        """
+        Offer *draft* back, and let the writer discard it for good.
+
+        Three answers rather than two, because a draft with no name has no
+        document to compare itself against: the writer cannot check it later
+        by opening the file it belongs to.  So "Not now" leaves it for the
+        next launch, and discarding is a thing that has to be chosen.
+        *on_settled* runs when the draft was not restored — it is what the
+        caller was going to do instead.
+        """
+        win = self._win
+        try:
+            when = datetime.fromtimestamp(draft.stat().st_mtime)
+        except OSError:
+            return
+        dialog = Adw.AlertDialog(
+            heading="Restore unsaved draft?",
+            body=(f"A draft that was never saved was left behind on "
+                  f"{when.day} {when:%B} at {when:%H:%M}. Restore it, or "
+                  "discard it for good?"),
+        )
+        dialog.add_response("later",   "Not now")
+        dialog.add_response("discard", "Discard draft")
+        dialog.add_response("restore", "Restore")
+        dialog.set_response_appearance("discard", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.set_response_appearance("restore", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("restore")
+        dialog.set_close_response("later")
+
+        def _on_response(_dlg, response):
+            if response == "restore":
+                self._restore_draft(draft)
+                return
+            if response == "discard":
+                try:
+                    draft.unlink(missing_ok=True)
+                except OSError as e:
+                    log.warning("Could not discard draft %s: %s", draft, e)
+            if on_settled is not None:
+                on_settled()
+
+        dialog.connect("response", _on_response)
+        dialog.present(win)
+
+    def _restore_draft(self, draft: Path) -> None:
+        """Put *draft* in a window that is free to hold it."""
+        win = self._win
+        try:
+            text = draft.read_text(encoding="utf-8")
+        except OSError as e:
+            win.show_error(f"Could not read the draft: {e}")
+            return
+        target = self
+        if self.file_path is not None or win.editor.get_text().strip():
+            # This window is already holding a document.  The draft is a
+            # second one, so it gets a window rather than the writer's file.
+            target = win.new_window().documents
+        target.adopt_draft(text, draft)
+
+    def adopt_draft(self, text: str, draft: Path) -> None:
+        """Restore an unsaved draft here, and take over autosaving it."""
+        mine = untitled_recovery_path(self._untitled_token)
+        if draft != mine:
+            try:
+                draft.replace(mine)
+            except OSError as e:
+                # Not fatal: the next autosave writes *mine* anyway.  It only
+                # means the old file is left to the sweep.
+                log.warning("Could not take over draft %s: %s", draft, e)
+        self.restore_autosave(text)
 
     # ── Saving ────────────────────────────────────────────────────────────────
 
@@ -315,6 +471,10 @@ class DocumentController:
             save_last_file(display)
             # Delete any orphaned recovery file (fixes #59)
             delete_recovery_file(display)
+            # The draft has a home now, so the nameless copy of it is not a
+            # safety net any more — it is a duplicate waiting to be offered
+            # back as if it were lost.
+            delete_untitled_recovery(self._untitled_token)
         except OSError as e:
             win.show_error(f"Could not save: {e}")
             return False
@@ -489,14 +649,23 @@ class DocumentController:
     # ── Autosave ──────────────────────────────────────────────────────────────
 
     def autosave(self) -> bool:
-        """Write a recovery copy of an unsaved document.  Runs on a timer."""
+        """
+        Write a recovery copy of an unsaved document.  Runs on a timer.
+
+        A document that has a path is keyed by it.  One that does not is
+        keyed by this controller's own token, because there is nothing else
+        to key it by — and because the single shared ``untitled.md`` that
+        used to serve every draft was both unreadable (nothing looked for it)
+        and self-destroying (the next draft overwrote it).
+        """
         win = self._win
         if self.modified and win.editor.get_text():
             try:
                 rd = recovery_dir()
                 rd.mkdir(parents=True, exist_ok=True)
                 display = self.display_path
-                rp = recovery_path_for(display) if display else rd / "untitled.md"
+                rp = (recovery_path_for(display) if display
+                      else untitled_recovery_path(self._untitled_token))
                 rp.write_text(win.editor.get_text(), encoding="utf-8")
                 # Brief toast so users know their work is protected (#29)
                 win.show_toast("Autosaved", timeout=2)

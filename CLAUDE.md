@@ -153,6 +153,42 @@ The codebase lives entirely under `src/presence/` and splits into two layers:
 - The theme editor is an `Adw.Dialog`. It was an `Adw.Window` for a taskbar entry, but it was also modal and transient, so it never behaved like the independent window that justified it.
 - `session.py` — persistence: window state, recent files, editor prefs, recovery files.
 
+**Autosave is a promise, and it used to be kept for only some documents.** A
+recovery file is keyed by the path of the document it belongs to
+(`recovery_path_for()`), and a document that has never been saved has no path
+— so every unsaved draft in every window autosaved to one shared
+`untitled.md`, which nothing read back and the next unsaved draft overwrote.
+The writer was toasted "Autosaved" every thirty seconds over a file that was
+unreachable and about to be destroyed. A draft now autosaves under a token of
+its own (`session.untitled_recovery_path()`), held by its `DocumentController`
+for as long as the document has no name, and dropped the moment it gets one.
+
+`Application._check_recovery` is the only place that ever *offered* a recovery
+file back, and it asks about exactly one document: `load_last_file()`, and only
+when the app is launched with no file of its own. `application.py` is mode
+`444`, so the two halves it cannot reach live elsewhere. `MainWindow`'s
+`Startup recovery` section offers an abandoned draft once per launch — from
+`show_open_dialog()` when that is the launch path, so a dialog is never stacked
+on top of a file chooser, and otherwise from an idle in `__init__` that runs
+after `_on_activate` has had its say. A draft that comes back **never replaces
+a document the window is already holding**: it is a second document, so it gets
+a window of its own (`DocumentHost.new_window()`, the one name the seam gained).
+`DocumentController.open_file()` covers the other half — a file from the file
+manager, the command line, Open… or the recent list, none of which were checked
+at all — and skips the one path `application.py` will check itself, so the same
+file is never asked about twice.
+
+Three answers, not two, because a draft with no name has no document to be
+compared against later: **Not now** leaves it for the next launch, **Discard
+draft** is a choice that has to be made, **Restore** brings it back still
+unsaved. And the directory is swept once per launch
+(`session.prune_recovery_files()`, 30 days): `delete_recovery_file()` only ever
+unlinked the name the *current* hashing scheme produces, so drafts written
+under the SHA-1 scheme #66 replaced, drafts belonging to a document since
+renamed or deleted, and every unsaved draft ever written accumulated
+permanently. `test_recovery.py` pins all of it; `tests/test_session.py` is mode
+`444`, which is why the session-level checks live there too.
+
 **Slide bands.** Separator lines are the document's real structure, so the editor draws a rule at each one naming the slide it opens (`_draw_slide_bands`), and the `presence-separator` tag opens the vertical space that rule floats in. The `---` stays visible and editable — hiding it would mean invisible text the cursor can fall into. This replaced the gutter number badges, which said the same thing twice.
 
 **Overlay coordinates.** `buffer_to_window_coords(TEXT, …)` already accounts for the view's top margin and the view sits at the overlay's origin, so `_line_y()` needs no further adjustment. The deleted badge code added `top_margin` here and drew a margin too low.
@@ -175,13 +211,13 @@ Folds are still read per slide rather than per page, off each slide's own first 
 
 **The keys GNOME reserves.** Ctrl+P is Print, and the nearest thing this app has to Print is Export PDF — which writes exactly the file Print-to-file would — so that is what it runs; Ctrl+Shift+E still works because it is what this app taught. Present moved to F5, which is what every other deck tool starts a slideshow with. The shortcuts reference is on Ctrl+? (F1 stays bound only because Presence ships no help manual for it to open), and Settings on Ctrl+comma — bound from `window._setup_actions()` rather than from `application.py`, which is mode `444`. `shortcuts.py` lists a row's alternates space-separated, which is GTK's own accelerator syntax; `test_shortcuts.py` asserts every bound key appears there and `test_header_controls.py` asserts each key reaches the right action, because a reference will happily document a wrong binding.
 
-**One owner per fact.** The three controllers used to keep their state on `MainWindow` and reach in for it — 47 distinct `win._private` names between them, `BuildCoordinator` alone touching 29, all through an untyped `def __init__(self, window)`. That was not a separation; it was the same god object with the code moved to other files, and it is why `_slide_w`/`_slide_h` could be written on every build and read by nothing for as long as they were. Each fact now lives with the class that changes it, and the window *asks* (`self.documents.file_path`, `self.builds.html_uri`). What the controllers get back is a small public surface — `editor`, `sidebar`, `converter`, `banner`, `present_button`, `export_busy`, `documents`, `builds`, `exports`, `clock`, `auto_convert`, `speaking_rate`, plus `show_toast`, `show_error`, `set_document_title`, `hold_file_dialog`, `sync_panel_to_document`, `update_word_count`, `mark_modified`, `live_render_width`, `refresh_recent_actions` — and nothing private. `grep -ho "win\._[a-z_]*"` across the four controllers must come back empty; `test_window_wiring.py` checks the other direction, that every `self.documents.X` and `self.builds.X` in `window.py` resolves on the class behind it.
+**One owner per fact.** The three controllers used to keep their state on `MainWindow` and reach in for it — 47 distinct `win._private` names between them, `BuildCoordinator` alone touching 29, all through an untyped `def __init__(self, window)`. That was not a separation; it was the same god object with the code moved to other files, and it is why `_slide_w`/`_slide_h` could be written on every build and read by nothing for as long as they were. Each fact now lives with the class that changes it, and the window *asks* (`self.documents.file_path`, `self.builds.html_uri`). What the controllers get back is a small public surface — `editor`, `sidebar`, `converter`, `banner`, `present_button`, `export_busy`, `documents`, `builds`, `exports`, `clock`, `auto_convert`, `speaking_rate`, plus `show_toast`, `show_error`, `set_document_title`, `hold_file_dialog`, `sync_panel_to_document`, `update_word_count`, `mark_modified`, `live_render_width`, `refresh_recent_actions`, `new_window` — and nothing private. `grep -ho "win\._[a-z_]*"` across the four controllers must come back empty; `test_window_wiring.py` checks the other direction, that every `self.documents.X` and `self.builds.X` in `window.py` resolves on the class behind it.
 
 The two exceptions are deliberate. `MainWindow._file_path` and `._modified` survive as **read-only properties** forwarding to the document controller, because `application.py` is mode `444` and reads both when deciding whether to reuse a window. Read-only is the point: a write raises rather than silently shadowing the owner's copy, which is exactly how the stale `win._modified = False` in File > New was caught.
 
 The header chip is the window's widget — the window builds and packs it — but everything it *says* comes from the coordinator, so its parts are handed over once with `attach_chip()`.
 
-**The seam is written down.** Each controller declares a Protocol for the window it takes — `BuildHost` (7 names), `DocumentHost` (11), `ExportHost` (7), `ClockHost` (9) — at the top of its own module, so what it needs is next to what needs it. `tests/test_host_protocols.py` checks both directions: everything a Host promises, `MainWindow` provides; everything a controller reaches for, its Host declares. The second direction is the one that stops the seam growing back, one perfectly reasonable attribute at a time.
+**The seam is written down.** Each controller declares a Protocol for the window it takes — `BuildHost` (7 names), `DocumentHost` (12), `ExportHost` (7), `ClockHost` (9) — at the top of its own module, so what it needs is next to what needs it. `tests/test_host_protocols.py` checks both directions: everything a Host promises, `MainWindow` provides; everything a controller reaches for, its Host declares. The second direction is the one that stops the seam growing back, one perfectly reasonable attribute at a time.
 
 **Nothing forwards.** The window used to carry nineteen one-line methods that existed only so it could hand a call to a controller — `_trigger_convert`, `_update_build_chip`, `_with_current_build`, `_on_export*`, `_save`, `_autosave` and the rest — and twelve of them had no caller outside `window.py` at all. Actions, accelerators, the header chip's click, the Export popover's rows, the converter's three signals and the autosave timer are all bound straight to the controller method now. Nine one-liners remain and each has a reason: `open_file` and `restore_autosave` are called by `application.py`, which is mode `444`; `_file_path` and `_modified` are the read-only properties that same file reads; `_on_destroy` is a GTK signal handler; and `_on_save`, `_on_save_as`, `_on_open` and `_on_open_pdf_clicked` **absorb arguments** — a `Gio.SimpleAction` calls its handler with `(action, parameter)`, and `save(on_done=None)` bound directly would take the action as its continuation and call it once the file landed. Where the controller's own method already ends in `(self, *_)` — `trigger()`, `export_pdf()` — the action is bound to it and there is no window method at all.
 

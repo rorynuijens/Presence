@@ -14,6 +14,7 @@ import logging
 import os
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -223,6 +224,103 @@ def delete_recovery_file(original: Path) -> None:
         recovery_path_for(original).unlink(missing_ok=True)
     except OSError:
         pass
+
+
+# ── Drafts that were never given a name ───────────────────────────────────────
+#
+# A document with no path has no recovery *key*: recovery_path_for() hashes
+# the path, and there is none.  Every unsaved draft therefore autosaved to one
+# shared "untitled.md", which nothing ever read back — the autosave ran every
+# thirty seconds, said "Autosaved", and wrote a file that could only be found
+# by hand, and only until the next unsaved draft overwrote it.  So a draft
+# gets a token of its own instead, and something looks for the leftovers.
+
+_UNTITLED_STEM = "untitled"
+
+
+def untitled_recovery_path(token: str) -> Path:
+    """
+    Where a document that has no path of its own autosaves.
+
+    *token* belongs to the draft for as long as it is open, so two windows
+    with two unsaved drafts no longer overwrite each other every thirty
+    seconds, and a new draft no longer destroys the one the last session
+    lost.
+    """
+    return recovery_dir() / f"{_UNTITLED_STEM}-{token}.md"
+
+
+def is_untitled_recovery(path: Path) -> bool:
+    """True for a draft file this module wrote, old single-slot name included."""
+    if path.suffix != ".md":
+        return False
+    stem = path.stem
+    return stem == _UNTITLED_STEM or stem.startswith(_UNTITLED_STEM + "-")
+
+
+def list_untitled_recoveries() -> list[Path]:
+    """
+    Drafts left behind that were never saved anywhere, newest first.
+
+    Empty files are skipped: an autosave only runs on a modified buffer, but
+    an empty one is nothing to offer back.  The pre-token ``untitled.md`` is
+    included, so a draft stranded by the old scheme is still recoverable.
+    """
+    try:
+        entries = list(recovery_dir().iterdir())
+    except OSError:
+        return []
+    found = []
+    for entry in entries:
+        try:
+            if (entry.is_file() and is_untitled_recovery(entry)
+                    and entry.stat().st_size > 0):
+                found.append(entry)
+        except OSError:
+            continue
+    found.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return found
+
+
+def delete_untitled_recovery(token: str) -> None:
+    """Drop a draft's recovery file — it has a home now, or is not wanted."""
+    try:
+        untitled_recovery_path(token).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+# How long an abandoned recovery file is kept.  A recovery file is a safety
+# net for a session that ended badly, not an archive: one belonging to a
+# document still being edited has its mtime bumped by every autosave, so only
+# a genuinely abandoned draft ever reaches this age.
+RECOVERY_MAX_AGE_DAYS = 30
+
+
+def prune_recovery_files(max_age_days: int = RECOVERY_MAX_AGE_DAYS) -> list[Path]:
+    """
+    Delete recovery files nothing has touched in *max_age_days*.
+
+    Nothing ever swept this directory.  ``delete_recovery_file()`` only
+    unlinks the name the *current* hashing scheme produces, so a draft whose
+    document was renamed or deleted, or written under the older SHA-1 scheme
+    that #66 replaced, stayed on disk for good — as did every unsaved draft,
+    which had no owner to delete it.  Returns what it removed, for the log.
+    """
+    cutoff  = time.time() - max_age_days * 86400
+    removed: list[Path] = []
+    try:
+        entries = list(recovery_dir().iterdir())
+    except OSError:
+        return removed
+    for entry in entries:
+        try:
+            if entry.is_file() and entry.stat().st_mtime < cutoff:
+                entry.unlink()
+                removed.append(entry)
+        except OSError:
+            continue
+    return removed
 
 
 # ── Presentation preferences ──────────────────────────────────────────────────

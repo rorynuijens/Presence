@@ -35,7 +35,7 @@ from .session    import (save_last_file, load_window_state, save_window_state,
                           load_editor_prefs, save_editor_prefs, save_recent_file,
                           load_recent_files, delete_recovery_file,
                           load_presentation_prefs, save_presentation_prefs)
-from .session    import recovery_path_for, recovery_dir
+from .session    import recovery_path_for, recovery_dir, prune_recovery_files
 from .slides.themes import ASPECT_RATIOS
 from .slides.splitter import split_slides
 from .slides.script import document_timing
@@ -128,6 +128,15 @@ class _BusyIndicator:
 
 
 class MainWindow(Adw.ApplicationWindow):
+    # A draft that was never given a name is offered back once per launch, by
+    # whichever of the two paths in `Startup recovery` below gets there first.
+    # Per class, not per window, so File > New does not re-ask.
+    _untitled_recovery_done: bool = False
+    # And the recovery directory is swept once per launch.  Nothing ever
+    # swept it before: delete_recovery_file() only unlinks the name the
+    # current hashing scheme produces.
+    _recovery_swept: bool = False
+
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         # The same name the header shows before a document has one.  This was
@@ -225,6 +234,14 @@ class MainWindow(Adw.ApplicationWindow):
         self._set_focus_mode(prefs.get("focus_mode", False), persist=False)
 
         self._autosave_source: int | None = GLib.timeout_add_seconds(30, self.documents.autosave)
+        # On idle, so application.py has finished deciding what this window
+        # holds — it opens the last file synchronously, and may hand the
+        # startup question to show_open_dialog() below, which answers it
+        # first.  Deferred for the same reason the recovery dialog there is
+        # (#47): a dialog presented before the surface is mapped can end up
+        # unparented on Wayland.
+        self._untitled_recovery_source: int | None = GLib.idle_add(
+            self._check_untitled_recovery)
 
         self.clock.start()
 
@@ -704,7 +721,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.converter.stop_watch()
         self.clock.stop()
         for attr in ("_autosave_source", "_size_save_source",
-                     "_thumb_size_source"):
+                     "_thumb_size_source", "_untitled_recovery_source"):
             src = getattr(self, attr, None)
             if src is not None:
                 GLib.source_remove(src)
@@ -724,6 +741,49 @@ class MainWindow(Adw.ApplicationWindow):
 
     def restore_autosave(self, text: str) -> None:
         self.documents.restore_autosave(text)
+
+    def new_window(self) -> "MainWindow":
+        """A presented window of this app.  Declared by DocumentHost."""
+        win = MainWindow(application=self.get_application())
+        win.present()
+        return win
+
+    # ── Startup recovery ──────────────────────────────────────────────────────
+    #
+    # application.py offers a newer autosave back for exactly one document:
+    # the file that was open at the last exit, when the app is launched with
+    # no file of its own.  It cannot offer a draft that was never *saved*,
+    # because it looks a recovery file up by the path of the document it
+    # belongs to and a draft has none — so the autosave timer wrote a file
+    # every thirty seconds, toasted "Autosaved", and nothing ever read it
+    # back.  That file is mode 444, so the missing half lives here.
+
+    def _sweep_recovery_once(self) -> None:
+        """Drop abandoned recovery files, once per launch."""
+        if MainWindow._recovery_swept:
+            return
+        MainWindow._recovery_swept = True
+        removed = prune_recovery_files()
+        if removed:
+            log.info("Removed %d abandoned recovery file(s)", len(removed))
+
+    def _check_untitled_recovery(self) -> bool:
+        """Offer back a draft that was never given a name — once, at launch."""
+        self._untitled_recovery_source = None
+        self._sweep_recovery_once()
+        if MainWindow._untitled_recovery_done:
+            return GLib.SOURCE_REMOVE       # show_open_dialog() got there first
+        MainWindow._untitled_recovery_done = True
+        self._offer_untitled_draft()
+        return GLib.SOURCE_REMOVE
+
+    def _offer_untitled_draft(self, on_settled=None) -> bool:
+        """Ask about the newest abandoned draft.  True when there was one."""
+        draft = self.documents.pending_untitled_draft()
+        if draft is None:
+            return False
+        self.documents.ask_restore_draft(draft, on_settled=on_settled)
+        return True
 
     # ── .pres bundle support ──────────────────────────────────────────────────
     #
@@ -1068,17 +1128,28 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_new(self, *_) -> None:
         def _open_new():
-            win = MainWindow(application=self.get_application())
+            win = self.new_window()
             # Populate the new window with the starter template (#24)
             win.editor.set_text(_STARTER_TEMPLATE)
             win.documents.modified = False   # template is not a user edit
-            win.present()
             # After present(), so the strip has an allocation to scale into.
             win.clock.document_replaced(_STARTER_TEMPLATE)
         self.documents.check_unsaved(_open_new)
 
     def show_open_dialog(self) -> None:
-        """Public: application.py opens a chooser in a fresh window."""
+        """
+        Public: application.py opens a chooser in a fresh window.
+
+        A draft the last session never saved comes first.  Being asked to
+        pick a file is the wrong answer to "your own unsaved words are still
+        on disk", and answering here rather than from the idle below is what
+        keeps the two from stacking a dialog on top of a file chooser.  The
+        chooser follows if the draft is not wanted.
+        """
+        self._sweep_recovery_once()
+        MainWindow._untitled_recovery_done = True
+        if self._offer_untitled_draft(on_settled=self._show_open_dialog):
+            return
         self._show_open_dialog()
 
     def _on_open(self, *_) -> None:

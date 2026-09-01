@@ -277,13 +277,15 @@ def test_autosave_does_nothing_for_an_unmodified_document(tmp_path):
 
 
 def test_autosave_keeps_an_untitled_draft_too(tmp_path):
-    from presence.session import recovery_dir
+    """A draft with no path autosaves under a name of its own, not a shared one."""
+    from presence.session import untitled_recovery_path
     doc, win = controller("a draft with no home yet")
     doc.modified = True
 
     doc.autosave()
 
-    assert (recovery_dir() / "untitled.md").read_text() == "a draft with no home yet"
+    written = untitled_recovery_path(doc._untitled_token)
+    assert written.read_text() == "a draft with no home yet"
 
 
 # ── Recovery ──────────────────────────────────────────────────────────────────
