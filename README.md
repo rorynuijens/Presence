@@ -3,3 +3,5 @@ This app is fully vibe coded using Claude Code. It is a learning excercise for m
 
 # Markdown based slide editor
 The basis of this app is a Markdown editor. With this editor you can create a slidedeck using predefined themes. You can also design your own theme. The app is heavily inspired by IA Presenter.
+
+Writing a theme is documented in [THEME-CONTRACT.md](THEME-CONTRACT.md): the `theme.json` fields, the markup a stylesheet is aimed at, and which CSS the rendering engine actually understands.
