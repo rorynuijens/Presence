@@ -1007,8 +1007,14 @@ class MainWindow(Adw.ApplicationWindow):
         self.current_slide = insert_at
         self.refresh_live_slide(new_text)
         self._update_build_chip()
-        # Scroll editor to the newly inserted slide
-        GLib.idle_add(lambda: (self.editor.scroll_to_slide(insert_at), False))
+        # Scroll editor to the newly inserted slide.  Spelled out rather than
+        # a lambda returning a tuple: that returned (None, False), and it only
+        # stopped repeating because PyGObject cannot make a gboolean out of a
+        # tuple and falls back to false.
+        def _scroll_to_the_new_slide() -> bool:
+            self.editor.scroll_to_slide(insert_at)
+            return GLib.SOURCE_REMOVE
+        GLib.idle_add(_scroll_to_the_new_slide)
 
     def _on_slides_reordered(self, sidebar: Sidebar, from_idx: int, to_idx: int) -> None:
         text = self.editor.get_text()

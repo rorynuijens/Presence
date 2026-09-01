@@ -21,6 +21,7 @@ import os
 import shutil
 import threading
 from pathlib import Path
+from typing import TYPE_CHECKING, Callable, Protocol
 
 import gi
 gi.require_version("Gtk", "4.0")
@@ -29,7 +30,31 @@ from gi.repository import Gtk, Gio, GLib
 from .app_utils import make_file_filter, make_filter_store
 from .slides.frontmatter import parse_frontmatter
 
+if TYPE_CHECKING:                       # imported for the annotations only
+    from .build_coordinator import BuildCoordinator
+    from .document_controller import DocumentController
+    from .editor import Editor
+
 log = logging.getLogger(__name__)
+
+
+class ExportHost(Protocol):
+    """
+    What this class needs from the window it belongs to.
+
+    Written down so it can be checked, and so it cannot quietly grow — see
+    :class:`build_coordinator.BuildHost`.  Also a Gtk.Window, since the save
+    choosers are parented on it.
+    """
+
+    editor:      Editor
+    documents:   DocumentController
+    builds:      BuildCoordinator
+    export_busy: Callable[[bool], None]   # window._BusyIndicator
+
+    def show_toast(self, message: str, timeout: int = ...) -> None: ...
+    def show_error(self, message: str) -> None: ...
+    def hold_file_dialog(self, dialog: Gtk.FileDialog | None) -> None: ...
 
 # Width, in pixels, of an exported slide image.  1920 is sharp on any normal
 # screen without making a folder of PNGs unreasonable to move around.
@@ -43,7 +68,7 @@ HANDOUT_IMAGE_WIDTH = 1000
 class ExportController:
     """Owns the four export flows on behalf of :class:`MainWindow`."""
 
-    def __init__(self, window) -> None:
+    def __init__(self, window: ExportHost) -> None:
         self._win = window
 
     # ── The one dialog ────────────────────────────────────────────────────────

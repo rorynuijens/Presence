@@ -32,6 +32,7 @@ import shutil
 import tempfile
 import zipfile
 from pathlib import Path
+from typing import TYPE_CHECKING, Protocol
 
 import gi
 gi.require_version("Gtk", "4.0")
@@ -42,16 +43,50 @@ from .app_utils import make_file_filter, make_filter_store
 from .session import (save_last_file, save_recent_file, delete_recovery_file,
                       recovery_path_for, recovery_dir)
 
+if TYPE_CHECKING:                       # imported for the annotations only
+    from .build_coordinator import BuildCoordinator
+    from .editor import Editor
+    from .sidebar import Sidebar
+
 log = logging.getLogger(__name__)
 
 # The name a document has before it has been saved anywhere.
 UNTITLED = "Untitled"
 
 
+class DocumentHost(Protocol):
+    """
+    What this class needs from the window it belongs to.
+
+    Written down so it can be checked, and so it cannot quietly grow — see
+    :class:`build_coordinator.BuildHost`.  Also a Gtk.Window: the Save As
+    chooser and the unsaved-changes question are both parented on it.
+    """
+
+    editor:         Editor
+    sidebar:        Sidebar
+    builds:         BuildCoordinator
+    # Its own, read off the *other* windows when checking for a second copy
+    # of a file that is already open.
+    documents:      "DocumentController"
+    auto_convert:   bool
+    current_slide:  int
+
+    def show_toast(self, message: str, timeout: int = ...) -> None: ...
+    def show_error(self, message: str) -> None: ...
+    def set_document_title(self, name: str) -> None: ...
+    def hold_file_dialog(self, dialog: Gtk.FileDialog | None) -> None: ...
+    def sync_panel_to_document(self, text: str) -> None: ...
+    def refresh_live_slide(self, text: str | None = ...) -> None: ...
+    def update_word_count(self, text: str) -> None: ...
+    def refresh_recent_actions(self) -> None: ...
+    def get_application(self) -> Gtk.Application: ...
+
+
 class DocumentController:
     """Owns where the document is, and every way it reaches or leaves disk."""
 
-    def __init__(self, window) -> None:
+    def __init__(self, window: DocumentHost) -> None:
         self._win = window
 
         # ── The document ─────────────────────────────────────────────────────
@@ -213,8 +248,8 @@ class DocumentController:
         win.update_word_count(text)
         win.builds.update_chip()
         self.modified = False
-        win.set_document_title(self.display_name)
-        display = self.display_path
+        display = self.pres_path or path        # known: file_path is *path*
+        win.set_document_title(display.name)
         save_last_file(display)
         save_recent_file(display)
         win.refresh_recent_actions()
@@ -275,15 +310,16 @@ class DocumentController:
         *on_done* runs after the write lands — see :meth:`save` for why it
         cannot simply be the next statement at the call site.
         """
-        win = self._win
-        if self.file_path is None:
+        win  = self._win
+        path = self.file_path
+        if path is None:
             return self.save_as_dialog(on_done=on_done)
         try:
-            self.file_path.write_text(win.editor.get_text(), encoding="utf-8")
+            path.write_text(win.editor.get_text(), encoding="utf-8")
             if self.pres_path:
                 self.pack_pres()
             self.modified = False
-            display = self.display_path
+            display = self.pres_path or path
             win.set_document_title(display.name)
             save_last_file(display)
             # Delete any orphaned recovery file (fixes #59)

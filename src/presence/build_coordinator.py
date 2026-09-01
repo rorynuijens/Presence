@@ -40,6 +40,7 @@ import logging
 import os
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING, Protocol
 
 import gi
 gi.require_version("Gtk", "4.0")
@@ -47,13 +48,38 @@ from gi.repository import Gtk
 
 from .slides.themes import ASPECT_RATIOS
 
+if TYPE_CHECKING:                       # imported for the annotations only
+    from .converter import Converter
+    from .document_controller import DocumentController
+    from .editor import Editor
+    from .sidebar import Sidebar
+
 log = logging.getLogger(__name__)
+
+
+class BuildHost(Protocol):
+    """
+    What this class needs from the window it belongs to.  Seven names.
+
+    Written down so it can be checked, and so it cannot quietly grow: the
+    controllers used to take an untyped ``window`` and reach for whatever
+    they liked on it, which is how forty-seven private attributes ended up
+    being this seam.  Also a Gtk.Window, since dialogs are parented on it.
+    """
+
+    editor:         Editor
+    sidebar:        Sidebar
+    converter:      Converter
+    documents:      DocumentController
+    banner:         Gtk.Widget           # Adw.Banner
+    present_button: Gtk.Button
+    speaking_rate:  int
 
 
 class BuildCoordinator:
     """Owns build state, the header chip and fold lines for :class:`MainWindow`."""
 
-    def __init__(self, window) -> None:
+    def __init__(self, window: BuildHost) -> None:
         self._win = window
 
         # ── The build ────────────────────────────────────────────────────────
@@ -110,7 +136,7 @@ class BuildCoordinator:
             # The document's own directory, never the output's: Export PDF
             # re-points the build at wherever the writer chose to save it,
             # and the deck's pictures still live next to the Markdown.
-            base_dir    = docs.base_dir
+            base_dir    = docs.file_path.parent
 
         win.converter.convert(win.editor.get_text(), base_dir, output_path)
 
