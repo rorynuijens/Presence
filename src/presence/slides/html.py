@@ -94,7 +94,7 @@ from .splitter import (is_title_slide, extract_speaker_notes,
 from .renderer    import render_slide_content
 from .layout      import (AUTO_IMAGE_LAYOUT, PAIR_SIZE, choose_layout,
                           cell_fit)
-from .utils       import image_aspect
+from .utils       import image_aspect, image_is_missing
 from .frontmatter import extract_slide_directives
 from .utils       import logo_img_tag, progress_bar_html
 
@@ -172,6 +172,12 @@ def md_to_html_slides(
             "title": infer_slide_title(slide_body, fallback=f"Slide {i + 1}"),
             "notes": notes,
             "body":  cleaned_md,
+            # Recorded for every slide, before the only_index skip below, so
+            # a single-slide render still reports the whole deck's broken
+            # picture paths rather than only the one under the cursor.
+            "missing_images": [src for src in
+                               (img.get("src", "") for img in images)
+                               if image_is_missing(src, base_url)],
         })
 
         page_num = i if first_is_title else i + 1

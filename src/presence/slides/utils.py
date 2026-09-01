@@ -146,6 +146,33 @@ def compute_slide_start_lines(text: str) -> list[int]:
 
 # ── Intrinsic image size ──────────────────────────────────────────────────────
 
+def image_is_missing(src: str, base_url: "str | None") -> bool:
+    """
+    True when *src* names a local file that is not there to be drawn.
+
+    Worth asking separately from :func:`image_aspect`, which answers None for
+    a missing file and for a perfectly good remote one alike.  Placement is
+    automatic, so a picture that fails to load leaves a gap the layout put
+    there on purpose-looking terms: the writer cannot tell a low heading from
+    a broken path by looking at the slide, and has to be told.
+
+    Remote and inline sources are never reported — a URL is not this
+    function's to resolve, and a data: URI carries its own bytes.
+    """
+    if not src or src.startswith("data:"):
+        return False
+    parsed = urlparse(src)
+    if parsed.scheme in ("http", "https"):
+        return False
+    try:
+        path = Path(src) if Path(src).is_absolute() else (
+            (Path(base_url) / src).resolve() if base_url else Path(src)
+        )
+        return not path.is_file()
+    except OSError:
+        return True
+
+
 @lru_cache(maxsize=512)
 def _size_for(path: str, mtime: float, nbytes: int) -> "tuple[int, int] | None":
     """Cached header read. Keyed on mtime and size so edits are picked up."""

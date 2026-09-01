@@ -158,12 +158,13 @@ def test_the_deck_really_does_spill(laid_out):
 
 
 def test_every_fold_names_a_line_inside_its_own_slide(laid_out):
-    from presence.converter import _measure_folds, _slide_page_indices
+    from presence.slides.pagination import (measure_folds,
+                                        slide_page_indices)
 
     document, n_slides = laid_out
     starts = compute_slide_start_lines(SPILLING_DECK)
-    folds = _measure_folds(document, n_slides,
-                           _slide_page_indices(document, n_slides))
+    folds = measure_folds(document, n_slides,
+                           slide_page_indices(document, n_slides))
 
     for index, fold in enumerate(folds):
         if fold is None:
@@ -176,29 +177,31 @@ def test_every_fold_names_a_line_inside_its_own_slide(laid_out):
 
 
 def test_the_slides_that_overflow_are_the_ones_that_get_marked(laid_out):
-    from presence.converter import _measure_folds, _slide_page_indices
+    from presence.slides.pagination import (measure_folds,
+                                        slide_page_indices)
 
     document, n_slides = laid_out
-    folds = _measure_folds(document, n_slides,
-                           _slide_page_indices(document, n_slides))
+    folds = measure_folds(document, n_slides,
+                           slide_page_indices(document, n_slides))
 
     assert [f is not None for f in folds] == [False, True, False, True, False]
 
 
 def test_reading_folds_in_page_order_is_what_goes_wrong(laid_out):
     """Pins the bug itself, so the page mapping cannot be quietly dropped."""
-    from presence.converter import _measure_folds, _slide_page_indices
+    from presence.slides.pagination import (measure_folds,
+                                        slide_page_indices)
 
     document, n_slides = laid_out
-    by_page  = _measure_folds(document, n_slides)
-    by_slide = _measure_folds(document, n_slides,
-                              _slide_page_indices(document, n_slides))
+    by_page  = measure_folds(document, n_slides)
+    by_slide = measure_folds(document, n_slides,
+                              slide_page_indices(document, n_slides))
     assert by_page != by_slide
 
 
 def test_one_slide_on_its_own_needs_no_mapping(laid_out):
     """The live path renders a single slide, so page 0 is that slide's page."""
-    from presence.converter import _measure_folds
+    from presence.slides.pagination import measure_folds
 
     document, _n = laid_out
-    assert _measure_folds(document, 1) == _measure_folds(document, 1, [0])
+    assert measure_folds(document, 1) == measure_folds(document, 1, [0])

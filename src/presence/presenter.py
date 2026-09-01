@@ -98,9 +98,11 @@ class SlideshowWindow(Adw.Window):
         # One rendered page per slide, filled in by load(); None until the
         # background pass reaches that slide.
         self._pages: list = [None] * max(0, n_slides)
-        # Which PDF page each slide starts on.  A slide whose text overflows
-        # leaves a continuation page behind it, so this is not always the
-        # slide's own index — see converter._slide_page_indices.
+        # Which page of the built PDF each slide is on.  The build drops the
+        # continuation pages an overflowing slide leaves behind, so this is
+        # normally the slide's own index — but it is still passed in rather
+        # than assumed, because a trim that could not be taken falls back to
+        # the whole document.  See slides/pagination.slide_pages_pdf.
         self._slide_pages: list = (
             list(slide_pages) if slide_pages
             else list(range(max(0, n_slides)))

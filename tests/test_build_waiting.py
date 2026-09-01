@@ -162,6 +162,7 @@ class _Converter:
     def __init__(self):
         self.slide_info = []
         self.thumbnails = []
+        self.warnings   = []
         self.ratio = "16:9"
 
 

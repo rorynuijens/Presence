@@ -308,21 +308,26 @@ class BuildCoordinator:
         # from.  Where the two have drifted apart the live document follows
         # immediately, carrying these pictures onto the slides they still
         # belong to and marking the rest as out of date.
-        overflow_count = win.sidebar.update_from_conversion(
+        win.sidebar.update_from_conversion(
             converter.slide_info, converter.thumbnails,
             markdown_text=self.built_text or "",
             wpm=win.speaking_rate,
-        ) or 0
+        )
         live_text = win.editor.get_text()
         if live_text != self.built_text:
             win.sidebar.update_from_text(live_text)
-        if overflow_count:
-            s = "slide" if overflow_count == 1 else "slides"
-            win.banner.set_title(
-                f"{overflow_count} {s} may have too much text "
-                f"— content could be clipped in the PDF."
-            )
+
+        # A slide that overflowed, a picture that did not resolve and a theme
+        # that is not installed all render as a slide that looks deliberate,
+        # so the build has to say so.  Composed by the slides layer, which is
+        # also what the CLI prints, so both say the same thing about the same
+        # deck.
+        warnings = converter.warnings
+        if warnings:
+            win.banner.set_title(" ".join(warnings))
             win.banner.set_revealed(True)
+        else:
+            win.banner.set_revealed(False)
 
         self.slide_w, self.slide_h = ASPECT_RATIOS.get(
             win.converter.ratio, (1280, 720)

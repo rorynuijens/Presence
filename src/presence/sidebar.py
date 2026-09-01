@@ -380,7 +380,11 @@ class Sidebar(Gtk.Box):
         for i, info in enumerate(slide_info):
             fold = info.get("fold_line", "missing")
             if fold != "missing":
-                overflows.append(fold is not None)
+                # `clipped` as well as the fold: a slide that breaks cleanly
+                # at the page edge has nothing crossing its own first page,
+                # so the fold alone would leave the one slide that actually
+                # lost content unbadged.
+                overflows.append(fold is not None or bool(info.get("clipped")))
             else:
                 overflows.append(
                     len(_re.findall(r'\S+', info.get('body', ''))) > 120

@@ -143,7 +143,7 @@ def test_the_live_fold_is_the_one_a_build_would_measure(converter, tmp_path):
     from presence.slides.splitter import split_slides
     from presence.slides.html import md_to_html_slides
     from presence.slides.utils import compute_slide_start_lines
-    from presence.converter import _measure_folds
+    from presence.slides.pagination import measure_folds
     import weasyprint
 
     meta, body = parse_frontmatter(OVERFLOWING)
@@ -156,7 +156,7 @@ def test_the_live_fold_is_the_one_a_build_would_measure(converter, tmp_path):
         line_offsets=compute_slide_start_lines(OVERFLOWING),
     )
     document = weasyprint.HTML(string=html, base_url=str(tmp_path)).render()
-    build_folds = _measure_folds(document, len(slides))
+    build_folds = measure_folds(document, len(slides))
 
     live_folds = [
         converter._render_frame(OVERFLOWING, tmp_path, i, 640).fold_line
@@ -298,14 +298,14 @@ def test_an_overflowing_slide_leaves_a_continuation_page(converter, tmp_path):
 
 
 def test_the_page_map_skips_a_slide_s_overflow(converter, tmp_path):
-    from presence.converter import _slide_page_indices
+    from presence.slides.pagination import slide_page_indices
 
     over = "\n\n".join(f"Paragraph {i} with a fair amount of text on it."
                        for i in range(30))
     doc = f"# One\n\nShort.\n\n---\n\n# Two\n\n{over}\n\n---\n\n# Three\n\nShort.\n"
     document = _layout(converter, doc, tmp_path)
 
-    pages = _slide_page_indices(document, 3)
+    pages = slide_page_indices(document, 3)
 
     assert pages[0] == 0
     assert pages[1] == 1
@@ -315,23 +315,23 @@ def test_the_page_map_skips_a_slide_s_overflow(converter, tmp_path):
 
 
 def test_a_deck_with_nothing_overflowing_maps_one_to_one(converter, tmp_path):
-    from presence.converter import _slide_page_indices
+    from presence.slides.pagination import slide_page_indices
 
     document = _layout(converter, TWO_SLIDES, tmp_path)
 
-    assert _slide_page_indices(document, 2) == [0, 1]
+    assert slide_page_indices(document, 2) == [0, 1]
 
 
 def test_the_page_map_falls_back_when_it_cannot_read_the_stamps(converter):
     """An unreadable document must not take the build down with it."""
-    from presence.converter import _slide_page_indices
+    from presence.slides.pagination import slide_page_indices
 
     class Broken:
         @property
         def pages(self):
             raise RuntimeError("no box tree here")
 
-    assert _slide_page_indices(Broken(), 3) == [0, 1, 2]
+    assert slide_page_indices(Broken(), 3) == [0, 1, 2]
 
 
 def _layout(converter, markdown: str, base_dir: Path):

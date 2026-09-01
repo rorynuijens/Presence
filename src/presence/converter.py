@@ -50,6 +50,9 @@ from .slides.themes import ASPECT_RATIOS
 from .slides.theme_loader import load_all_themes
 from .slides.utils import (encode_logo, safe_subpath,
                             compute_slide_start_lines)
+from .slides.pagination import (slide_page_indices, slide_pages_pdf,
+                                measure_folds, fragmented_slides)
+from .slides.diagnostics import build_warnings
 from .slides.thumbnails_render import render_thumbnails, render_page_png
 
 log = logging.getLogger(__name__)
@@ -63,6 +66,10 @@ class RenderContext:
     height:   int
     theme_bg: str
     logo_b64: str | None
+    # Set when the theme the document asked for was not installed, so the
+    # build can say which palette it actually used.  Cached with the rest of
+    # the context, which is right: the same document gets the same answer.
+    theme_warning: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -85,164 +92,6 @@ class SlideFrame:
     n_slides:   int
     width:      int
     height:     int
-
-
-def _measure_folds(document, n_slides: int,
-                   page_indices: list[int] | None = None) -> list[int | None]:
-    """
-    Find, per slide, the first source line whose block runs past the slide.
-
-    Slides are a fixed box with overflow:hidden, so WeasyPrint lays every
-    block out and simply clips what does not fit.  Walking the box tree after
-    layout therefore says exactly where a slide runs out of room, which a
-    word count can only guess at.  The data-src-line attributes put there by
-    the renderer turn a y coordinate back into a line the writer can edit.
-
-    *page_indices* says which PDF page each slide starts on, as measured by
-    :func:`_slide_page_indices`.  It is not optional information once any
-    slide overflows: WeasyPrint emits a continuation page for that slide, so
-    the n-th page stops being the n-th slide and every fold measured after it
-    would be read off the wrong page — naming a line in a slide the writer
-    was not told about, and leaving the slide that really overflows unmarked.
-    Omitting it means one page per slide, which is what a single-slide render
-    render has.
-
-    Returns one entry per slide: the line number, or None when it all fits.
-    Any failure yields None rather than a wrong line — the box tree is
-    WeasyPrint's internal representation and may change between versions.
-    """
-    try:
-        pages = list(document.pages)
-    except Exception:
-        return [None] * n_slides
-
-    if page_indices is None:
-        page_indices = list(range(n_slides))
-
-    folds: list[int | None] = []
-    for index in range(n_slides):
-        page = page_indices[index] if index < len(page_indices) else index
-        folds.append(
-            _fold_line_for_page(pages[page]) if 0 <= page < len(pages) else None
-        )
-    return folds
-
-
-def _fold_line_for_page(page) -> "int | None":
-    """First line that runs past the slide's text area on *page*, or None."""
-    try:
-        boxes = list(_walk_boxes(page._page_box))
-        limit = _content_bottom(boxes, page.height)
-
-        best_y: float | None = None
-        best_line: int | None = None
-
-        for box in boxes:
-            line = _box_line(box)
-            if line is None:
-                continue
-            # Skip containers: a <ul> is stamped with its first item's line,
-            # so letting it compete would fold the list at an item that fits.
-            # A box counts only when its whole subtree comes from one line.
-            if _subtree_lines(box) != {line}:
-                continue
-            # Ignore zero-height boxes, which carry no visible content.
-            if box.height <= 0 or box.position_y + box.height <= limit:
-                continue
-            # Topmost box that crosses: where the slide runs out of room.
-            if best_y is None or box.position_y < best_y:
-                best_y = box.position_y
-                best_line = line
-        return best_line
-    except Exception:
-        log.debug("Fold measurement failed", exc_info=True)
-        return None
-
-
-def _slide_page_indices(document, n_slides: int) -> list[int]:
-    """
-    The PDF page each slide starts on.
-
-    A slide is a fixed box with overflow:hidden, but WeasyPrint fragments a
-    block that does not fit rather than clipping it, so a slide with too much
-    text emits a continuation page.  Page number and slide number therefore
-    part company as soon as one slide overflows, and everything made out of
-    the PDF — thumbnails, exported images, the handout, the slideshow — has
-    to be told which page to read.
-
-    Falls back to one page per slide when the stamps cannot be read, which is
-    exactly right for the overwhelmingly common case of nothing overflowing.
-    """
-    found: dict[int, int] = {}
-    try:
-        for page_number, page in enumerate(document.pages):
-            for box in _walk_boxes(page._page_box):
-                element = getattr(box, "element", None)
-                if element is None or not hasattr(element, "get"):
-                    continue
-                raw = element.get("data-slide-index")
-                if raw is None:
-                    continue
-                try:
-                    index = int(raw)
-                except ValueError:
-                    continue
-                # First page carrying this slide is where it starts; later
-                # pages are its overflow.
-                found.setdefault(index, page_number)
-                break
-    except Exception:
-        log.debug("Slide/page mapping failed", exc_info=True)
-
-    return [found.get(i, i) for i in range(n_slides)]
-
-
-def _box_line(box) -> "int | None":
-    """The source line stamped on *box*, if any."""
-    element = getattr(box, "element", None)
-    if element is None or not hasattr(element, "get"):
-        return None
-    raw = element.get("data-src-line")
-    if raw is None:
-        return None
-    try:
-        return int(raw)
-    except ValueError:
-        return None
-
-
-def _subtree_lines(box) -> set:
-    """Every source line appearing in *box* and its descendants."""
-    return {line for line in (_box_line(b) for b in _walk_boxes(box))
-            if line is not None}
-
-
-def _walk_boxes(box):
-    """Yield *box* and every descendant."""
-    stack = [box]
-    while stack:
-        current = stack.pop()
-        yield current
-        stack.extend(getattr(current, "children", ()) or ())
-
-
-def _content_bottom(boxes, page_height: float) -> float:
-    """
-    Bottom of the slide's text area.
-
-    Themes reserve the lower padding for the slide number and progress bar,
-    so content reaching into it collides with them — the slide has run out of
-    room even though overflow:hidden would not clip until the page edge.
-    Measuring against the text area warns at the point the design intends.
-    """
-    for box in boxes:
-        element = getattr(box, "element", None)
-        if element is None or not hasattr(element, "get"):
-            continue
-        classes = (element.get("class") or "").split()
-        if "slide" in classes:
-            return box.content_box_y() + box.height
-    return page_height
 
 
 class Converter(GObject.Object):
@@ -276,6 +125,7 @@ class Converter(GObject.Object):
         self._last_base:    Path | None      = None
         self._last_output:  Path | None      = None
         self._slide_info:   list             = []
+        self._warnings:     list             = []
         self._thumbnails:   list             = []
         # Cache for _render_context(); keyed by everything that affects the
         # stylesheet.  Guarded because the background thread reads it too.
@@ -360,6 +210,17 @@ class Converter(GObject.Object):
     @property
     def thumbnails(self) -> list:
         return list(self._thumbnails)
+
+    @property
+    def warnings(self) -> list:
+        """
+        What the last build has to say about a deck it rendered anyway.
+
+        A missing picture, an overflowing slide and an uninstalled theme all
+        produce a slide that looks intentional, so none of them can be left
+        to the rendering to convey.
+        """
+        return list(self._warnings)
 
     def build_preview(
         self,
@@ -488,7 +349,7 @@ class Converter(GObject.Object):
             raise ImportError("WeasyPrint is not installed — cannot render.")
 
         document = _weasyprint.HTML(string=html, base_url=str(base_dir)).render()
-        fold = _measure_folds(document, 1)[0]
+        fold = measure_folds(document, 1)[0]
 
         png = render_page_png(document.write_pdf(), 0, width_px)
         if png is None:
@@ -539,10 +400,22 @@ class Converter(GObject.Object):
                 return self._ctx_value
 
         all_themes = load_all_themes()
-        # Fall back to any available theme if the requested one is missing.
+        # A theme named in the frontmatter that is not installed is a typo,
+        # not a reason to refuse to render — but the deck comes back in a
+        # palette the writer did not choose, which looks like nothing went
+        # wrong at all.  Fall back to the app's own default, then to whatever
+        # is installed, and say so either way.
+        theme_warning: str | None = None
         theme = all_themes.get(theme_name)
         if theme is None:
-            theme = next(iter(all_themes.values()), None)
+            theme = all_themes.get(self.theme) or next(
+                iter(all_themes.values()), None
+            )
+            if theme is not None:
+                theme_warning = (
+                    f"Theme '{theme_name}' is not installed — "
+                    f"using {theme.name}."
+                )
         if theme is None:
             raise ValueError(
                 f"Theme '{theme_name}' not found and no themes are installed."
@@ -584,6 +457,7 @@ class Converter(GObject.Object):
                 height=height,
                 theme_bg=theme.bg,
                 logo_b64=logo_b64,
+                theme_warning=theme_warning,
             )
         finally:
             if tmp_css_path is not None:
@@ -624,27 +498,42 @@ class Converter(GObject.Object):
                 raise ImportError(
                     "WeasyPrint is not installed — cannot generate PDF."
                 )
-            wp_doc    = _weasyprint.HTML(
+            wp_doc = _weasyprint.HTML(
                 string=html, base_url=str(base_dir)
             ).render()
-            pdf_bytes = wp_doc.write_pdf()
+
+            n_slides = len(slides)
+            # Where each slide sits in the document WeasyPrint just laid out.
+            # Read before anything is written, because a slide that overflows
+            # leaves a continuation page behind it and the n-th page stops
+            # being the n-th slide from there on.
+            laid_out = slide_page_indices(wp_doc, n_slides)
+
+            # Measured off each slide's own first page: reading folds in page
+            # order would attribute a continuation page's overrun to the next
+            # slide and leave the one that really overflowed unmarked.  Taken
+            # from the untrimmed document, which is the only place the
+            # overrun is still visible.
+            folds = measure_folds(wp_doc, n_slides, laid_out)
+            # Counted before the trim, which is the only moment the extra
+            # pages still exist to be counted.
+            fragmented = fragmented_slides(wp_doc, laid_out)
+
+            # The PDF is one page per slide: the continuation pages are not
+            # slides, and the strip, the images, the handout and the
+            # slideshow have always skipped them.  The file the writer hands
+            # to somebody else now shows what the deck shows.
+            pdf_bytes, pages = slide_pages_pdf(wp_doc, laid_out)
             output_path.write_bytes(pdf_bytes)
 
-            # Same laid-out document the PDF came from, so the folds describe
-            # the file the writer will actually hand out.
-            n_slides = len(slides)
-            pages = _slide_page_indices(wp_doc, n_slides)
-            # Measured off each slide's own first page: a slide that overflows
-            # leaves a continuation page behind it, and reading folds in page
-            # order would attribute that page's overrun to the next slide.
-            folds = _measure_folds(wp_doc, n_slides, pages)
-            for info, fold, page in zip(slide_info, folds, pages):
+            for index, (info, fold, page) in enumerate(
+                    zip(slide_info, folds, pages)):
                 info["fold_line"]  = fold
-                # Which PDF page this slide starts on.  Not always its own
-                # index: an overflowing slide leaves a continuation page
-                # behind it, and everything made out of the PDF needs to skip
-                # those rather than mistake them for the next slide.
+                # Which page of the file just written this slide is on.
                 info["page_index"] = page
+                info["clipped"]    = index in fragmented
+
+            warnings = build_warnings(slide_info, ctx.theme_warning)
 
             duration   = time.monotonic() - t0
             html_uri   = html_path.as_uri()
@@ -655,7 +544,7 @@ class Converter(GObject.Object):
             GLib.idle_add(
                 self._on_success,
                 n_slides, duration, str(output_path), html_uri,
-                slide_info, thumbnails,
+                slide_info, thumbnails, warnings,
             )
 
         except BaseException as exc:
@@ -667,10 +556,12 @@ class Converter(GObject.Object):
 
     def _on_success(self, n_slides: int, duration: float,
                     pdf_path: str, html_uri: str,
-                    slide_info: list, thumbnails: list) -> bool:
+                    slide_info: list, thumbnails: list,
+                    warnings: list) -> bool:
         # Store results on the main thread — no cross-thread data race.
         self._slide_info = slide_info
         self._thumbnails = thumbnails
+        self._warnings   = warnings
         with self._lock:
             self._converting = False
             pending          = self._pending
@@ -686,6 +577,7 @@ class Converter(GObject.Object):
         return GLib.SOURCE_REMOVE
 
     def _on_failure(self, message: str) -> bool:
+        self._warnings = []
         with self._lock:
             self._converting = False
             pending          = self._pending

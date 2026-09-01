@@ -33,6 +33,13 @@ def main() -> None:
     if not args.input.exists():
         sys.exit(f"Input file not found: {args.input}")
 
+    # `presence-cli talk.md` is the documented invocation and has exactly one
+    # sensible answer, so the output argument is optional and defaults beside
+    # the document.  It used to be optional and undefaulted, which meant the
+    # documented command died on the next line with an AttributeError.
+    if args.output is None:
+        args.output = args.input.with_suffix(".pdf")
+
     out_parent = args.output.parent
     if not out_parent.exists():
         sys.exit(f"Output directory does not exist: {out_parent}")
@@ -66,7 +73,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("input",  type=Path, nargs="?",
                         help="Input .md file")
     parser.add_argument("output", type=Path, nargs="?",
-                        help="Output .pdf file")
+                        help="Output .pdf file "
+                             "(default: the input file with a .pdf suffix)")
     parser.add_argument(
         "--theme", default="light",
         help="Theme slug (default: light; overridden by frontmatter)",

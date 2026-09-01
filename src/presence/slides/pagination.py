@@ -1,0 +1,234 @@
+"""
+pagination.py — Reading slide structure back off a laid-out WeasyPrint page.
+
+A slide is a fixed box with ``overflow: hidden``, but WeasyPrint fragments a
+block that does not fit rather than clipping it, so a slide with too much text
+emits a *continuation page*: a headerless remainder that begins mid-sentence,
+sometimes followed by a page carrying nothing but the theme's footer.  Page
+number and slide number part company the moment that happens.
+
+Everything Presence makes out of the PDF has to be told which page a slide
+starts on, and — because those continuation pages are not slides — the PDF
+handed to a reader has to be built from that list too.  Both engines need
+that, and the CLI must not import GTK, so it lives here rather than in
+``converter.py``.
+"""
+from __future__ import annotations
+
+import logging
+
+log = logging.getLogger(__name__)
+
+
+def walk_boxes(box):
+    """Yield *box* and every descendant of it."""
+    stack = [box]
+    while stack:
+        current = stack.pop()
+        yield current
+        stack.extend(getattr(current, "children", ()) or ())
+
+
+def slide_page_indices(document, n_slides: int) -> list[int]:
+    """
+    The PDF page each slide starts on, from the ``data-slide-index`` stamps.
+
+    Falls back to one page per slide when the stamps cannot be read, which is
+    exactly right for the overwhelmingly common case of nothing overflowing.
+    """
+    found: dict[int, int] = {}
+    try:
+        for page_number, page in enumerate(document.pages):
+            for box in walk_boxes(page._page_box):
+                element = getattr(box, "element", None)
+                if element is None or not hasattr(element, "get"):
+                    continue
+                raw = element.get("data-slide-index")
+                if raw is None:
+                    continue
+                try:
+                    index = int(raw)
+                except ValueError:
+                    continue
+                # First page carrying this slide is where it starts; later
+                # pages are its overflow.
+                found.setdefault(index, page_number)
+                break
+    except Exception:
+        log.debug("Slide/page mapping failed", exc_info=True)
+
+    return [found.get(i, i) for i in range(n_slides)]
+
+
+def fragmented_slides(document, pages: list[int]) -> list[int]:
+    """
+    Indices of the slides that needed more than one page.
+
+    Not the same question as the fold, and neither one subsumes the other.
+    The fold catches text reaching into the padding a theme reserves for the
+    slide number, which is content the reader can still see; this catches
+    content WeasyPrint moved onto a page of its own, which is content
+    :func:`slide_pages_pdf` then drops.  A slide that breaks cleanly at the
+    page edge has no box crossing its own first page and no fold at all — so
+    asking only the fold would stay silent about the one slide that actually
+    lost something.
+    """
+    try:
+        total = len(document.pages)
+    except Exception:
+        return []
+
+    over = []
+    for index, start in enumerate(pages):
+        end = pages[index + 1] if index + 1 < len(pages) else total
+        if end - start > 1:
+            over.append(index)
+    return over
+
+
+def slide_pages_pdf(document, pages: list[int]) -> "tuple[bytes, list[int]]":
+    """
+    The PDF of *document* with the continuation pages left out.
+
+    One page per slide, which is what the thumbnail strip, the exported
+    images, the handout and the slideshow have always shown — they index by
+    :func:`slide_page_indices` and skip the fragments.  The exported PDF was
+    the one artifact that did not, so the file a writer mailed to somebody
+    was the only place the half-sliced remainders showed up.
+
+    A slide is ``overflow: hidden``: the deck shows what fits, and the editor
+    marks the fold and banners the slide, so nothing is lost here that the
+    slide itself was ever going to show.
+
+    Returns the PDF bytes together with the page each slide sits on *in those
+    bytes* — ``range(n_slides)`` once the fragments are gone.  Callers pass
+    that on to the thumbnails, the handout and the slideshow rather than
+    assuming the trim happened, because it falls back to the whole document
+    if the subset cannot be taken: a deck with a stray page still beats no
+    deck at all, but only if everything downstream is told which it got.
+    """
+    try:
+        all_pages = list(document.pages)
+        wanted    = [all_pages[p] for p in pages if 0 <= p < len(all_pages)]
+        if len(wanted) == len(pages):
+            if len(wanted) < len(all_pages):
+                document = document.copy(wanted)
+            return document.write_pdf(), list(range(len(pages)))
+    except Exception:
+        log.warning("Could not drop continuation pages; exporting every page",
+                    exc_info=True)
+
+    return document.write_pdf(), list(pages)
+
+
+# ── The fold: where a slide runs out of room ─────────────────────────────────
+
+def measure_folds(document, n_slides: int,
+                   page_indices: list[int] | None = None) -> list[int | None]:
+    """
+    Find, per slide, the first source line whose block runs past the slide.
+
+    Slides are a fixed box with overflow:hidden, so WeasyPrint lays every
+    block out and simply clips what does not fit.  Walking the box tree after
+    layout therefore says exactly where a slide runs out of room, which a
+    word count can only guess at.  The data-src-line attributes put there by
+    the renderer turn a y coordinate back into a line the writer can edit.
+
+    *page_indices* says which PDF page each slide starts on, as measured by
+    :func:`slide_page_indices`.  It is not optional information once any
+    slide overflows: WeasyPrint emits a continuation page for that slide, so
+    the n-th page stops being the n-th slide and every fold measured after it
+    would be read off the wrong page — naming a line in a slide the writer
+    was not told about, and leaving the slide that really overflows unmarked.
+    Omitting it means one page per slide, which is what a single-slide render
+    render has.
+
+    Returns one entry per slide: the line number, or None when it all fits.
+    Any failure yields None rather than a wrong line — the box tree is
+    WeasyPrint's internal representation and may change between versions.
+    """
+    try:
+        pages = list(document.pages)
+    except Exception:
+        return [None] * n_slides
+
+    if page_indices is None:
+        page_indices = list(range(n_slides))
+
+    folds: list[int | None] = []
+    for index in range(n_slides):
+        page = page_indices[index] if index < len(page_indices) else index
+        folds.append(
+            fold_line_for_page(pages[page]) if 0 <= page < len(pages) else None
+        )
+    return folds
+
+
+def fold_line_for_page(page) -> "int | None":
+    """First line that runs past the slide's text area on *page*, or None."""
+    try:
+        boxes = list(walk_boxes(page._page_box))
+        limit = content_bottom(boxes, page.height)
+
+        best_y: float | None = None
+        best_line: int | None = None
+
+        for box in boxes:
+            line = box_line(box)
+            if line is None:
+                continue
+            # Skip containers: a <ul> is stamped with its first item's line,
+            # so letting it compete would fold the list at an item that fits.
+            # A box counts only when its whole subtree comes from one line.
+            if subtree_lines(box) != {line}:
+                continue
+            # Ignore zero-height boxes, which carry no visible content.
+            if box.height <= 0 or box.position_y + box.height <= limit:
+                continue
+            # Topmost box that crosses: where the slide runs out of room.
+            if best_y is None or box.position_y < best_y:
+                best_y = box.position_y
+                best_line = line
+        return best_line
+    except Exception:
+        log.debug("Fold measurement failed", exc_info=True)
+        return None
+
+
+def box_line(box) -> "int | None":
+    """The source line stamped on *box*, if any."""
+    element = getattr(box, "element", None)
+    if element is None or not hasattr(element, "get"):
+        return None
+    raw = element.get("data-src-line")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def subtree_lines(box) -> set:
+    """Every source line appearing in *box* and its descendants."""
+    return {line for line in (box_line(b) for b in walk_boxes(box))
+            if line is not None}
+
+
+def content_bottom(boxes, page_height: float) -> float:
+    """
+    Bottom of the slide's text area.
+
+    Themes reserve the lower padding for the slide number and progress bar,
+    so content reaching into it collides with them — the slide has run out of
+    room even though overflow:hidden would not clip until the page edge.
+    Measuring against the text area warns at the point the design intends.
+    """
+    for box in boxes:
+        element = getattr(box, "element", None)
+        if element is None or not hasattr(element, "get"):
+            continue
+        classes = (element.get("class") or "").split()
+        if "slide" in classes:
+            return box.content_box_y() + box.height
+    return page_height
