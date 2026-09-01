@@ -644,7 +644,7 @@ class ThemePanel(Gtk.Box):
             "theme":     self._converter.theme,
             "ratio":     self._converter.ratio,
             "logo":      str(self._converter.logo_path or ""),
-            "font_size": self._window._editor.get_font_size(),
+            "font_size": self._window.editor.get_font_size(),
         })
 
 

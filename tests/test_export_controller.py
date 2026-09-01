@@ -29,42 +29,63 @@ class FakeEditor:
         return self._text
 
 
-class FakeWindow:
-    def __init__(self, text: str = "") -> None:
-        self._editor = FakeEditor(text)
-        self._file_path = None
-        self._pres_path = None
-        self._output_path = None
-        self._html_uri = None
-        self._slide_info = []
-        self._active_file_dialog = None
-        self.toasts = []
-        self.errors = []
-        self.converts = 0
-        self.deferred = []
-        self.exported = []
-        self.busy = []
+class FakeDocuments:
+    """Where the document is — the document controller's state, stood in for."""
 
-    def _show_toast(self, message, timeout=None): self.toasts.append(message)
-    def _show_error(self, message):              self.errors.append(message)
-    def _trigger_convert(self):                  self.converts += 1; return True
-    def _export_busy(self, busy):                self.busy.append(busy)
+    def __init__(self) -> None:
+        self.file_path   = None
+        self.pres_path   = None
+        self.output_path = None
 
-    def _build_for_export(self, on_done):
+    @property
+    def display_path(self):
+        return self.pres_path or self.file_path
+
+
+class FakeBuilds:
+    """The build, as far as the export controller can see it."""
+
+    def __init__(self, win) -> None:
+        self._win = win
+        self.html_uri = None
+        self.slide_info = []
+
+    def build_for_export(self, on_done, on_wait=None):
         # The real one always builds, then runs on_done when it lands.
-        self.converts += 1
-        self.exported.append(on_done)
+        self._win.converts += 1
+        self._win.exported.append(on_done)
         on_done()
 
-    def _with_current_build(self, action, on_wait=None):
+    def with_current_build(self, action, on_wait=None):
         # The real one may defer; here it runs, so the test sees the result.
-        self.deferred.append(action)
+        self._win.deferred.append(action)
         if on_wait is not None:
             on_wait(True)
             action()
             on_wait(False)
         else:
             action()
+
+
+class FakeWindow:
+    """Everything ExportController asks a window for — none of it private."""
+
+    def __init__(self, text: str = "") -> None:
+        self.editor    = FakeEditor(text)
+        self.documents = FakeDocuments()
+        self.builds    = FakeBuilds(self)
+        self.toasts = []
+        self.errors = []
+        self.converts = 0
+        self.deferred = []
+        self.exported = []
+        self.busy = []
+        self.dialogs = []
+
+    def show_toast(self, message, timeout=None): self.toasts.append(message)
+    def show_error(self, message):              self.errors.append(message)
+    def export_busy(self, busy):                self.busy.append(busy)
+    def hold_file_dialog(self, dialog):         self.dialogs.append(dialog)
 
 
 class FakeGFile:
@@ -170,12 +191,12 @@ def test_the_pdf_export_reports_a_refusal_in_the_banner_not_a_toast(tmp_path):
 
 
 def test_the_dialog_clears_the_window_s_handle_on_it(tmp_path):
-    """A stale _active_file_dialog would keep the dialog alive after it closed."""
+    """A handle still held would keep the dialog alive after it closed."""
     exports, win = controller()
 
     answer(exports, tmp_path / "deck.pdf")
 
-    assert win._active_file_dialog is None
+    assert win.dialogs[-1] is None, "the window was never told to let go"
 
 
 # ── Reading the built PDF ─────────────────────────────────────────────────────
@@ -189,7 +210,7 @@ def test_an_export_without_a_build_says_so_rather_than_failing():
 
 def test_an_export_whose_pdf_vanished_says_so(tmp_path):
     exports, win = controller()
-    win._output_path = tmp_path / "gone.pdf"      # never written
+    win.documents.output_path = tmp_path / "gone.pdf"      # never written
 
     assert exports._read_built_pdf("No build.") is None
     assert win.toasts == ["No build."]
@@ -199,7 +220,7 @@ def test_the_built_pdf_is_read_when_it_is_there(tmp_path):
     pdf = tmp_path / "deck.pdf"
     pdf.write_bytes(b"%PDF-1.7 fake")
     exports, win = controller()
-    win._output_path = pdf
+    win.documents.output_path = pdf
 
     assert exports._read_built_pdf("missing") == b"%PDF-1.7 fake"
     assert win.toasts == []
@@ -214,7 +235,7 @@ def test_exporting_a_pdf_repoints_the_build_and_converts(tmp_path):
 
     exports._write_pdf(dest)
 
-    assert win._output_path == dest
+    assert win.documents.output_path == dest
     assert win.converts == 1
 
 
@@ -225,7 +246,7 @@ def test_exporting_html_copies_the_built_file(tmp_path):
     built.write_text("<html>the deck</html>")
     dest = tmp_path / "out.html"
     exports, win = controller()
-    win._html_uri = built.as_uri()
+    win.builds.html_uri = built.as_uri()
 
     exports._copy_built_html(dest)
 
@@ -235,7 +256,7 @@ def test_exporting_html_copies_the_built_file(tmp_path):
 
 def test_exporting_html_reports_a_failure_instead_of_raising(tmp_path):
     exports, win = controller()
-    win._html_uri = (tmp_path / "never-built.html").as_uri()
+    win.builds.html_uri = (tmp_path / "never-built.html").as_uri()
 
     exports._copy_built_html(tmp_path / "out.html")
 
@@ -255,8 +276,8 @@ def test_exporting_images_writes_one_png_per_slide(tmp_path, monkeypatch):
     folder.mkdir()
 
     exports, win = controller()
-    win._output_path = pdf
-    win._file_path = tmp_path / "talk.md"
+    win.documents.output_path = pdf
+    win.documents.file_path = tmp_path / "talk.md"
 
     exports.render_slide_images(folder)
     _drain_idle()
@@ -276,8 +297,8 @@ def test_a_slide_that_failed_to_render_is_skipped_not_written(tmp_path, monkeypa
     folder.mkdir()
 
     exports, win = controller()
-    win._output_path = pdf
-    win._file_path = tmp_path / "talk.md"
+    win.documents.output_path = pdf
+    win.documents.file_path = tmp_path / "talk.md"
 
     exports.render_slide_images(folder)
     _drain_idle()
@@ -296,9 +317,9 @@ def test_image_names_follow_the_bundle_rather_than_the_markdown(tmp_path, monkey
     folder.mkdir()
 
     exports, win = controller()
-    win._output_path = pdf
-    win._file_path = tmp_path / "slides.md"
-    win._pres_path = tmp_path / "My Talk.pres"
+    win.documents.output_path = pdf
+    win.documents.file_path = tmp_path / "slides.md"
+    win.documents.pres_path = tmp_path / "My Talk.pres"
 
     exports.render_slide_images(folder)
     _drain_idle()
@@ -355,9 +376,9 @@ def test_an_export_asks_for_the_pages_the_build_measured(tmp_path, monkeypatch):
     folder.mkdir()
 
     exports, win = controller()
-    win._output_path = pdf
-    win._file_path = tmp_path / "talk.md"
-    win._slide_info = [{"page_index": 0}, {"page_index": 2}]   # slide 1 spilled
+    win.documents.output_path = pdf
+    win.documents.file_path = tmp_path / "talk.md"
+    win.builds.slide_info = [{"page_index": 0}, {"page_index": 2}]   # slide 1 spilled
 
     exports.render_slide_images(folder)
     _drain_idle()
@@ -380,9 +401,9 @@ def test_a_build_that_never_recorded_pages_falls_back(tmp_path, monkeypatch):
     folder.mkdir()
 
     exports, win = controller()
-    win._output_path = pdf
-    win._file_path = tmp_path / "talk.md"
-    win._slide_info = [{}]                       # an older build
+    win.documents.output_path = pdf
+    win.documents.file_path = tmp_path / "talk.md"
+    win.builds.slide_info = [{}]                       # an older build
 
     exports.render_slide_images(folder)
     _drain_idle()

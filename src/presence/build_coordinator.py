@@ -7,8 +7,15 @@ Settings, and a build never saves — and this module owns the second one:
 what starts a build, what the header chip says about it, and what runs once
 it lands.
 
-Three things live here that used to be spread through the window:
+Four things live here that used to be spread through the window:
 
+*  **The build's state.**  ``built_text``, ``building_text``, ``converting``,
+   ``slide_info``, ``thumbnails``, ``html_uri``, the deck's pixel size and
+   the scratch PDF an unsaved deck builds to are all owned here.  They were
+   window attributes this class reached in and wrote — so the window, this
+   class and the export controller could each move them, and none of them
+   owned them.  The window asks (``self._builds.html_uri``); nothing writes
+   these but this class.
 *  **Whether the build still matches the document.**  Compared by text rather
    than by a modified flag, so undoing back to the built state correctly reads
    as up to date again.
@@ -21,6 +28,10 @@ Three things live here that used to be spread through the window:
    every keystroke.  That one is always the fresher for the slide it
    covers, so its answer wins for that one slide and the build's holds for the
    rest.
+
+The header chip is the window's widget — it sits in the header bar and the
+window packs it — but everything it says comes from here, so the window hands
+its parts over once with :meth:`attach_chip` rather than being read for them.
 """
 
 from __future__ import annotations
@@ -44,10 +55,33 @@ class BuildCoordinator:
 
     def __init__(self, window) -> None:
         self._win = window
+
+        # ── The build ────────────────────────────────────────────────────────
+        # The document as of the last build that landed, and as of the one
+        # running now.  The chip compares text rather than tracking a flag.
+        self.built_text:    str | None = None
+        self.building_text: str | None = None
+        self.converting:    bool       = False
+        # What the last build produced, for everything made out of it.
+        self.slide_info: list = []
+        self.thumbnails: list = []
+        self.html_uri:   str  = ""
+        # The deck's pixel size, from the aspect ratio the build used.
+        self.slide_w: int = 1280
+        self.slide_h: int = 720
+        # Where an unsaved deck's PDF goes.  One scratch file, reused until
+        # the deck is saved; there is no scratch Markdown, because the
+        # converter is handed the buffer.
+        self.temp_pdf: Path | None = None
+        # What runs once the build now being asked for lands.
+        self._after_build = None
+
         self._fold_lines: list = []
         # Busy indicators taken by whoever is waiting on the running build,
         # released together when it lands or fails.
         self._waiting: list = []
+        # The header chip's parts, handed over by the window once built.
+        self._chip = self._visual = self._icon = self._spinner = self._label = None
 
     # ── Starting a build ──────────────────────────────────────────────────────
 
@@ -63,30 +97,43 @@ class BuildCoordinator:
         a path, so a build first wrote the buffer over the file on disk, and
         an untitled document got a temporary copy of itself to be read back.
         """
-        win = self._win
-        if win._file_path is None:
+        win  = self._win
+        docs = win.documents
+        if docs.file_path is None:
             # No document directory, so relative image sources have nothing
             # to resolve against and the PDF has nowhere of its own to go.
             # One scratch file serves every build until the deck is saved.
             output_path = self._scratch_pdf()
             base_dir    = output_path.parent
         else:
-            output_path = win._output_path or win._file_path.with_suffix(".pdf")
+            output_path = docs.output_path or docs.file_path.with_suffix(".pdf")
             # The document's own directory, never the output's: Export PDF
             # re-points the build at wherever the writer chose to save it,
             # and the deck's pictures still live next to the Markdown.
-            base_dir    = win._file_path.parent
+            base_dir    = docs.base_dir
 
-        win._converter.convert(win._editor.get_text(), base_dir, output_path)
+        win.converter.convert(win.editor.get_text(), base_dir, output_path)
 
     def _scratch_pdf(self) -> Path:
         """The PDF path for a deck that has never been saved."""
-        win = self._win
-        if win._temp_pdf is None:
+        if self.temp_pdf is None:
             fd, tmp_str = tempfile.mkstemp(suffix=".pdf")
             os.close(fd)
-            win._temp_pdf = Path(tmp_str)
-        return win._temp_pdf
+            self.temp_pdf = Path(tmp_str)
+        return self.temp_pdf
+
+    def cleanup_scratch(self) -> None:
+        """Delete the scratch deck an unsaved document was built to."""
+        if self.temp_pdf is None:
+            return
+        # The converter writes the HTML beside the PDF, so it goes too;
+        # the old cleanup took the PDF and left that one behind.
+        for path in (self.temp_pdf, self.temp_pdf.with_suffix(".html")):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        self.temp_pdf = None
 
     def with_current_build(self, action, on_wait=None) -> None:
         """
@@ -100,18 +147,33 @@ class BuildCoordinator:
         wait for a build and with False once that build settles, either way.
         A deck that is already current never waits, so it is never called.
         """
-        win = self._win
-        if self.state() == "current" and win._html_uri:
+        if self.state() == "current" and self.html_uri:
             action()
             return
-        win._after_build = action
+        self._after_build = action
+        if on_wait is not None:
+            self.wait_for_build(on_wait)
+        self.trigger()
+
+    def build_for_export(self, on_done, on_wait=None) -> None:
+        """
+        Build the deck to wherever Export just pointed it, and say when it lands.
+
+        Exporting a PDF cannot go through :meth:`with_current_build`: the deck
+        may already be current and still need writing to the chosen path, so
+        this always builds.  *on_wait* is the Export button, which is the only
+        sign the writer gets that a file is on its way — the other three
+        formats finish with a toast, and this one does too.  It is taken
+        before the trigger, so a build cannot land before the wait is held.
+        """
+        self._after_build = on_done
         if on_wait is not None:
             self.wait_for_build(on_wait)
         self.trigger()
 
     def after_build(self, action) -> None:
         """Run *action* once the build about to be asked for lands."""
-        self._win._after_build = action
+        self._after_build = action
 
     def wait_for_build(self, on_wait) -> None:
         """Hold *on_wait* busy until the running build lands or fails."""
@@ -126,78 +188,86 @@ class BuildCoordinator:
 
     # ── What the chip says ────────────────────────────────────────────────────
 
+    def attach_chip(self, chip, visual, icon, spinner, label) -> None:
+        """Take the header chip's parts from the window that built them."""
+        self._chip    = chip
+        self._visual  = visual
+        self._icon    = icon
+        self._spinner = spinner
+        self._label   = label
+
     def state(self) -> str:
         """One of 'building', 'stale' or 'current'."""
-        win = self._win
-        if win._converting:
+        if self.converting:
             return "building"
-        if win._built_text is None:
+        if self.built_text is None:
             return "stale"
-        return "current" if win._editor.get_text() == win._built_text else "stale"
+        return "current" if self._win.editor.get_text() == self.built_text else "stale"
 
     def update_chip(self) -> None:
         """Reflect the build state; safe to call as often as convenient."""
-        win = self._win
+        if self._chip is None:
+            return                      # the header bar is not built yet
         state = self.state()
 
         if state == "building":
-            win._chip_visual.set_visible_child_name("spinner")
-            win._chip_spinner.start()
-            win._chip_label.set_label("Building…")
-            win._chip_label.add_css_class("dim-label")
-            win._build_chip.set_sensitive(False)
-            win._build_chip.set_tooltip_text("Building the PDF…")
+            self._visual.set_visible_child_name("spinner")
+            self._spinner.start()
+            self._label.set_label("Building…")
+            self._label.add_css_class("dim-label")
+            self._chip.set_sensitive(False)
+            self._chip.set_tooltip_text("Building the PDF…")
         else:
-            win._chip_spinner.stop()
-            win._chip_visual.set_visible_child_name("icon")
-            win._build_chip.set_sensitive(True)
-            win._build_chip.set_tooltip_text("Rebuild now (Ctrl+Return)")
+            self._spinner.stop()
+            self._visual.set_visible_child_name("icon")
+            self._chip.set_sensitive(True)
+            self._chip.set_tooltip_text("Rebuild now (Ctrl+Return)")
             if state == "current":
-                win._chip_icon.set_from_icon_name("object-select-symbolic")
-                win._chip_label.set_label("Up to date")
-                win._chip_label.add_css_class("dim-label")
+                self._icon.set_from_icon_name("object-select-symbolic")
+                self._label.set_label("Up to date")
+                self._label.add_css_class("dim-label")
             else:
-                win._chip_icon.set_from_icon_name("view-refresh-symbolic")
-                win._chip_label.set_label("Rebuild needed")
-                win._chip_label.remove_css_class("dim-label")
+                self._icon.set_from_icon_name("view-refresh-symbolic")
+                self._label.set_label("Rebuild needed")
+                self._label.remove_css_class("dim-label")
 
-        win._build_chip.update_property(
+        self._chip.update_property(
             [Gtk.AccessibleProperty.LABEL],
-            [f"{win._chip_label.get_label()} — rebuild"],
+            [f"{self._label.get_label()} — rebuild"],
         )
 
     # ── Converter signals ─────────────────────────────────────────────────────
 
     def on_started(self, _converter) -> None:
         win = self._win
-        win._converting = True
+        self.converting = True
         # The document as it stands is what this build will contain; on
         # success it becomes the baseline the chip compares against.
-        win._building_text = win._editor.get_text()
-        win._present_btn.set_sensitive(False)
-        win._banner.set_revealed(False)
+        self.building_text = win.editor.get_text()
+        win.present_button.set_sensitive(False)
+        win.banner.set_revealed(False)
         self.update_chip()
         # Show per-thumbnail spinners so users know thumbnails are updating (#71)
-        win._sidebar.set_converting(True)
+        win.sidebar.set_converting(True)
 
     def on_complete(self, converter, n_slides: int, duration: float,
                     pdf_path: str, html_uri: str) -> None:
         win = self._win
-        win._converting = False
-        win._built_text = win._building_text
+        self.converting = False
+        self.built_text = self.building_text
         self.update_chip()
-        win._present_btn.set_sensitive(True)
-        win._output_path = Path(pdf_path)
+        win.present_button.set_sensitive(True)
+        win.documents.output_path = Path(pdf_path)
 
         # No toast: a routine build that succeeded is what the chip is for.
         log.debug("Built %d slides in %.2fs", n_slides, duration)
-        win._slide_info = converter.slide_info
-        win._thumbnails = converter.thumbnails
-        win._html_uri   = html_uri
+        self.slide_info = converter.slide_info
+        self.thumbnails = converter.thumbnails
+        self.html_uri   = html_uri
 
         # Anything that was waiting for a current build can run now.
-        if win._after_build is not None:
-            pending, win._after_build = win._after_build, None
+        if self._after_build is not None:
+            pending, self._after_build = self._after_build, None
             pending()
 
         # Draw the fold rules measured from the page that was just laid out.
@@ -206,36 +276,36 @@ class BuildCoordinator:
         )
 
         # Stop thumbnail spinners before replacing content (#71)
-        win._sidebar.set_converting(False)
+        win.sidebar.set_converting(False)
         # Shown against the text this build was made from, not the text being
         # typed now, so every picture lands beside the words it was rendered
         # from.  Where the two have drifted apart the live document follows
         # immediately, carrying these pictures onto the slides they still
         # belong to and marking the rest as out of date.
-        overflow_count = win._sidebar.update_from_conversion(
+        overflow_count = win.sidebar.update_from_conversion(
             converter.slide_info, converter.thumbnails,
-            markdown_text=win._built_text or "",
-            wpm=win._speaking_rate,
+            markdown_text=self.built_text or "",
+            wpm=win.speaking_rate,
         ) or 0
-        live_text = win._editor.get_text()
-        if live_text != win._built_text:
-            win._sidebar.update_from_text(live_text)
+        live_text = win.editor.get_text()
+        if live_text != self.built_text:
+            win.sidebar.update_from_text(live_text)
         if overflow_count:
             s = "slide" if overflow_count == 1 else "slides"
-            win._banner.set_title(
+            win.banner.set_title(
                 f"{overflow_count} {s} may have too much text "
                 f"— content could be clipped in the PDF."
             )
-            win._banner.set_revealed(True)
+            win.banner.set_revealed(True)
 
-        win._slide_w, win._slide_h = ASPECT_RATIOS.get(
-            win._converter.ratio, (1280, 720)
+        self.slide_w, self.slide_h = ASPECT_RATIOS.get(
+            win.converter.ratio, (1280, 720)
         )
 
-        if win._file_path is not None:
-            win._cleanup_temp_files()
-        if win._pres_path:
-            win._pack_pres()
+        if win.documents.file_path is not None:
+            self.cleanup_scratch()
+        if win.documents.pres_path:
+            win.documents.pack_pres()
 
         # Last, so that whatever this build re-enabled above cannot leave a
         # button that is still working looking ready.
@@ -245,18 +315,18 @@ class BuildCoordinator:
         from .window import _friendly_error
 
         win = self._win
-        win._converting = False
-        # Leave _built_text alone: a failed build did not change what is on
+        self.converting = False
+        # Leave built_text alone: a failed build did not change what is on
         # disk, so the chip correctly keeps saying a rebuild is needed.
         self.update_chip()
-        win._present_btn.set_sensitive(True)
+        win.present_button.set_sensitive(True)
         # Whatever was queued cannot run against a failed build.
-        win._after_build = None
+        self._after_build = None
         # Stop thumbnail spinners on failure too (#71)
-        win._sidebar.set_converting(False)
+        win.sidebar.set_converting(False)
         # Show a user-friendly message rather than a raw exception string (#87)
-        win._banner.set_title(_friendly_error(message))
-        win._banner.set_revealed(True)
+        win.banner.set_title(_friendly_error(message))
+        win.banner.set_revealed(True)
         self._settle_waits()
 
     # ── Fold lines ────────────────────────────────────────────────────────────
@@ -268,7 +338,7 @@ class BuildCoordinator:
     def set_build_folds(self, folds: list) -> None:
         """Replace every fold line from a completed build."""
         self._fold_lines = list(folds)
-        self._win._editor.set_fold_lines(self._fold_lines)
+        self._win.editor.set_fold_lines(self._fold_lines)
 
     def set_live_fold(self, index: int, fold_line) -> None:
         """Update one slide's fold line from a live render."""
@@ -280,4 +350,4 @@ class BuildCoordinator:
         elif self._fold_lines[index] == fold_line:
             return                      # nothing moved; skip the redraw
         self._fold_lines[index] = fold_line
-        self._win._editor.set_fold_lines(self._fold_lines)
+        self._win.editor.set_fold_lines(self._fold_lines)

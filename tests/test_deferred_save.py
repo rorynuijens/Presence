@@ -86,9 +86,10 @@ def fake_chooser(monkeypatch):
 
 def controller(text: str = "") -> tuple:
     """A controller over a never-saved document holding *text*."""
-    win = FakeWindow(text)
-    win._modified = True
-    return DocumentController(win), win
+    from test_document_controller import controller as _make
+    doc, win = _make(text)
+    doc.modified = True
+    return doc, win
 
 
 def chooser() -> FakeFileDialog:
@@ -104,7 +105,7 @@ def test_a_never_saved_document_opens_a_chooser_rather_than_writing():
     doc.save()
 
     assert len(FakeFileDialog.opened) == 1
-    assert win._file_path is None
+    assert doc.file_path is None
 
 
 def test_nothing_waiting_on_the_save_runs_while_the_chooser_is_open():
@@ -149,7 +150,7 @@ def test_cancelling_the_chooser_never_runs_what_was_waiting():
     chooser().cancel()
 
     assert closed == []
-    assert win._modified is True
+    assert doc.modified is True
 
 
 def test_an_unwritable_folder_stops_the_save_and_what_waited_on_it(tmp_path):
@@ -186,7 +187,7 @@ def test_saving_as_a_bundle_also_waits_for_the_write(tmp_path):
     doc.save(on_done=lambda: closed.append(True))
     chooser().answer(tmp_path / "talk.pres")
 
-    assert win.pres_saves == [tmp_path / "talk.pres"]
+    assert doc.pres_saves == [tmp_path / "talk.pres"]
     assert closed == [True]
 
 
@@ -196,7 +197,7 @@ def test_a_name_without_a_suffix_becomes_a_bundle(tmp_path):
     doc.save()
     chooser().answer(tmp_path / "talk")
 
-    assert win.pres_saves == [tmp_path / "talk.pres"]
+    assert doc.pres_saves == [tmp_path / "talk.pres"]
 
 
 # ── The document that has a path already ──────────────────────────────────────
@@ -206,7 +207,7 @@ def test_a_saved_document_still_finishes_before_it_returns(tmp_path):
     dest = tmp_path / "talk.md"
     dest.write_text("old")
     doc, win = controller("new")
-    win._file_path = dest
+    doc.file_path = dest
     closed = []
 
     assert doc.save(on_done=lambda: closed.append(True)) is True
@@ -217,7 +218,7 @@ def test_a_saved_document_still_finishes_before_it_returns(tmp_path):
 
 def test_a_failed_write_does_not_run_what_waited_on_it(tmp_path):
     doc, win = controller("new")
-    win._file_path = tmp_path / "no-such-folder" / "talk.md"
+    doc.file_path = tmp_path / "no-such-folder" / "talk.md"
     closed = []
 
     assert doc.save(on_done=lambda: closed.append(True)) is False

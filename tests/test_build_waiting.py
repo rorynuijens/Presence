@@ -60,11 +60,12 @@ class _FakeStack:
     def set_visible_child_name(self, name): self.showing = name
 
 
-def coordinator(**kwargs):
-    win  = FakeWindow(**kwargs)
+def coordinator(current="edited", built="original"):
+    win   = FakeWindow(current)
     coord = BuildCoordinator(win)
-    coord.trigger = lambda *a: (setattr(win, "triggered", win.triggered + 1)
-                                or True)
+    coord.built_text = built
+    coord.html_uri   = "file:///built.html"
+    coord.trigger = lambda *a: setattr(win, "triggered", win.triggered + 1)
     return coord, win
 
 
@@ -166,13 +167,9 @@ class _Converter:
 
 def _complete(coord, win) -> None:
     """Drive a successful build through the coordinator's own handler."""
-    win._sidebar = _Sidebar()
-    win._building_text = win._editor.get_text()
-    win._speaking_rate = 110
-    win._pres_path = None
-    win._pack_pres = lambda: None
-    win._file_path = None
-    win._converter = _Converter()
+    win.sidebar   = _Sidebar()
+    win.converter = _Converter()
+    coord.building_text = win.editor.get_text()
     coord.set_build_folds([])
     coord.on_complete(_Converter(), 0, 0.0, "/tmp/out.pdf", "file:///out.html")
 

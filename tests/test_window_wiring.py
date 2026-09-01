@@ -26,12 +26,25 @@ gi.require_version("Adw", "1")
 from presence.editor import Editor          # noqa: E402
 from presence.inspector import Inspector    # noqa: E402
 from presence.sidebar import Sidebar        # noqa: E402
+from presence.build_coordinator import BuildCoordinator      # noqa: E402
+from presence.document_controller import DocumentController  # noqa: E402
+from presence.export_controller import ExportController      # noqa: E402
 
 # The attribute MainWindow holds each collaborator in, and the class behind it.
+#
+# The three controllers are here for a second reason.  They used to keep
+# their state on the window and reach in for it, so "does this name exist"
+# was a question about the window, not about them.  Now the window asks them
+# (self.documents.file_path, self.builds.html_uri) and every one of those
+# names has to resolve on the controller — which is what this file already
+# knew how to check.
 COLLABORATORS = {
-    "_editor":    Editor,
+    "editor":     Editor,
     "_inspector": Inspector,
-    "_sidebar":   Sidebar,
+    "sidebar":    Sidebar,
+    "documents":  DocumentController,
+    "builds":     BuildCoordinator,
+    "exports":    ExportController,
 }
 
 

@@ -153,7 +153,7 @@ class SettingsDialog(Adw.PreferencesDialog):
         try:
             font_row = Adw.SpinRow.new(
                 Gtk.Adjustment(
-                    value=parent._editor.get_font_size(),
+                    value=parent.editor.get_font_size(),
                     lower=8, upper=32, step_increment=1, page_increment=2,
                 ),
                 climb_rate=1, digits=0,
@@ -171,7 +171,7 @@ class SettingsDialog(Adw.PreferencesDialog):
                 subtitle="Point size, 8–32 pt",
             )
             adj = Gtk.Adjustment(
-                value=parent._editor.get_font_size(),
+                value=parent.editor.get_font_size(),
                 lower=8, upper=32, step_increment=1, page_increment=2,
             )
             spin = Gtk.SpinButton(adjustment=adj, climb_rate=1, digits=0)
@@ -261,9 +261,9 @@ class SettingsDialog(Adw.PreferencesDialog):
         self._parent._timer_minutes = minutes
         save_presentation_prefs({
             "timer_minutes":        minutes,
-            "auto_convert":         self._parent._auto_convert,
+            "auto_convert":         self._parent.auto_convert,
             "presenter_notes_font": self._parent._presenter_notes_font,
-            "speaking_rate":        self._parent._speaking_rate,
+            "speaking_rate":        self._parent.speaking_rate,
         })
 
     def _on_timer_target_changed_spin(self, spin: Gtk.SpinButton) -> None:
@@ -272,42 +272,42 @@ class SettingsDialog(Adw.PreferencesDialog):
         self._parent._timer_minutes = minutes
         save_presentation_prefs({
             "timer_minutes":        minutes,
-            "auto_convert":         self._parent._auto_convert,
+            "auto_convert":         self._parent.auto_convert,
             "presenter_notes_font": self._parent._presenter_notes_font,
-            "speaking_rate":        self._parent._speaking_rate,
+            "speaking_rate":        self._parent.speaking_rate,
         })
 
     def _on_auto_convert_toggled(self, row: Adw.SwitchRow, _param) -> None:
         """Toggle auto-convert-on-save."""
         enabled = row.get_active()
-        self._parent._auto_convert = enabled
+        self._parent.auto_convert = enabled
         save_presentation_prefs({
             "timer_minutes":        self._parent._timer_minutes,
             "auto_convert":         enabled,
             "presenter_notes_font": self._parent._presenter_notes_font,
-            "speaking_rate":        self._parent._speaking_rate,
+            "speaking_rate":        self._parent.speaking_rate,
         })
 
     def _on_speaking_rate_changed(self, row: "Adw.SpinRow", _param) -> None:
         rate = int(row.get_value())
-        self._parent._speaking_rate = rate
+        self._parent.speaking_rate = rate
         # The strip quotes a per-slide time, so it has to be told too.
-        self._parent._sidebar.set_speaking_rate(rate)
+        self._parent.sidebar.set_speaking_rate(rate)
         save_presentation_prefs({
             "timer_minutes":        self._parent._timer_minutes,
-            "auto_convert":         self._parent._auto_convert,
+            "auto_convert":         self._parent.auto_convert,
             "presenter_notes_font": self._parent._presenter_notes_font,
             "speaking_rate":        rate,
         })
 
     def _on_speaking_rate_changed_spin(self, spin: Gtk.SpinButton) -> None:
         rate = int(spin.get_value())
-        self._parent._speaking_rate = rate
+        self._parent.speaking_rate = rate
         # The strip quotes a per-slide time, so it has to be told too.
-        self._parent._sidebar.set_speaking_rate(rate)
+        self._parent.sidebar.set_speaking_rate(rate)
         save_presentation_prefs({
             "timer_minutes":        self._parent._timer_minutes,
-            "auto_convert":         self._parent._auto_convert,
+            "auto_convert":         self._parent.auto_convert,
             "presenter_notes_font": self._parent._presenter_notes_font,
             "speaking_rate":        rate,
         })
@@ -315,29 +315,29 @@ class SettingsDialog(Adw.PreferencesDialog):
     def _on_font_size_spin_row(self, row: "Adw.SpinRow", _param) -> None:
         """Handler for Adw.SpinRow (libadwaita ≥ 1.4)."""
         pt = int(row.get_value())
-        self._parent._editor.set_font_size(pt)
+        self._parent.editor.set_font_size(pt)
         self._save_prefs()
 
     def _on_font_size_changed(self, spin: Gtk.SpinButton) -> None:
         """Fallback handler for plain Gtk.SpinButton."""
         pt = int(spin.get_value())
-        self._parent._editor.set_font_size(pt)
+        self._parent.editor.set_font_size(pt)
         self._save_prefs()
 
     def _on_line_length_spin_row(self, row: "Adw.SpinRow", _param) -> None:
         cols = int(row.get_value())
-        self._parent._editor.set_line_length(cols)
+        self._parent.editor.set_line_length(cols)
         self._save_prefs()
 
     def _on_line_length_changed(self, spin: Gtk.SpinButton) -> None:
         cols = int(spin.get_value())
-        self._parent._editor.set_line_length(cols)
+        self._parent.editor.set_line_length(cols)
         self._save_prefs()
 
     def _on_editor_toggle(self, row: Adw.SwitchRow, _param,
                           key: str) -> None:
         enabled = row.get_active()
-        editor = self._parent._editor
+        editor = self._parent.editor
         {
             "syntax_highlight": editor.set_syntax_highlight,
             "line_numbers":     editor.set_line_numbers,
@@ -350,11 +350,11 @@ class SettingsDialog(Adw.PreferencesDialog):
     def _save_prefs(self) -> None:
         sw = self._switch_rows
         save_editor_prefs({
-            "theme":            self._parent._converter.theme,
-            "ratio":            self._parent._converter.ratio,
-            "logo":             str(self._parent._converter.logo_path or ""),
-            "font_size":        self._parent._editor.get_font_size(),
-            "line_length":      self._parent._editor.get_line_length(),
+            "theme":            self._parent.converter.theme,
+            "ratio":            self._parent.converter.ratio,
+            "logo":             str(self._parent.converter.logo_path or ""),
+            "font_size":        self._parent.editor.get_font_size(),
+            "line_length":      self._parent.editor.get_line_length(),
             "syntax_highlight": sw["syntax_highlight"].get_active(),
             "line_numbers":     sw["line_numbers"].get_active(),
             "highlight_line":   sw["highlight_line"].get_active(),

@@ -477,7 +477,7 @@ class PresenterWindow(Adw.Window):
 
         # Speaking rate the sidebar's estimates already use, so the pace
         # readout and the thumbnail strip do not disagree about the deck.
-        self._wpm: int = getattr(parent_window, '_speaking_rate', 110)
+        self._wpm: int = getattr(parent_window, 'speaking_rate', 110)
         # Second each slide is due to end, cumulative from the start.
         self._schedule: list[int] = deck_schedule(
             slide_info, self._wpm, self._target_secs

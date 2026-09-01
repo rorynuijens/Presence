@@ -1,20 +1,27 @@
 """
 document_controller.py — The document as a file on disk.
 
-Opening, saving, saving-as, autosaving and the unsaved-changes question, in
-one place.  All of it is about the Markdown; none of it is about the build,
-which is :mod:`build_coordinator`'s subject.
+Opening, saving, saving-as, autosaving, the unsaved-changes question and the
+`.pres` bundle, in one place.  All of it is about the Markdown; none of it is
+about the build, which is :mod:`build_coordinator`'s subject.
 
-Two things are worth keeping in view while reading this:
+Three things are worth keeping in view while reading this:
 
+*  **This owns where the document is.**  ``file_path``, ``output_path``,
+   ``pres_path``, ``pres_temp_dir`` and ``modified`` live here, not on the
+   window.  They used to be window attributes that this class reached in and
+   wrote, which meant the window and both other controllers could each move
+   the document and none of them owned it.  The window asks
+   (``self._documents.file_path``); nothing writes these but this class.
 *  **Save never builds.**  Writing the file and producing a PDF are separate
    verbs, and conflating them is what used to put seconds between Ctrl+S and
    being able to type again.  ``save()`` converts afterwards only when the
    writer has asked for that in Settings.
-*  **A .pres bundle is a directory pretending to be a file.**  ``_file_path``
-   is always the Markdown inside it, ``_pres_path`` the bundle the writer
+*  **A .pres bundle is a directory pretending to be a file.**  ``file_path``
+   is always the Markdown inside it, ``pres_path`` the bundle the writer
    thinks they are editing; the title, the recent list and the recovery key
-   all follow ``_pres_path`` when there is one.
+   all follow ``pres_path`` when there is one — which is what
+   ``display_path`` answers.
 """
 
 from __future__ import annotations
@@ -22,6 +29,8 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import tempfile
+import zipfile
 from pathlib import Path
 
 import gi
@@ -40,29 +49,66 @@ UNTITLED = "Untitled"
 
 
 class DocumentController:
-    """Owns opening, saving and autosaving on behalf of :class:`MainWindow`."""
+    """Owns where the document is, and every way it reaches or leaves disk."""
 
     def __init__(self, window) -> None:
         self._win = window
+
+        # ── The document ─────────────────────────────────────────────────────
+        # The Markdown itself.  Inside the bundle's temp dir when one is open.
+        self.file_path:     Path | None = None
+        # Where the build writes its PDF.  Export PDF re-points this.
+        self.output_path:   Path | None = None
+        # The .pres bundle the writer thinks they are editing, if any.
+        self.pres_path:     Path | None = None
+        # Where that bundle is unpacked while it is open.
+        self.pres_temp_dir: Path | None = None
+        # Whether the buffer has moved on from what is on disk.
+        self.modified:      bool        = False
+
         # Set while a Save As chooser is open: what to run once the document
         # actually reaches disk.
         self._save_as_done = None
+        # The first build after an open, deferred by one idle cycle.
+        self._initial_convert_source: int | None = None
+
+    # ── Where the document is ─────────────────────────────────────────────────
+
+    @property
+    def display_path(self) -> Path | None:
+        """What the writer thinks they are editing: the bundle, else the file."""
+        return self.pres_path or self.file_path
+
+    @property
+    def display_name(self) -> str:
+        """The document's name for the title bar, or "Untitled"."""
+        display = self.display_path
+        return display.name if display else UNTITLED
+
+    @property
+    def base_dir(self) -> Path | None:
+        """The directory relative image sources resolve against."""
+        return self.file_path.parent if self.file_path else None
+
+    def shut_down(self) -> None:
+        """Release what outlives a closed window: the deferred first build."""
+        if self._initial_convert_source is not None:
+            GLib.source_remove(self._initial_convert_source)
+            self._initial_convert_source = None
 
     # ── Unsaved changes ───────────────────────────────────────────────────────
 
     def check_unsaved(self, action) -> None:
         """Run *action*, asking first if the document has unsaved changes."""
-        if not self._win._modified:
+        if not self.modified:
             action()
             return
         self.show_unsaved_dialog(on_save=action, on_discard=action)
 
     def show_unsaved_dialog(self, on_save, on_discard) -> None:
         win = self._win
-        display = win._pres_path or win._file_path
-        name = display.name if display else UNTITLED
         dialog = Adw.AlertDialog(
-            heading=f'Save changes to "{name}"?',
+            heading=f'Save changes to "{self.display_name}"?',
             body="Your changes will be lost if you don't save them.",
         )
         dialog.add_response("cancel",  "Cancel")
@@ -83,7 +129,7 @@ class DocumentController:
                 # still an unanswered dialog.  on_save() waits for the write.
                 self.save(on_done=on_save)
             elif response == "discard":
-                win._modified = False
+                self.modified = False
                 on_discard()
 
         dialog.connect("response", _on_response)
@@ -96,7 +142,7 @@ class DocumentController:
         try:
             path = path.resolve(strict=True)
         except (OSError, RuntimeError) as e:
-            win._show_error(f"Cannot open file: {e}")
+            win.show_error(f"Cannot open file: {e}")
             return
 
         is_pres = path.suffix.lower() == ".pres"
@@ -106,7 +152,7 @@ class DocumentController:
             return
 
         if is_pres:
-            win._open_pres_file(path)
+            self.open_pres_file(path)
         else:
             self.load_into_editor(path)
 
@@ -116,7 +162,8 @@ class DocumentController:
         for other in win.get_application().get_windows():
             if other is win or not isinstance(other, type(win)):
                 continue
-            held = other._pres_path if is_pres else other._file_path
+            docs = other.documents
+            held = docs.pres_path if is_pres else docs.file_path
             if held == path:
                 return True
         return False
@@ -137,7 +184,7 @@ class DocumentController:
             if response != "open":
                 return
             if is_pres:
-                win._open_pres_file(path)
+                self.open_pres_file(path)
             else:
                 self.load_into_editor(path)
 
@@ -150,52 +197,49 @@ class DocumentController:
         try:
             text = path.read_text(encoding="utf-8")
         except OSError as e:
-            win._show_error(f"Could not open file: {e}")
+            win.show_error(f"Could not open file: {e}")
             return
 
-        win._file_path   = path
-        win._output_path = path.with_suffix(".pdf")
-        win._editor.set_base_path(path)
-        win._editor.set_text(text)
-        win._sidebar.update_from_text(text)
-        win._sync_panel_to_document(text)
+        self.file_path   = path
+        self.output_path = path.with_suffix(".pdf")
+        win.editor.set_base_path(path)
+        win.editor.set_text(text)
+        win.sidebar.update_from_text(text)
+        win.sync_panel_to_document(text)
         # set_text() suppresses the editor's change signals, so drive the
         # live render directly — a freshly opened file starts at slide 1.
-        win._current_slide = 0
-        win._refresh_live_slide(text)
-        win._update_word_count(text)
-        win._update_build_chip()
-        display = win._pres_path or path
-        win._set_title(display.name)
-        win._modified = False
+        win.current_slide = 0
+        win.refresh_live_slide(text)
+        win.update_word_count(text)
+        win.builds.update_chip()
+        self.modified = False
+        win.set_document_title(self.display_name)
+        display = self.display_path
         save_last_file(display)
         save_recent_file(display)
-        win._refresh_recent_actions()
+        win.refresh_recent_actions()
 
         # Defer the initial conversion by one idle cycle so the window is
         # fully realised before WeasyPrint starts (#25 / #69).
-        if win._initial_convert_source is not None:
-            GLib.source_remove(win._initial_convert_source)
-        win._initial_convert_source = GLib.idle_add(self._deferred_initial_convert)
+        if self._initial_convert_source is not None:
+            GLib.source_remove(self._initial_convert_source)
+        self._initial_convert_source = GLib.idle_add(self._deferred_initial_convert)
 
     def _deferred_initial_convert(self) -> bool:
-        win = self._win
-        win._initial_convert_source = None
-        win._trigger_convert()
+        self._initial_convert_source = None
+        self._win.builds.trigger()
         return GLib.SOURCE_REMOVE
 
     def restore_autosave(self, text: str) -> None:
         """Put a recovered draft back in the editor, still unsaved."""
         win = self._win
-        win._editor.set_text(text)
-        win._sync_panel_to_document(text)
-        win._modified = True
-        display = win._pres_path or win._file_path
-        base = display.name if display else UNTITLED
-        win._set_title(base + " •")
-        win._refresh_live_slide(text)
-        win._update_build_chip()
-        win._trigger_convert()
+        win.editor.set_text(text)
+        win.sync_panel_to_document(text)
+        self.modified = True
+        win.set_document_title(self.display_name + " •")
+        win.refresh_live_slide(text)
+        win.builds.update_chip()
+        win.builds.trigger()
 
     # ── Saving ────────────────────────────────────────────────────────────────
 
@@ -217,8 +261,8 @@ class DocumentController:
         *on_done*.
         """
         def _saved() -> None:
-            if self._win._auto_convert:
-                self._win._trigger_convert()
+            if self._win.auto_convert:
+                self._win.builds.trigger()
             if on_done is not None:
                 on_done()
 
@@ -232,20 +276,20 @@ class DocumentController:
         cannot simply be the next statement at the call site.
         """
         win = self._win
-        if win._file_path is None:
+        if self.file_path is None:
             return self.save_as_dialog(on_done=on_done)
         try:
-            win._file_path.write_text(win._editor.get_text(), encoding="utf-8")
-            if win._pres_path:
-                win._pack_pres()
-            win._modified = False
-            display = win._pres_path or win._file_path
-            win._set_title(display.name)
+            self.file_path.write_text(win.editor.get_text(), encoding="utf-8")
+            if self.pres_path:
+                self.pack_pres()
+            self.modified = False
+            display = self.display_path
+            win.set_document_title(display.name)
             save_last_file(display)
             # Delete any orphaned recovery file (fixes #59)
             delete_recovery_file(display)
         except OSError as e:
-            win._show_error(f"Could not save: {e}")
+            win.show_error(f"Could not save: {e}")
             return False
         if on_done is not None:
             on_done()
@@ -259,9 +303,9 @@ class DocumentController:
             make_file_filter("Presence bundle", "*.pres"),
             make_file_filter("Markdown files", "*.md"),
         ))
-        if win._pres_path:
-            dialog.set_initial_file(Gio.File.new_for_path(str(win._pres_path)))
-        win._active_file_dialog = dialog
+        if self.pres_path:
+            dialog.set_initial_file(Gio.File.new_for_path(str(self.pres_path)))
+        win.hold_file_dialog(dialog)
         # Held rather than passed, because the answer comes back through a
         # GTK callback.  Whoever is waiting on this save waits here.
         self._save_as_done = on_done
@@ -270,7 +314,7 @@ class DocumentController:
 
     def _on_save_as_response(self, dialog, result) -> None:
         win = self._win
-        win._active_file_dialog = None
+        win.hold_file_dialog(None)
         # Claim the continuation up front: every path out of here either runs
         # it or drops it, and none may leave it behind for the next save.
         on_done, self._save_as_done = self._save_as_done, None
@@ -285,11 +329,11 @@ class DocumentController:
         if not path.suffix:
             path = path.with_suffix(".pres")
         if not os.access(path.parent, os.W_OK):
-            win._show_error(f"Cannot write to '{path.parent}' — permission denied.")
+            win.show_error(f"Cannot write to '{path.parent}' — permission denied.")
             return
 
         if path.suffix.lower() == ".pres":
-            win._setup_pres_save(path, on_done=on_done)
+            self.setup_pres_save(path, on_done=on_done)
         else:
             self._save_as_markdown(path, on_done=on_done)
 
@@ -302,8 +346,8 @@ class DocumentController:
         assets are copied out before the bundle is let go.
         """
         win = self._win
-        if win._pres_path and win._file_path:
-            old_assets = win._file_path.parent / "assets"
+        if self.pres_path and self.file_path:
+            old_assets = self.file_path.parent / "assets"
             if old_assets.is_dir():
                 try:
                     shutil.copytree(old_assets, path.parent / "assets",
@@ -311,14 +355,108 @@ class DocumentController:
                 except OSError as e:
                     log.warning("Could not copy assets: %s", e)
 
-        old_pres_temp = win._pres_temp_dir
-        win._pres_path = None
-        win._pres_temp_dir = None
-        win._file_path   = path
-        win._output_path = path.with_suffix(".pdf")
-        win._editor.set_base_path(path)
+        old_pres_temp = self.pres_temp_dir
+        self.pres_path     = None
+        self.pres_temp_dir = None
+        self.file_path     = path
+        self.output_path   = path.with_suffix(".pdf")
+        win.editor.set_base_path(path)
         self.save(on_done=on_done)
         if old_pres_temp and old_pres_temp.exists():
+            shutil.rmtree(old_pres_temp, ignore_errors=True)
+
+    # ── .pres bundles ─────────────────────────────────────────────────────────
+
+    def open_pres_file(self, pres_path: Path) -> None:
+        """Extract a .pres ZIP bundle to a temp dir and load slides.md from it."""
+        win = self._win
+        self.cleanup_pres_temp()
+        try:
+            # Use shared /tmp in Flatpak so the generated PDF is accessible to
+            # external viewers via the OpenURI portal (Flatpak's $TMPDIR is private).
+            tmp_base = "/tmp" if os.environ.get("FLATPAK_ID") else None
+            tmp_dir = Path(tempfile.mkdtemp(prefix="presence-", dir=tmp_base))
+        except OSError as e:
+            win.show_error(f"Could not create temp directory: {e}")
+            return
+        self.pres_temp_dir = tmp_dir
+        try:
+            with zipfile.ZipFile(pres_path, "r") as zf:
+                zf.extractall(tmp_dir)
+        except (zipfile.BadZipFile, OSError) as e:
+            win.show_error(f"Could not open '{pres_path.name}': {e}")
+            self.cleanup_pres_temp()
+            return
+        md_path = tmp_dir / "slides.md"
+        if not md_path.exists():
+            win.show_error("Invalid .pres file: 'slides.md' not found inside.")
+            self.cleanup_pres_temp()
+            return
+        self.pres_path = pres_path
+        self.load_into_editor(md_path)
+
+    def pack_pres(self) -> None:
+        """Re-pack the temp dir into the .pres ZIP bundle atomically."""
+        if not self.pres_path or not self.file_path:
+            return
+        tmp = self.pres_path.with_suffix(".pres~")
+        try:
+            with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                zf.write(self.file_path, "slides.md")
+                for name in ("slides.pdf", "slides.html"):
+                    p = self.file_path.parent / name
+                    if p.exists():
+                        zf.write(p, name)
+                assets_dir = self.file_path.parent / "assets"
+                if assets_dir.is_dir():
+                    for asset in sorted(assets_dir.iterdir()):
+                        if asset.is_file():
+                            zf.write(asset, f"assets/{asset.name}")
+            tmp.replace(self.pres_path)
+        except OSError as e:
+            log.warning("Could not write .pres bundle: %s", e)
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def cleanup_pres_temp(self) -> None:
+        """Remove the pres temp dir and clear pres state."""
+        self.discard_pres_temp()
+        self.pres_path = None
+
+    def discard_pres_temp(self) -> None:
+        """Remove the unpacked bundle, keeping the path it came from."""
+        if self.pres_temp_dir and self.pres_temp_dir.exists():
+            shutil.rmtree(self.pres_temp_dir, ignore_errors=True)
+        self.pres_temp_dir = None
+
+    def setup_pres_save(self, pres_path: Path, on_done=None) -> None:
+        """Switch to .pres bundle mode, creating a temp dir for the working copy."""
+        win = self._win
+        old_file_path = self.file_path
+        old_pres_temp = self.pres_temp_dir
+        try:
+            tmp_base = "/tmp" if os.environ.get("FLATPAK_ID") else None
+            tmp_dir = Path(tempfile.mkdtemp(prefix="presence-", dir=tmp_base))
+        except OSError as e:
+            win.show_error(f"Could not create temp directory: {e}")
+            return
+        if old_file_path:
+            old_assets = old_file_path.parent / "assets"
+            if old_assets.is_dir():
+                try:
+                    shutil.copytree(old_assets, tmp_dir / "assets")
+                except OSError as e:
+                    log.warning("Could not copy assets to bundle: %s", e)
+        self.pres_temp_dir = tmp_dir
+        self.pres_path     = pres_path
+        md_path = tmp_dir / "slides.md"
+        self.file_path   = md_path
+        self.output_path = tmp_dir / "slides.pdf"
+        win.editor.set_base_path(md_path)
+        self.save(on_done=on_done)
+        if old_pres_temp and old_pres_temp != tmp_dir and old_pres_temp.exists():
             shutil.rmtree(old_pres_temp, ignore_errors=True)
 
     # ── Autosave ──────────────────────────────────────────────────────────────
@@ -326,15 +464,15 @@ class DocumentController:
     def autosave(self) -> bool:
         """Write a recovery copy of an unsaved document.  Runs on a timer."""
         win = self._win
-        if win._modified and win._editor.get_text():
+        if self.modified and win.editor.get_text():
             try:
                 rd = recovery_dir()
                 rd.mkdir(parents=True, exist_ok=True)
-                display = win._pres_path or win._file_path
+                display = self.display_path
                 rp = recovery_path_for(display) if display else rd / "untitled.md"
-                rp.write_text(win._editor.get_text(), encoding="utf-8")
+                rp.write_text(win.editor.get_text(), encoding="utf-8")
                 # Brief toast so users know their work is protected (#29)
-                win._show_toast("Autosaved", timeout=2)
+                win.show_toast("Autosaved", timeout=2)
             except OSError as e:
                 log.warning("Autosave failed: %s", e)
         return GLib.SOURCE_CONTINUE

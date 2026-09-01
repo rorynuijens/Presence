@@ -43,7 +43,22 @@ class RecordingConverter:
 
 
 class ExplodingDocuments:
-    """A save from inside a build is the bug; make it loud rather than silent."""
+    """
+    Where the document is, plus every way of writing it wired to explode.
+
+    A build reads the three paths and must write none of them; anything that
+    reaches for a save is the regression this file exists to catch.
+    """
+
+    def __init__(self) -> None:
+        self.file_path   = None
+        self.output_path = None
+        self.pres_path   = None
+        self.modified    = True
+
+    @property
+    def base_dir(self):
+        return self.file_path.parent if self.file_path else None
 
     def write_document(self, on_done=None) -> bool:
         raise AssertionError("a build must not write the document")
@@ -63,27 +78,23 @@ def _clean_scratch():
     """Delete the scratch PDFs mkstemp handed out for unsaved decks."""
     _made.clear()
     yield
-    for win in _made:
-        if win._temp_pdf is not None:
-            win._temp_pdf.unlink(missing_ok=True)
+    for coord in _made:
+        if coord.temp_pdf is not None:
+            coord.temp_pdf.unlink(missing_ok=True)
     _made.clear()
 
 
-def coordinator(tmp_path, *, text="# Live", saved=True, modified=True):
+def coordinator(tmp_path, *, text="# Live", saved=True):
     win = FakeWindow(current=text)
-    _made.append(win)
-    win._converter = RecordingConverter()
-    win._documents = ExplodingDocuments()
-    win._modified = modified
-    win._temp_pdf = None
+    win.converter = RecordingConverter()
+    win.documents = ExplodingDocuments()
     if saved:
-        win._file_path = tmp_path / "talk.md"
-        win._file_path.write_text("# On disk", encoding="utf-8")
-        win._output_path = tmp_path / "talk.pdf"
-    else:
-        win._file_path = None
-        win._output_path = None
-    return BuildCoordinator(win), win
+        win.documents.file_path = tmp_path / "talk.md"
+        win.documents.file_path.write_text("# On disk", encoding="utf-8")
+        win.documents.output_path = tmp_path / "talk.pdf"
+    coord = BuildCoordinator(win)
+    _made.append(coord)
+    return coord, win
 
 
 # ── The document is left alone ────────────────────────────────────────────────
@@ -94,8 +105,8 @@ def test_a_build_does_not_write_the_document(tmp_path):
 
     coord.trigger()
 
-    assert win._file_path.read_text(encoding="utf-8") == "# On disk"
-    assert win._modified is True, "a build must not clear the modified flag"
+    assert win.documents.file_path.read_text(encoding="utf-8") == "# On disk"
+    assert win.documents.modified is True, "a build must not clear the modified flag"
 
 
 def test_a_build_of_an_unsaved_deck_asks_for_no_filename(tmp_path):
@@ -104,7 +115,7 @@ def test_a_build_of_an_unsaved_deck_asks_for_no_filename(tmp_path):
 
     coord.trigger()          # ExplodingDocuments raises if a dialog opens
 
-    assert len(win._converter.calls) == 1
+    assert len(win.converter.calls) == 1
 
 
 # ── The buffer is what gets rendered ──────────────────────────────────────────
@@ -114,7 +125,7 @@ def test_the_build_renders_the_buffer_not_the_file(tmp_path):
 
     coord.trigger()
 
-    text, _base, _out = win._converter.calls[0]
+    text, _base, _out = win.converter.calls[0]
     assert text == "# Live"
 
 
@@ -123,7 +134,7 @@ def test_the_pdf_goes_where_the_document_points_it(tmp_path):
 
     coord.trigger()
 
-    _text, _base, out = win._converter.calls[0]
+    _text, _base, out = win.converter.calls[0]
     assert out == tmp_path / "talk.pdf"
 
 
@@ -132,22 +143,22 @@ def test_images_resolve_against_the_document_not_the_export_destination(tmp_path
     coord, win = coordinator(tmp_path)
     elsewhere = tmp_path / "usb"
     elsewhere.mkdir()
-    win._output_path = elsewhere / "handed-over.pdf"
+    win.documents.output_path = elsewhere / "handed-over.pdf"
 
     coord.trigger()
 
-    _text, base, out = win._converter.calls[0]
+    _text, base, out = win.converter.calls[0]
     assert base == tmp_path, "assets live next to the Markdown"
     assert out == elsewhere / "handed-over.pdf"
 
 
 def test_a_document_with_no_output_path_still_builds(tmp_path):
     coord, win = coordinator(tmp_path)
-    win._output_path = None
+    win.documents.output_path = None
 
     coord.trigger()
 
-    _text, _base, out = win._converter.calls[0]
+    _text, _base, out = win.converter.calls[0]
     assert out == tmp_path / "talk.pdf"
 
 
@@ -158,10 +169,10 @@ def test_an_unsaved_deck_builds_to_a_scratch_pdf(tmp_path):
 
     coord.trigger()
 
-    _text, base, out = win._converter.calls[0]
+    _text, base, out = win.converter.calls[0]
     assert out.suffix == ".pdf"
     assert base == out.parent
-    assert win._temp_pdf == out
+    assert coord.temp_pdf == out
 
 
 def test_no_scratch_markdown_is_written(tmp_path):
@@ -170,7 +181,7 @@ def test_no_scratch_markdown_is_written(tmp_path):
 
     coord.trigger()
 
-    _text, _base, out = win._converter.calls[0]
+    _text, _base, out = win.converter.calls[0]
     assert not out.with_suffix(".md").exists()
 
 
@@ -181,5 +192,5 @@ def test_the_scratch_pdf_is_reused_across_builds(tmp_path):
     coord.trigger()
     coord.trigger()
 
-    first, second = (call[2] for call in win._converter.calls)
+    first, second = (call[2] for call in win.converter.calls)
     assert first == second

@@ -67,47 +67,73 @@ class FakeChip:
     def stop(self):  self.spinning = False
 
 
+class FakeDocuments:
+    """The document state the coordinator asks about, and nothing else."""
+
+    def __init__(self) -> None:
+        self.file_path   = None
+        self.output_path = None
+        self.pres_path   = None
+        self.packed      = 0
+
+    @property
+    def base_dir(self):
+        return self.file_path.parent if self.file_path else None
+
+    def pack_pres(self) -> None:
+        self.packed += 1
+
+
 class FakeWindow:
-    def __init__(self, current: str = "", built=None, converting: bool = False):
-        self._build_chip = FakeChip()
-        self._chip_visual = self._build_chip
-        self._chip_icon = self._build_chip
-        self._chip_spinner = self._build_chip
-        self._chip_label = FakeLabel()
-        self._editor = FakeEditor(current)
-        self._built_text = built
-        self._converting = converting
-        self._html_uri = "file:///built.html"
-        self._after_build = None
-        self._file_path = None
-        self._modified = False
-        self.triggered = 0
-        self._banner = self._Banner()
-        self._present_btn = self._Button()
-        self._sidebar = self._Sidebar()
+    """
+    Everything BuildCoordinator now asks a window for.
 
-    # BuildCoordinator.trigger() is stubbed out: these tests are about when a
-    # build is asked for and what happens when it lands, not about WeasyPrint.
-    def _cleanup_temp_files(self): pass
+    Six names, and every one of them a widget or a collaborator.  It used to
+    be fourteen, because the build's own state — built_text, converting,
+    html_uri, what was waiting on the build — lived on the window and this
+    stand-in had to declare it.  That state is the coordinator's now, so
+    these tests set it on the coordinator directly.
+    """
 
-    class _Banner:
-        def __init__(self): self.title = None; self.revealed = None
-        def set_title(self, t): self.title = t
-        def set_revealed(self, r): self.revealed = r
-
-    class _Button:
-        def __init__(self): self.sensitive = None
-        def set_sensitive(self, on): self.sensitive = on
-
-    class _Sidebar:
-        def __init__(self): self.converting = None
-        def set_converting(self, on): self.converting = on
+    def __init__(self, current: str = ""):
+        self.editor         = FakeEditor(current)
+        self.sidebar        = _Sidebar()
+        self.banner         = _Banner()
+        self.present_button = _Button()
+        self.documents      = FakeDocuments()
+        self.speaking_rate  = 110
+        self.triggered      = 0
 
 
-def coordinator(**kwargs):
-    win = FakeWindow(**kwargs)
+class _Banner:
+    def __init__(self): self.title = None; self.revealed = None
+    def set_title(self, t): self.title = t
+    def set_revealed(self, r): self.revealed = r
+
+
+class _Button:
+    def __init__(self): self.sensitive = None
+    def set_sensitive(self, on): self.sensitive = on
+
+
+class _Sidebar:
+    def __init__(self): self.converting = None
+    def set_converting(self, on): self.converting = on
+
+
+def coordinator(current: str = "", built=None, converting: bool = False):
+    """A real coordinator with a stand-in window and a stand-in chip."""
+    win   = FakeWindow(current)
     coord = BuildCoordinator(win)
+    coord.built_text = built
+    coord.converting = converting
+    coord.html_uri   = "file:///built.html"
+    # trigger() is stubbed out: these tests are about when a build is asked
+    # for and what happens when it lands, not about WeasyPrint.
     coord.trigger = lambda *a: setattr(win, "triggered", win.triggered + 1)
+    win.chip       = FakeChip()
+    win.chip_label = FakeLabel()
+    coord.attach_chip(win.chip, win.chip, win.chip, win.chip, win.chip_label)
     return coord, win
 
 
@@ -121,7 +147,7 @@ def test_a_current_build_runs_the_action_straight_away():
 
     assert ran == [True]
     assert win.triggered == 0
-    assert win._after_build is None
+    assert coord._after_build is None
 
 
 def test_a_stale_build_defers_the_action_and_asks_for_a_build():
@@ -132,7 +158,7 @@ def test_a_stale_build_defers_the_action_and_asks_for_a_build():
 
     assert ran == []                      # must not ship the old deck
     assert win.triggered == 1
-    assert win._after_build is not None
+    assert coord._after_build is not None
 
 
 def test_no_build_yet_also_defers():
@@ -148,7 +174,7 @@ def test_no_build_yet_also_defers():
 def test_a_build_with_no_html_defers_even_when_the_text_matches():
     """'current' is not enough — there must be output to hand over."""
     coord, win = coordinator(current="same", built="same")
-    win._html_uri = None
+    coord.html_uri = None
     ran = []
 
     coord.with_current_build(lambda: ran.append(True))
@@ -164,18 +190,18 @@ def test_a_failed_build_drops_whatever_was_waiting():
     coord, win = coordinator(current="edited", built="original")
     ran = []
     coord.with_current_build(lambda: ran.append(True))
-    assert win._after_build is not None
+    assert coord._after_build is not None
 
     coord.on_failed(None, "WeasyPrint blew up")
 
     assert ran == []
-    assert win._after_build is None
+    assert coord._after_build is None
 
 
 def test_a_failed_build_leaves_the_document_stale():
-    """_built_text is untouched on failure, so the chip keeps asking."""
+    """built_text is untouched on failure, so the chip keeps asking."""
     coord, win = coordinator(current="edited", built="original", converting=True)
-    win._converting = False
+    coord.converting = False
 
     assert coord.state() == "stale"
 
@@ -188,7 +214,7 @@ def test_a_build_replaces_every_fold_line():
     coord.set_build_folds([None, 12, None])
 
     assert coord.fold_lines == [None, 12, None]
-    assert win._editor.folds == [None, 12, None]
+    assert win.editor.folds == [None, 12, None]
 
 
 def test_a_live_render_updates_only_its_own_slide():
@@ -203,11 +229,11 @@ def test_a_live_render_updates_only_its_own_slide():
 def test_an_unchanged_fold_does_not_redraw():
     coord, win = coordinator()
     coord.set_build_folds([None, 12, 30])
-    win._editor.folds = None                 # watch for a second call
+    win.editor.folds = None                 # watch for a second call
 
     coord.set_live_fold(1, 12)
 
-    assert win._editor.folds is None
+    assert win.editor.folds is None
 
 
 def test_a_slide_added_since_the_build_gets_a_slot():
@@ -246,10 +272,10 @@ def test_the_chip_shows_a_spinner_and_refuses_clicks_while_building():
 
     coord.update_chip()
 
-    assert win._build_chip.child == "spinner"
-    assert win._build_chip.spinning is True
-    assert win._chip_label.get_label() == "Building…"
-    assert win._build_chip.sensitive is False
+    assert win.chip.child == "spinner"
+    assert win.chip.spinning is True
+    assert win.chip_label.get_label() == "Building…"
+    assert win.chip.sensitive is False
 
 
 def test_the_chip_says_up_to_date_when_the_build_matches():
@@ -257,9 +283,9 @@ def test_the_chip_says_up_to_date_when_the_build_matches():
 
     coord.update_chip()
 
-    assert win._chip_label.get_label() == "Up to date"
-    assert win._build_chip.icon == "object-select-symbolic"
-    assert win._build_chip.sensitive is True
+    assert win.chip_label.get_label() == "Up to date"
+    assert win.chip.icon == "object-select-symbolic"
+    assert win.chip.sensitive is True
 
 
 def test_the_chip_asks_for_a_rebuild_once_the_document_moves_on():
@@ -267,10 +293,10 @@ def test_the_chip_asks_for_a_rebuild_once_the_document_moves_on():
 
     coord.update_chip()
 
-    assert win._chip_label.get_label() == "Rebuild needed"
-    assert win._build_chip.icon == "view-refresh-symbolic"
+    assert win.chip_label.get_label() == "Rebuild needed"
+    assert win.chip.icon == "view-refresh-symbolic"
     # Undimmed: this one wants attention, "Up to date" does not.
-    assert "dim-label" not in win._chip_label.classes
+    assert "dim-label" not in win.chip_label.classes
 
 
 def test_the_chip_tells_a_screen_reader_what_it_says():
@@ -278,7 +304,7 @@ def test_the_chip_tells_a_screen_reader_what_it_says():
 
     coord.update_chip()
 
-    assert win._build_chip.a11y == "Up to date — rebuild"
+    assert win.chip.a11y == "Up to date — rebuild"
 
 
 def test_a_failed_build_stops_the_spinner_and_shows_why():
@@ -286,8 +312,8 @@ def test_a_failed_build_stops_the_spinner_and_shows_why():
 
     coord.on_failed(None, "No slides found — separate slides with ---")
 
-    assert win._converting is False
-    assert win._build_chip.spinning is False
-    assert win._sidebar.converting is False
-    assert win._banner.revealed is True
-    assert "slides" in win._banner.title
+    assert coord.converting is False
+    assert win.chip.spinning is False
+    assert win.sidebar.converting is False
+    assert win.banner.revealed is True
+    assert "slides" in win.banner.title

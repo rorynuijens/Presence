@@ -51,52 +51,70 @@ class FakeSidebar:
         self.wpm = wpm
 
 
+class FakeBuilds:
+    """The build coordinator, as far as the document controller can see it."""
+
+    def __init__(self) -> None:
+        self.converts = 0
+
+    def trigger(self, *_):  self.converts += 1
+    def update_chip(self):  pass
+
+
 class FakeWindow:
-    """Everything DocumentController reads or writes on the window."""
+    """
+    Everything DocumentController still asks a window for.
+
+    Where the document is used to live here — file_path, pres_path,
+    pres_temp_dir, output_path, modified — and the controller reached in and
+    wrote all five.  They are the controller's own now, so the tests below
+    set and read them on ``doc`` rather than on the window.
+    """
 
     def __init__(self, text: str = "") -> None:
-        self._editor = FakeEditor(text)
-        self._sidebar = FakeSidebar()
-        self._file_path = None
-        self._pres_path = None
-        self._pres_temp_dir = None
-        self._output_path = None
-        self._modified = False
-        self._auto_convert = False
-        self._current_slide = 7          # so we can see it reset to 0
-        self._initial_convert_source = None
-        self._active_file_dialog = None
+        self.editor  = FakeEditor(text)
+        self.sidebar = FakeSidebar()
+        self.builds  = FakeBuilds()
+        self.auto_convert = False
+        self.current_slide = 7          # so we can see it reset to 0
         self.title = None
         self.errors = []
         self.toasts = []
-        self.converts = 0
-        self.packed = 0
-        self.pres_saves = []
+        self.dialogs = []
         self.panel_syncs = []
 
     # collaborators the controller calls back into
-    def _show_error(self, message):  self.errors.append(message)
-    def _show_toast(self, message, timeout=None): self.toasts.append(message)
-    def _set_title(self, title):     self.title = title
-    def _refresh_live_slide(self, text=None): pass
-    def _sync_panel_to_document(self, text): self.panel_syncs.append(text)
-    def _update_word_count(self, text):   pass
-    def _update_build_chip(self):    pass
-    def _refresh_recent_actions(self):    pass
-    def _trigger_convert(self):      self.converts += 1
-    def _pack_pres(self):            self.packed += 1
-
-    def _setup_pres_save(self, pres_path, on_done=None):
-        self.pres_saves.append(pres_path)
-        self._pres_path = pres_path
-        if on_done is not None:
-            on_done()
+    def show_error(self, message):  self.errors.append(message)
+    def show_toast(self, message, timeout=None): self.toasts.append(message)
+    def set_document_title(self, title):     self.title = title
+    def refresh_live_slide(self, text=None): pass
+    def sync_panel_to_document(self, text): self.panel_syncs.append(text)
+    def update_word_count(self, text):   pass
+    def refresh_recent_actions(self):    pass
+    def hold_file_dialog(self, dialog):  self.dialogs.append(dialog)
     def get_application(self):       return None
+
+    @property
+    def converts(self) -> int:
+        return self.builds.converts
 
 
 def controller(text: str = "") -> tuple:
     win = FakeWindow(text)
-    return DocumentController(win), win
+    doc = DocumentController(win)
+    # Packing a bundle and switching to one both touch the filesystem; these
+    # tests are about what the controller decides, not about zipfile.
+    doc.packed = 0
+    doc.pres_saves = []
+    doc.pack_pres = lambda: setattr(doc, "packed", doc.packed + 1)
+
+    def _setup(pres_path, on_done=None):
+        doc.pres_saves.append(pres_path)
+        doc.pres_path = pres_path
+        if on_done is not None:
+            on_done()
+    doc.setup_pres_save = _setup
+    return doc, win
 
 
 # ── Opening ───────────────────────────────────────────────────────────────────
@@ -108,9 +126,9 @@ def test_opening_a_file_loads_it_into_the_editor(tmp_path):
 
     doc.load_into_editor(src)
 
-    assert win._editor.get_text() == "# Hello\n\nBody.\n"
-    assert win._file_path == src
-    assert win._modified is False
+    assert win.editor.get_text() == "# Hello\n\nBody.\n"
+    assert doc.file_path == src
+    assert doc.modified is False
     assert win.title == "talk.md"
 
 
@@ -121,7 +139,7 @@ def test_opening_points_the_build_at_a_matching_pdf(tmp_path):
 
     doc.load_into_editor(src)
 
-    assert win._output_path == tmp_path / "talk.pdf"
+    assert doc.output_path == tmp_path / "talk.pdf"
 
 
 def test_opening_starts_at_the_first_slide(tmp_path):
@@ -132,7 +150,7 @@ def test_opening_starts_at_the_first_slide(tmp_path):
 
     doc.load_into_editor(src)
 
-    assert win._current_slide == 0
+    assert win.current_slide == 0
 
 
 def test_opening_an_unreadable_file_reports_rather_than_raises(tmp_path):
@@ -141,7 +159,7 @@ def test_opening_an_unreadable_file_reports_rather_than_raises(tmp_path):
     doc.load_into_editor(tmp_path / "does-not-exist.md")
 
     assert win.errors and "Could not open file" in win.errors[0]
-    assert win._file_path is None
+    assert doc.file_path is None
 
 
 def test_open_file_refuses_a_path_that_is_not_there(tmp_path):
@@ -158,12 +176,12 @@ def test_saving_writes_the_editor_text_to_disk(tmp_path):
     dest = tmp_path / "talk.md"
     dest.write_text("old")
     doc, win = controller("new content")
-    win._file_path = dest
-    win._modified = True
+    doc.file_path = dest
+    doc.modified = True
 
     assert doc.write_document() is True
     assert dest.read_text() == "new content"
-    assert win._modified is False
+    assert doc.modified is False
 
 
 def test_saving_does_not_build(tmp_path):
@@ -171,7 +189,7 @@ def test_saving_does_not_build(tmp_path):
     dest = tmp_path / "talk.md"
     dest.write_text("")
     doc, win = controller("text")
-    win._file_path = dest
+    doc.file_path = dest
 
     doc.save()
 
@@ -182,8 +200,8 @@ def test_saving_builds_when_the_writer_asked_for_that(tmp_path):
     dest = tmp_path / "talk.md"
     dest.write_text("")
     doc, win = controller("text")
-    win._file_path = dest
-    win._auto_convert = True
+    doc.file_path = dest
+    win.auto_convert = True
 
     doc.save()
 
@@ -193,11 +211,11 @@ def test_saving_builds_when_the_writer_asked_for_that(tmp_path):
 def test_a_failed_write_reports_and_stays_modified(tmp_path):
     unwritable = tmp_path / "nope" / "talk.md"       # parent does not exist
     doc, win = controller("text")
-    win._file_path = unwritable
-    win._modified = True
+    doc.file_path = unwritable
+    doc.modified = True
 
     assert doc.write_document() is False
-    assert win._modified is True
+    assert doc.modified is True
     assert win.errors and "Could not save" in win.errors[0]
 
 
@@ -205,12 +223,12 @@ def test_saving_a_bundle_repacks_it(tmp_path):
     dest = tmp_path / "slides.md"
     dest.write_text("")
     doc, win = controller("text")
-    win._file_path = dest
-    win._pres_path = tmp_path / "talk.pres"
+    doc.file_path = dest
+    doc.pres_path = tmp_path / "talk.pres"
 
     doc.write_document()
 
-    assert win.packed == 1
+    assert doc.packed == 1
     assert win.title == "talk.pres"     # the bundle is what the writer sees
 
 
@@ -218,7 +236,7 @@ def test_saving_a_bundle_repacks_it(tmp_path):
 
 def test_an_unmodified_document_runs_the_action_without_asking():
     doc, win = controller("text")
-    win._modified = False
+    doc.modified = False
     ran = []
 
     doc.check_unsaved(lambda: ran.append(True))
@@ -233,8 +251,8 @@ def test_autosave_writes_a_recovery_copy(tmp_path):
     src = tmp_path / "talk.md"
     src.write_text("saved version")
     doc, win = controller("edited but not saved")
-    win._file_path = src
-    win._modified = True
+    doc.file_path = src
+    doc.modified = True
 
     doc.autosave()
 
@@ -246,8 +264,8 @@ def test_autosave_does_nothing_for_an_unmodified_document(tmp_path):
     src = tmp_path / "talk.md"
     src.write_text("saved")
     doc, win = controller("saved")
-    win._file_path = src
-    win._modified = False
+    doc.file_path = src
+    doc.modified = False
 
     doc.autosave()
 
@@ -258,7 +276,7 @@ def test_autosave_does_nothing_for_an_unmodified_document(tmp_path):
 def test_autosave_keeps_an_untitled_draft_too(tmp_path):
     from presence.session import recovery_dir
     doc, win = controller("a draft with no home yet")
-    win._modified = True
+    doc.modified = True
 
     doc.autosave()
 
@@ -273,7 +291,7 @@ def test_restoring_a_draft_leaves_it_unsaved():
 
     doc.restore_autosave("recovered text")
 
-    assert win._editor.get_text() == "recovered text"
-    assert win._modified is True
+    assert win.editor.get_text() == "recovered text"
+    assert doc.modified is True
     assert win.title == UNTITLED + " •"
     assert win.converts == 1

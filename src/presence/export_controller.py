@@ -11,7 +11,7 @@ only the thing that makes it different.
 The one real asymmetry is kept: exporting a PDF re-points the build at the
 chosen path and converts, because the PDF *is* the build's own output.  The
 other three consume a build that already matches the document, which is what
-``MainWindow._with_current_build()`` guarantees.
+``BuildCoordinator.with_current_build()`` guarantees.
 """
 
 from __future__ import annotations
@@ -86,7 +86,7 @@ class ExportController:
         ))
 
         def _response(dlg, result) -> None:
-            win._active_file_dialog = None
+            win.hold_file_dialog(None)
             try:
                 gfile = dlg.save_finish(result)
             except GLib.Error:
@@ -100,35 +100,35 @@ class ExportController:
             if not os.access(path.parent, os.W_OK):
                 message = f"Cannot write to '{path.parent}' — permission denied."
                 if transient:
-                    win._show_toast(message)
+                    win.show_toast(message)
                 else:
-                    win._show_error(message)
+                    win.show_error(message)
                 return
             on_chosen(path)
 
-        win._active_file_dialog = dialog
+        win.hold_file_dialog(dialog)
         dialog.save(win, None, _response)
 
     def _initial_folder(self) -> Path | None:
         """Where the dialog should open: beside the document being written."""
-        display = self._win._pres_path or self._win._file_path
+        display = self._win.documents.display_path
         return display.parent if display else None
 
     def _document_stem(self, fallback: str = "presentation") -> str:
-        display = self._win._pres_path or self._win._file_path
+        display = self._win.documents.display_path
         return display.stem if display else fallback
 
     # ── PDF ───────────────────────────────────────────────────────────────────
 
     def export_pdf(self, *_) -> None:
-        win = self._win
+        docs = self._win.documents
         self._ask_save_path(
             title="Export PDF",
             suffix=".pdf",
             filter_label="PDF files",
-            initial_name=(win._pres_path.stem + ".pdf") if win._pres_path else None,
-            initial_file=(win._output_path
-                          if not win._pres_path and win._output_path else None),
+            initial_name=(docs.pres_path.stem + ".pdf") if docs.pres_path else None,
+            initial_file=(docs.output_path
+                          if not docs.pres_path and docs.output_path else None),
             transient=False,
             on_chosen=self._write_pdf,
         )
@@ -137,25 +137,26 @@ class ExportController:
         # The PDF is the build's own output, so exporting one is just building
         # somewhere else.
         win = self._win
-        win._output_path = path
-        win._build_for_export(
-            lambda: win._show_toast(f"PDF exported → {path.name}")
+        win.documents.output_path = path
+        win.builds.build_for_export(
+            lambda: win.show_toast(f"PDF exported → {path.name}")
         )
 
     # ── HTML ──────────────────────────────────────────────────────────────────
 
     def export_html(self, *_) -> None:
         """Save a self-contained copy of the generated HTML file."""
-        win = self._win
+        win  = self._win
+        docs = win.documents
         self._ask_save_path(
             title="Export HTML",
             suffix=".html",
             filter_label="HTML files",
-            initial_name=(win._pres_path.stem + ".html") if win._pres_path else None,
-            initial_file=(win._output_path.with_suffix(".html")
-                          if not win._pres_path and win._output_path else None),
-            on_chosen=lambda dest: win._with_current_build(
-                lambda: self._copy_built_html(dest), on_wait=win._export_busy
+            initial_name=(docs.pres_path.stem + ".html") if docs.pres_path else None,
+            initial_file=(docs.output_path.with_suffix(".html")
+                          if not docs.pres_path and docs.output_path else None),
+            on_chosen=lambda dest: win.builds.with_current_build(
+                lambda: self._copy_built_html(dest), on_wait=win.export_busy
             ),
         )
 
@@ -164,12 +165,12 @@ class ExportController:
         from urllib.request import url2pathname
 
         win = self._win
-        src_path = Path(url2pathname(urlparse(win._html_uri).path))
+        src_path = Path(url2pathname(urlparse(win.builds.html_uri).path))
         try:
             shutil.copy2(src_path, dest)
-            win._show_toast(f"HTML exported → {dest.name}")
+            win.show_toast(f"HTML exported → {dest.name}")
         except OSError as e:
-            win._show_toast(f"Could not export HTML: {e}")
+            win.show_toast(f"Could not export HTML: {e}")
 
     # ── Images ────────────────────────────────────────────────────────────────
 
@@ -180,7 +181,7 @@ class ExportController:
         dialog.set_title("Choose Export Folder")
 
         def _response(dlg, result) -> None:
-            win._active_file_dialog = None
+            win.hold_file_dialog(None)
             try:
                 gfile = dlg.select_folder_finish(result)
             except GLib.Error:
@@ -191,10 +192,12 @@ class ExportController:
             folder = Path(path_str)
             if not folder.is_dir():
                 return
-            win._with_current_build(lambda: self.render_slide_images(folder),
-                                    on_wait=win._export_busy)
+            win.builds.with_current_build(
+                lambda: self.render_slide_images(folder),
+                on_wait=win.export_busy,
+            )
 
-        win._active_file_dialog = dialog
+        win.hold_file_dialog(dialog)
         dialog.select_folder(win, None, _response)
 
     def render_slide_images(self, folder: Path) -> None:
@@ -211,7 +214,7 @@ class ExportController:
         # Rasterising a whole deck is seconds of work, so it runs off the
         # main thread and reports back on it — with the Export button held
         # busy meanwhile, since the build it waited for has already let go.
-        win._export_busy(True)
+        win.export_busy(True)
 
         def _render() -> None:
             slides = render_slides_hires(pdf_bytes, width_px=IMAGE_EXPORT_WIDTH,
@@ -228,10 +231,10 @@ class ExportController:
                     saved += 1
                 except OSError as e:
                     log.warning("Could not write slide PNG: %s", e)
-            win._show_toast(
+            win.show_toast(
                 f"{saved} image{'s' if saved != 1 else ''} exported → {folder.name}/"
             )
-            win._export_busy(False)
+            win.export_busy(False)
             return GLib.SOURCE_REMOVE
 
         threading.Thread(target=_render, daemon=True).start()
@@ -248,8 +251,8 @@ class ExportController:
             initial_name=f"{self._document_stem()}-handout.pdf",
             # A handout is made of slide pictures, so it needs a build that
             # matches the document just as much as any other export does.
-            on_chosen=lambda dest: win._with_current_build(
-                lambda: self.write_handout(dest), on_wait=win._export_busy
+            on_chosen=lambda dest: win.builds.with_current_build(
+                lambda: self.write_handout(dest), on_wait=win.export_busy
             ),
         )
 
@@ -259,10 +262,10 @@ class ExportController:
         if pdf_bytes is None:
             return
 
-        meta, _body = parse_frontmatter(win._editor.get_text())
-        slide_info = list(win._slide_info)
+        meta, _body = parse_frontmatter(win.editor.get_text())
+        slide_info = list(win.builds.slide_info)
         pages = self._slide_pages()
-        win._export_busy(True)
+        win.export_busy(True)
 
         def _render() -> None:
             try:
@@ -283,15 +286,15 @@ class ExportController:
         def _done(data: bytes) -> bool:
             try:
                 dest.write_bytes(data)
-                win._show_toast(f"Handout exported → {dest.name}")
+                win.show_toast(f"Handout exported → {dest.name}")
             except OSError as e:
-                win._show_toast(f"Could not write the handout: {e}")
-            win._export_busy(False)
+                win.show_toast(f"Could not write the handout: {e}")
+            win.export_busy(False)
             return GLib.SOURCE_REMOVE
 
         def _failed(message: str) -> bool:
-            win._show_toast(f"Could not build the handout: {message}")
-            win._export_busy(False)
+            win.show_toast(f"Could not build the handout: {message}")
+            win.export_busy(False)
             return GLib.SOURCE_REMOVE
 
         threading.Thread(target=_render, daemon=True).start()
@@ -305,7 +308,7 @@ class ExportController:
         None when the build predates the mapping, in which case the
         rasterizers fall back to one page per slide.
         """
-        pages = [info.get("page_index") for info in self._win._slide_info]
+        pages = [info.get("page_index") for info in self._win.builds.slide_info]
         return pages if pages and all(p is not None for p in pages) else None
 
     def _read_built_pdf(self, missing_message: str) -> bytes | None:
@@ -316,11 +319,12 @@ class ExportController:
         out of the Markdown, so they all need this and all fail the same way.
         """
         win = self._win
-        if win._output_path is None or not win._output_path.exists():
-            win._show_toast(missing_message)
+        pdf_path = win.documents.output_path
+        if pdf_path is None or not pdf_path.exists():
+            win.show_toast(missing_message)
             return None
         try:
-            return win._output_path.read_bytes()
+            return pdf_path.read_bytes()
         except OSError as e:
-            win._show_toast(f"Could not read the built PDF: {e}")
+            win.show_toast(f"Could not read the built PDF: {e}")
             return None

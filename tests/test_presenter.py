@@ -417,7 +417,7 @@ def test_counting_down_to_a_target_goes_negative_rather_than_stopping(presenter)
 
 
 def test_the_target_comes_from_the_window_prefs(presenter):
-    win = presenter(_timer_minutes=20, _speaking_rate=140,
+    win = presenter(_timer_minutes=20, speaking_rate=140,
                     _presenter_notes_font=28)
     assert win._target_secs == 20 * 60
     assert win._wpm == 140

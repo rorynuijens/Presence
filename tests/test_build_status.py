@@ -28,15 +28,21 @@ class FakeEditor:
 
 
 class WindowState:
-    """The three fields the build state is read from."""
+    """
+    The three fields the build state is read from.
+
+    Two of them are the coordinator's own now, so only the editor is stood
+    in for; the coordinator is asked about itself.
+    """
 
     def __init__(self, current: str, built: str | None, converting: bool = False):
-        self._editor = FakeEditor(current)
-        self._built_text = built
-        self._converting = converting
+        self.editor = FakeEditor(current)
+        self._coord = BuildCoordinator(self)
+        self._coord.built_text = built
+        self._coord.converting = converting
 
     def _build_state(self) -> str:
-        return BuildCoordinator(self).state()
+        return self._coord.state()
 
 
 def test_building_wins_over_everything():
@@ -59,9 +65,9 @@ def test_stale_when_the_document_has_moved_on():
 def test_undoing_back_to_the_built_text_reports_current():
     """Why a text comparison and not a modified flag."""
     state = WindowState("original", "original")
-    state._editor._text = "original plus an edit"
+    state.editor._text = "original plus an edit"
     assert state._build_state() == "stale"
-    state._editor._text = "original"          # undo
+    state.editor._text = "original"          # undo
     assert state._build_state() == "current"
 
 
@@ -71,7 +77,7 @@ def test_whitespace_only_edits_still_count_as_stale():
 
 
 def test_a_failed_build_leaves_the_document_stale():
-    """_built_text is untouched on failure, so the chip keeps asking."""
+    """built_text is untouched on failure, so the chip keeps asking."""
     state = WindowState("edited", "original", converting=True)
-    state._converting = False                 # failure handler does this
+    state._coord.converting = False           # failure handler does this
     assert state._build_state() == "stale"

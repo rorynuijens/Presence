@@ -47,7 +47,7 @@ class FakeEditor:
 
 class FakeWindow:
     def __init__(self):
-        self._editor = FakeEditor()
+        self.editor = FakeEditor()
 
 
 class FakeFileList:

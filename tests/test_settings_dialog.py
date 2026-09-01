@@ -68,14 +68,14 @@ class FakeWindow(Gtk.Window):
 
     def __init__(self):
         super().__init__()
-        self._editor              = FakeEditor()
-        self._converter           = FakeConverter()
-        self._sidebar             = FakeSidebar()
+        self.editor              = FakeEditor()
+        self.converter           = FakeConverter()
+        self.sidebar             = FakeSidebar()
         self._theme_panel         = FakeSlidePanel()
         self._timer_minutes       = 0
-        self._auto_convert        = False
+        self.auto_convert        = False
         self._presenter_notes_font = 22
-        self._speaking_rate       = 110
+        self.speaking_rate       = 110
 
 
 @pytest.fixture
@@ -203,7 +203,7 @@ def test_the_dialog_opens_showing_the_saved_values(settings):
 
 def test_the_font_size_shown_is_the_editor_s_own(settings):
     dialog = settings()
-    dialog._test_parent._editor.font_size = 17
+    dialog._test_parent.editor.font_size = 17
     assert int(SettingsDialog(dialog._test_parent)._font_spin_row.get_value()) == 17
 
 
@@ -227,8 +227,8 @@ def test_a_speaking_rate_also_tells_the_strip(settings):
     dialog = settings()
     dialog._rate_spin_row.set_value(150)
 
-    assert dialog._test_parent._speaking_rate == 150
-    assert dialog._test_parent._sidebar.rates == [150]
+    assert dialog._test_parent.speaking_rate == 150
+    assert dialog._test_parent.sidebar.rates == [150]
     assert dialog._test_pres_saves[-1]["speaking_rate"] == 150
 
 
@@ -238,7 +238,7 @@ def test_convert_on_save_is_remembered(settings):
     row.set_active(True)
     dialog._on_auto_convert_toggled(row, None)
 
-    assert dialog._test_parent._auto_convert is True
+    assert dialog._test_parent.auto_convert is True
     assert dialog._test_pres_saves[-1]["auto_convert"] is True
 
 
@@ -254,20 +254,20 @@ def test_the_timing_prefs_carry_the_presenter_font_they_did_not_change(settings)
 def test_the_font_size_reaches_the_editor(settings):
     dialog = settings()
     dialog._font_spin_row.set_value(18)
-    assert ("font", 18) in dialog._test_parent._editor.calls
+    assert ("font", 18) in dialog._test_parent.editor.calls
     assert dialog._test_editor_saves[-1]["font_size"] == 18
 
 
 def test_the_line_length_guide_reaches_the_editor(settings):
     dialog = settings()
     dialog._ll_spin_row.set_value(72)
-    assert ("length", 72) in dialog._test_parent._editor.calls
+    assert ("length", 72) in dialog._test_parent.editor.calls
     assert dialog._test_editor_saves[-1]["line_length"] == 72
 
 
 def test_every_editor_switch_drives_its_own_setter(settings):
     dialog = settings()
-    editor = dialog._test_parent._editor
+    editor = dialog._test_parent.editor
     for key in ("syntax_highlight", "line_numbers", "highlight_line",
                 "auto_indent", "spaces_tabs"):
         editor.calls.clear()

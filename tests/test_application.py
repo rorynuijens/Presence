@@ -260,7 +260,7 @@ def test_one_file_reuses_a_blank_untitled_window(opening, tmp_path):
 def test_a_window_with_unsaved_work_is_not_reused(opening, tmp_path):
     app, opened = opening
     existing = MainWindow(application=app)
-    existing._modified = True
+    existing.documents.modified = True
     doc = tmp_path / "talk.md"
 
     app._on_open(app, _gfiles(doc), 1, "")
@@ -272,7 +272,7 @@ def test_a_window_with_unsaved_work_is_not_reused(opening, tmp_path):
 def test_a_window_that_already_holds_a_document_is_not_reused(opening, tmp_path):
     app, opened = opening
     existing = MainWindow(application=app)
-    existing._file_path = tmp_path / "other.md"
+    existing.documents.file_path = tmp_path / "other.md"
     doc = tmp_path / "talk.md"
 
     app._on_open(app, _gfiles(doc), 1, "")
