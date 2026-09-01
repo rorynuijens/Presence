@@ -41,23 +41,37 @@ class SlideshowWindow(Adw.Window):
     """
     Chromeless fullscreen window that shows a single slide (audience view).
 
-    Monitor placement on Wayland
-    ----------------------------
-    Wayland does not allow applications to programmatically choose which
-    output a window appears on.  The only reliable approach is:
+    Monitor placement
+    -----------------
+    **Name the output; never try to move the window.**  Wayland gives a
+    client no way to position a window, and a bare `fullscreen()` passes a
+    NULL output — "compositor, you choose", which means wherever the window
+    already is.  But `xdg_toplevel.set_fullscreen` takes an optional output
+    precisely so a client can say which screen, and GTK 4 hands a
+    `GdkMonitor` straight through to it
+    (`gdk_wayland_toplevel_fullscreen_on_monitor`).  So
+    `Gtk.Window.fullscreen_on_monitor()` is the one call that works, on
+    both backends, and it is the only way this class ever fullscreens.
 
-      1. Present the window (it appears on whatever output the compositor
-         chooses, typically the most recently focused one).
-      2. Use Gtk.Window.fullscreen() — NOT fullscreen_on_monitor(), which
-         is X11-only and silently does nothing on Wayland.
-      3. Provide a "Move to other screen" action the presenter can trigger
-         if the slideshow landed on the wrong monitor.
+    This file used to assert the opposite — that `fullscreen_on_monitor()`
+    was "X11-only and silently does nothing on Wayland" — and fenced it
+    behind an `is_x11` check, so on Wayland the placement was a
+    `set_default_size()` to the target monitor's dimensions followed by
+    `fullscreen()`.  That sets a size, not a position, and the compositor
+    re-seated the window where it already was.  The swap button had the
+    same hole: unfullscreen, wait, `fullscreen()` again, on the belief that
+    GNOME Shell cycles outputs on each such cycle.  It does not, and the
+    button did nothing.
 
-    When the slideshow window is first shown we attempt to position it on
-    the monitor that does NOT contain the presenter window, by moving the
-    window to the centre of that monitor's geometry before fullscreening.
-    This is a best-effort hint to the compositor and is not guaranteed, but
-    works reliably on most Wayland compositors (Mutter/GNOME Shell).
+    Which output is the target
+    --------------------------
+    The one the *main window* is not on — read from `parent_window`, not
+    from the presenter.  The presenter is constructed microseconds before
+    this window and has not been mapped, so it has no output association
+    yet and `get_monitor_at_surface()` answers None for it; the main window
+    has been mapped all session and answers reliably.  If it answers None
+    anyway we take the last monitor in the list rather than the first,
+    because the main window is far likelier to be on the first.
     """
 
     def __init__(self, pdf_path, n_slides: int,
@@ -74,7 +88,11 @@ class SlideshowWindow(Adw.Window):
         self._pdf_bytes: bytes | None = None
         self._n_slides         = n_slides
         self._presenter        = presenter_window
+        self._parent_window    = parent_window
         self._pending          = 0
+        # Index into the display's monitor list of the output this window is
+        # fullscreened on, so the swap button knows what "the other one" is.
+        self._monitor_index: int | None = None
         self._closing              = False   # True when close_by_presenter() called
         self._monitors_handler     = None    # GLib signal handler id
         # One rendered page per slide, filled in by load(); None until the
@@ -173,110 +191,113 @@ class SlideshowWindow(Adw.Window):
         log.debug("Monitor disconnected: %s", monitor.get_connector()
                   if hasattr(monitor, "get_connector") else monitor)
 
+    def _monitors(self):
+        """The display's monitor list, or None if there is no display."""
+        display = Gdk.Display.get_default()
+        return display.get_monitors() if display is not None else None
+
+    def _monitor_of_main_window(self) -> int | None:
+        """
+        Index of the monitor holding the main window, or None if it cannot
+        be determined.  Read from the main window rather than the presenter
+        because the presenter has not been mapped yet — see the class
+        docstring.
+        """
+        if self._parent_window is None:
+            return None
+        display  = Gdk.Display.get_default()
+        monitors = self._monitors()
+        if display is None or monitors is None:
+            return None
+        try:
+            surface = self._parent_window.get_surface()
+            if surface is None:
+                return None
+            here = display.get_monitor_at_surface(surface)
+        except Exception:
+            return None
+        if here is None:
+            return None
+        for i in range(monitors.get_n_items()):
+            if monitors.get_item(i) is here:
+                return i
+        return None
+
+    def _fullscreen_on(self, index: int) -> None:
+        """
+        Fullscreen the slideshow on the monitor at `index`, naming that
+        output to the compositor.  Falls back to an unplaced fullscreen if
+        the index has gone stale — a monitor can be unplugged between the
+        choice and the call.
+        """
+        monitors = self._monitors()
+        monitor  = monitors.get_item(index) if monitors is not None else None
+        if monitor is None:
+            self.fullscreen()
+            return
+        try:
+            self.fullscreen_on_monitor(monitor)
+            self._monitor_index = index
+        except Exception as e:
+            log.debug("fullscreen_on_monitor() raised: %s", e)
+            self.fullscreen()
+
     def _place_on_other_monitor(self) -> bool:
         """
-        Place the slideshow on the monitor that does NOT contain the
-        presenter window, then fullscreen it. Called once at startup.
-
-        Wayland strategy (GNOME Shell / Mutter)
-        ----------------------------------------
-        Wayland does not let applications choose an output directly.
-        GNOME Shell fullscreens a window on the output that contains
-        the majority of the window's current geometry, so the sequence is:
-          1. Set default size to match the target monitor geometry.
-          2. Wait one compositor frame (~50 ms) for the size hint to land.
-          3. Call fullscreen() — compositor seats it on the correct output.
-
-        X11 strategy
-        ------------
-        fullscreen_on_monitor() is reliable and used directly.
+        Fullscreen the slideshow on the monitor the main window is not on.
+        Called once at startup, from an idle so the surface exists first.
         """
         if self._closing:
             return GLib.SOURCE_REMOVE
 
-        display  = Gdk.Display.get_default()
-        monitors = display.get_monitors()
-        n        = monitors.get_n_items()
+        monitors = self._monitors()
+        n = monitors.get_n_items() if monitors is not None else 0
 
         if n < 2:
-            # Single monitor — fullscreen on whatever output we have
+            # One screen — there is no "other" to move to.
             self.fullscreen()
             return GLib.SOURCE_REMOVE
 
-        # Find which monitor the presenter window is on
-        presenter_monitor = None
-        if self._presenter is not None:
-            try:
-                psurface = self._presenter.get_surface()
-                if psurface is not None:
-                    presenter_monitor = display.get_monitor_at_surface(psurface)
-            except Exception:
-                pass
-
-        # Pick the first monitor that is not the presenter's
-        target_monitor = None
-        for i in range(n):
-            m = monitors.get_item(i)
-            if m is not presenter_monitor:
-                target_monitor = m
-                break
-
-        if target_monitor is None:
-            self.fullscreen()
-            return GLib.SOURCE_REMOVE
-
-        # Detect X11 vs Wayland
-        is_x11 = False
-        try:
-            from gi.repository import GdkX11
-            is_x11 = isinstance(display, GdkX11.X11Display)
-        except ImportError:
-            pass
-
-        if is_x11:
-            try:
-                self.fullscreen_on_monitor(target_monitor)
-            except (AttributeError, TypeError):
-                self.fullscreen()
+        here = self._monitor_of_main_window()
+        if here is None:
+            # Unknown: the last monitor is the better guess, because the
+            # main window is far likelier to be on the first.
+            target = n - 1
         else:
-            # Wayland: hint size = target monitor geometry, then fullscreen
-            # after one frame so the compositor maps us on the right output.
-            geom = target_monitor.get_geometry()
-            self.set_default_size(geom.width, geom.height)
-            GLib.timeout_add(50, self._do_fullscreen)
+            target = next(i for i in range(n) if i != here)
 
-        return GLib.SOURCE_REMOVE
-
-    def _do_fullscreen(self) -> bool:
-        """Fullscreen the slideshow (used for initial placement only)."""
-        if self._closing or not self.get_visible():
-            return GLib.SOURCE_REMOVE
-        try:
-            self.fullscreen()
-        except Exception as e:
-            log.debug("fullscreen() raised: %s", e)
+        self._fullscreen_on(target)
         return GLib.SOURCE_REMOVE
 
     def move_to_other_monitor(self) -> None:
         """
-        Move the slideshow to the other monitor (triggered by swap button).
+        Move the slideshow to the next monitor (triggered by swap button).
 
-        Unfullscreens, waits 200 ms for the compositor to finish surface
-        teardown, then re-fullscreens. GNOME Shell cycles the window to the
-        next output on each unfullscreen/fullscreen cycle.
-
-        The 200 ms delay gives the compositor time to finish tearing the
-        surface down before it is reconfigured; re-fullscreening immediately
-        leaves the window on the original output on some hardware.
+        Naming the output is the whole mechanism: with more than two screens
+        this walks around the list, so pressing the button repeatedly always
+        reaches every one of them.
         """
         if self._closing:
             return
-        log.debug("Moving slideshow to other monitor")
-        try:
-            self.unfullscreen()
-            GLib.timeout_add(200, self._do_fullscreen)
-        except Exception as e:
-            log.warning("move_to_other_monitor failed: %s", e)
+
+        monitors = self._monitors()
+        n = monitors.get_n_items() if monitors is not None else 0
+        if n < 2:
+            return
+
+        current = self._monitor_index
+        if current is None:
+            # Never placed, or placement fell back to an unnamed output.
+            # Start from wherever the main window is not.
+            here = self._monitor_of_main_window()
+            target = 0 if here is None else next(
+                i for i in range(n) if i != here
+            )
+        else:
+            target = (current + 1) % n
+
+        log.debug("Moving slideshow to monitor %d of %d", target, n)
+        self._fullscreen_on(target)
 
     # ── Load / slide control ──────────────────────────────────────────────────
 

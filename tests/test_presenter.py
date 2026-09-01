@@ -526,3 +526,134 @@ def test_swapping_screens_asks_the_slideshow(presenter):
     win = presenter()
     win._swap_screens()
     assert win._slideshow.moved == 1
+
+
+# ── Which screen the audience gets ────────────────────────────────────────────
+#
+# The whole mechanism is naming the output.  A bare fullscreen() passes a NULL
+# output, which means "compositor, you choose", which means the screen the
+# window is already on — so the slideshow opened on the editor's monitor and
+# the swap button, which did the same thing twice with a pause between, moved
+# nothing.  These pin that both paths name a monitor, and which one.
+
+class FakeMonitor:
+    """A GdkMonitor as far as the placement code is concerned: identity."""
+
+    def __init__(self, connector: str) -> None:
+        self.connector = connector
+
+    def get_connector(self) -> str:
+        return self.connector
+
+
+class FakeMonitorList:
+    """The GListModel of monitors, with only the two methods that are read."""
+
+    def __init__(self, *connectors: str) -> None:
+        self.monitors = [FakeMonitor(c) for c in connectors]
+
+    def get_n_items(self) -> int:
+        return len(self.monitors)
+
+    def get_item(self, index: int):
+        if 0 <= index < len(self.monitors):
+            return self.monitors[index]
+        return None
+
+
+def _screens(win, *connectors: str, main_window_on=None):
+    """
+    Give `win` a fake set of screens and record how it fullscreens.
+
+    Returns the list of calls: the connector name for a placed fullscreen,
+    None for a bare one.  The distinction is the entire point.
+    """
+    monitors = FakeMonitorList(*connectors)
+    calls: list = []
+
+    win._monitors = lambda: monitors
+    win._monitor_of_main_window = lambda: main_window_on
+    win.fullscreen_on_monitor = lambda m: calls.append(m.get_connector())
+    win.fullscreen = lambda: calls.append(None)
+    return calls
+
+
+def test_placement_names_the_screen_the_main_window_is_not_on(slideshow):
+    win = slideshow(n_slides=2)
+    calls = _screens(win, "eDP-1", "HDMI-1", main_window_on=0)
+
+    win._place_on_other_monitor()
+
+    assert calls == ["HDMI-1"]          # named, and not the editor's screen
+    assert win._monitor_index == 1
+
+
+def test_placement_guesses_the_last_screen_when_the_main_one_is_unknown(slideshow):
+    # get_monitor_at_surface() can answer None; the first monitor is the one
+    # the main window is likeliest to be on, so the last is the better guess.
+    win = slideshow(n_slides=2)
+    calls = _screens(win, "eDP-1", "HDMI-1", "DP-2", main_window_on=None)
+
+    win._place_on_other_monitor()
+
+    assert calls == ["DP-2"]
+
+
+def test_one_screen_is_fullscreened_unplaced(slideshow):
+    win = slideshow(n_slides=2)
+    calls = _screens(win, "eDP-1", main_window_on=0)
+
+    win._place_on_other_monitor()
+
+    assert calls == [None]              # nothing to name
+    assert win._monitor_index is None
+
+
+def test_swap_walks_every_screen(slideshow):
+    win = slideshow(n_slides=2)
+    calls = _screens(win, "eDP-1", "HDMI-1", "DP-2", main_window_on=0)
+    win._place_on_other_monitor()
+
+    win.move_to_other_monitor()
+    win.move_to_other_monitor()
+    win.move_to_other_monitor()
+
+    # Placed on HDMI-1, then round the list and back — with three screens the
+    # button has to reach the third, which "the other monitor" never could.
+    assert calls == ["HDMI-1", "DP-2", "eDP-1", "HDMI-1"]
+
+
+def test_swap_before_placement_starts_off_the_main_window(slideshow):
+    # If placement fell back to an unnamed fullscreen there is no index to
+    # advance from, and the swap still has to move somewhere useful.
+    win = slideshow(n_slides=2)
+    calls = _screens(win, "eDP-1", "HDMI-1", main_window_on=0)
+
+    win.move_to_other_monitor()
+
+    assert calls == ["HDMI-1"]
+
+
+def test_swap_does_nothing_with_one_screen(slideshow):
+    win = slideshow(n_slides=2)
+    calls = _screens(win, "eDP-1", main_window_on=0)
+
+    win.move_to_other_monitor()
+
+    assert calls == []                 # not even a re-fullscreen
+
+
+def test_a_vanished_screen_falls_back_rather_than_raising(slideshow):
+    # A monitor can be unplugged between choosing an index and using it.
+    win = slideshow(n_slides=2)
+    calls = _screens(win, "eDP-1", "HDMI-1", main_window_on=0)
+
+    win._fullscreen_on(7)
+
+    assert calls == [None]
+    assert win._monitor_index is None
+
+
+def test_the_main_windows_screen_is_unknown_without_a_main_window(slideshow):
+    win = slideshow(n_slides=2)
+    assert win._monitor_of_main_window() is None
