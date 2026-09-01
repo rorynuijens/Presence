@@ -126,6 +126,7 @@ class ThemePanel(Gtk.Box):
         self._swatch_flow.set_max_children_per_line(3)
         self._swatch_flow.set_min_children_per_line(3)
         self._theme_dialog: Adw.Dialog | None = None
+        self._theme_nav: Adw.NavigationView | None = None
 
         slide_group = Adw.PreferencesGroup()
         slide_group.set_title("Appearance")
@@ -369,22 +370,73 @@ class ThemePanel(Gtk.Box):
     def _on_change_theme(self, *_) -> None:
         """Open the theme chooser."""
         if self._theme_dialog is None:
-            scroll = Gtk.ScrolledWindow()
-            scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-            scroll.set_vexpand(True)
-            scroll.set_child(self._swatch_flow)
-
-            toolbar = Adw.ToolbarView()
-            toolbar.add_top_bar(Adw.HeaderBar())
-            toolbar.set_content(scroll)
-
-            self._theme_dialog = Adw.Dialog()
-            self._theme_dialog.set_title("Choose a theme")
-            self._theme_dialog.set_content_width(520)
-            self._theme_dialog.set_content_height(620)
-            self._theme_dialog.set_child(toolbar)
-
+            self._theme_dialog = self._build_theme_dialog()
         self._theme_dialog.present(self)
+
+    def _build_theme_dialog(self) -> Adw.Dialog:
+        """
+        One dialog for everything about themes.
+
+        Choosing one is the front page; making, installing and removing them
+        is a page pushed onto the same Adw.NavigationView.  That page used to
+        be the third page of Preferences, which is for settings rather than
+        for a library of content — and it meant a writer chose a theme here
+        and made one in a different dialog under a different menu.
+        """
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_vexpand(True)
+        scroll.set_child(self._swatch_flow)
+
+        bar = Adw.HeaderBar()
+        manage_btn = Gtk.Button(label="Manage")
+        manage_btn.set_tooltip_text("Add, edit or remove themes")
+        manage_btn.connect("clicked", self._on_manage_themes)
+        bar.pack_end(manage_btn)
+
+        toolbar = Adw.ToolbarView()
+        toolbar.add_top_bar(bar)
+        toolbar.set_content(scroll)
+
+        self._theme_nav = Adw.NavigationView()
+        self._theme_nav.add(
+            Adw.NavigationPage(child=toolbar, title="Themes")
+        )
+
+        dialog = Adw.Dialog()
+        dialog.set_title("Themes")
+        dialog.set_content_width(560)
+        dialog.set_content_height(640)
+        dialog.set_child(self._theme_nav)
+        return dialog
+
+    def _on_manage_themes(self, *_) -> None:
+        """
+        Push the manage page.
+
+        Built fresh each time rather than kept: it lists what is installed,
+        and the writer may have installed something since.
+        """
+        from .theme_manager_ui import build_themes_page
+
+        parent = self._window or self.get_root()
+        page   = build_themes_page(parent, self._converter, refresher=self)
+
+        toolbar = Adw.ToolbarView()
+        toolbar.add_top_bar(Adw.HeaderBar())
+        toolbar.set_content(page)
+        self._theme_nav.push(
+            Adw.NavigationPage(child=toolbar, title="Manage Themes")
+        )
+
+    def refresh_themes(self) -> None:
+        """
+        Told by the manage page whenever the installed set changes.
+
+        The name is the manage page's contract, not this panel's — it used to
+        be answered by the Preferences dialog, which forwarded it here.
+        """
+        self.refresh()
 
     def _rebuild_swatches(self) -> None:
         """Clear and repopulate the swatch FlowBox with colour-only cards."""

@@ -412,7 +412,7 @@ class MainWindow(Adw.ApplicationWindow):
         # moved to the menu.
         self._share_btn = Gtk.MenuButton()
         self._share_btn.set_icon_name("document-send-symbolic")
-        self._share_btn.set_tooltip_text("Export…")
+        self._share_btn.set_tooltip_text("Export… (Ctrl+P for PDF)")
         self._share_btn.update_property(
             [Gtk.AccessibleProperty.LABEL], ["Export"]
         )
@@ -432,7 +432,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._present_busy = _BusyIndicator(
             self._present_btn, "media-playback-start-symbolic"
         )
-        self._present_btn.set_tooltip_text("Present (Ctrl+P)")
+        self._present_btn.set_tooltip_text("Present (F5)")
         self._present_btn.update_property(
             [Gtk.AccessibleProperty.LABEL], ["Present"]
         )
@@ -478,87 +478,41 @@ class MainWindow(Adw.ApplicationWindow):
         """
         Build the Export popover: the three formats, and nothing else.
 
-        Uses a Gtk.Popover with a vertical ListBox of action rows so each
-        option has a clear icon, label and subtitle — more informative than
-        a plain menu and consistent with GNOME HIG action popovers.
+        A boxed list of Adw.ActionRows.  These rows were hand-built out of
+        flat Gtk.Buttons carrying an icon and two stacked labels, in the
+        shape of an ActionRow — under a comment saying that was the HIG
+        pattern.  Using the row itself brings the styling, the row height,
+        the activation behaviour and the accessible role with it.
         """
         popover = Gtk.Popover()
         popover.set_has_arrow(True)
 
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        box.set_margin_top(6)
-        box.set_margin_bottom(6)
-        box.set_margin_start(6)
-        box.set_margin_end(6)
-        box.set_size_request(240, -1)
+        listbox = Gtk.ListBox()
+        listbox.set_selection_mode(Gtk.SelectionMode.NONE)
+        listbox.add_css_class("boxed-list")
+        listbox.set_size_request(260, -1)
+        listbox.set_margin_top(6)
+        listbox.set_margin_bottom(6)
+        listbox.set_margin_start(6)
+        listbox.set_margin_end(6)
 
-        def _row(icon: str, label: str, subtitle: str, cb) -> Gtk.Button:
-            """One export row: icon + label/subtitle stacked, full-width flat button."""
-            btn = Gtk.Button()
-            btn.add_css_class("flat")
-            inner = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-            inner.set_margin_top(6)
-            inner.set_margin_bottom(6)
-            inner.set_margin_start(6)
-            inner.set_margin_end(6)
+        def _row(icon: str, label: str, subtitle: str, cb) -> None:
+            row = Adw.ActionRow(title=label, subtitle=subtitle)
+            row.add_prefix(Gtk.Image.new_from_icon_name(icon))
+            row.set_activatable(True)
+            row.connect("activated", lambda *_: (popover.popdown(), cb()))
+            listbox.append(row)
 
-            img = Gtk.Image.new_from_icon_name(icon)
-            img.set_pixel_size(20)
-            img.set_valign(Gtk.Align.CENTER)
-            inner.append(img)
+        _row("document-save-symbolic", "PDF…",
+             "The deck as a PDF file", self._on_export)
+        _row("text-x-generic-symbolic", "HTML…",
+             "A self-contained web page", self._on_export_html)
+        _row("image-x-generic-symbolic", "Images…",
+             "One PNG per slide, into a folder", self._on_export_images)
+        _row("view-paged-symbolic", "Handout…",
+             "Your slides and script, to read or print", self._on_export_handout)
 
-            text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
-            text_box.set_hexpand(True)
-            text_box.set_valign(Gtk.Align.CENTER)
-
-            lbl = Gtk.Label(label=label)
-            lbl.set_xalign(0)
-            lbl.set_halign(Gtk.Align.START)
-            text_box.append(lbl)
-
-            sub = Gtk.Label(label=subtitle)
-            sub.set_xalign(0)
-            sub.add_css_class("caption")
-            sub.add_css_class("dim-label")
-            text_box.append(sub)
-
-            inner.append(text_box)
-            btn.set_child(inner)
-
-            def _clicked(*_):
-                popover.popdown()
-                cb()
-
-            btn.connect("clicked", _clicked)
-            return btn
-
-
-        box.append(_row(
-            "document-save-symbolic",
-            "PDF…",
-            "The deck as a PDF file",
-            self._on_export,
-        ))
-        box.append(_row(
-            "text-x-generic-symbolic",
-            "HTML…",
-            "A self-contained web page",
-            self._on_export_html,
-        ))
-        box.append(_row(
-            "image-x-generic-symbolic",
-            "Images…",
-            "One PNG per slide, into a folder",
-            self._on_export_images,
-        ))
-        box.append(_row(
-            "view-paged-symbolic",
-            "Handout…",
-            "Your slides and script, to read or print",
-            self._on_export_handout,
-        ))
-
-        popover.set_child(box)
+        popover.set_child(listbox)
         return popover
 
     def _build_app_menu(self) -> Gio.Menu:
@@ -647,18 +601,24 @@ class MainWindow(Adw.ApplicationWindow):
     # ── Actions ───────────────────────────────────────────────────────────────
 
     def _setup_actions(self) -> None:
+        # Accelerators are lists: a standard key GNOME reserves for a verb
+        # goes first, and any older binding this app taught follows it.
         actions = [
-            ("new",      self._on_new,            "<primary>n"),
-            ("open",     self._on_open,            "<primary>o"),
-            ("save",     self._on_save,            "<primary>s"),
-            ("save-as",  self._on_save_as,         "<primary><shift>s"),
+            ("new",      self._on_new,            ["<primary>n"]),
+            ("open",     self._on_open,            ["<primary>o"]),
+            ("save",     self._on_save,            ["<primary>s"]),
+            ("save-as",  self._on_save_as,         ["<primary><shift>s"]),
             # Ctrl+Return still triggers a manual rebuild for power users
-            ("convert",  self._trigger_convert,    "<primary>Return"),
-            ("undo",         lambda *_: self._editor.undo(),              "<primary>z"),
-            ("redo",         lambda *_: self._editor.redo(),              "<primary><shift>z"),
-            ("find",         lambda *_: self._editor.show_find(),         "<primary>f"),
-            ("find-replace", lambda *_: self._editor.show_find_replace(), "<primary>h"),
-            ("export",       self._on_export,                             "<primary><shift>e"),
+            ("convert",  self._trigger_convert,    ["<primary>Return"]),
+            ("undo",         lambda *_: self._editor.undo(),              ["<primary>z"]),
+            ("redo",         lambda *_: self._editor.redo(),              ["<primary><shift>z"]),
+            ("find",         lambda *_: self._editor.show_find(),         ["<primary>f"]),
+            ("find-replace", lambda *_: self._editor.show_find_replace(), ["<primary>h"]),
+            # Ctrl+P is the system's Print, and a deck printed to a file is
+            # exactly what Export PDF writes; it used to open the presenter,
+            # which left the nearest thing to Print on Ctrl+Shift+E alone.
+            # That binding is kept — it is what this app taught.
+            ("export",       self._on_export,          ["<primary>p", "<primary><shift>e"]),
             ("export-html",   self._on_export_html,                       None),
             ("export-images", self._on_export_images,                     None),
             ("export-handout", self._on_export_handout,                    None),
@@ -667,27 +627,35 @@ class MainWindow(Adw.ApplicationWindow):
             ("copy-pdf-path", self._on_copy_pdf_path,                     None),
             # Through _on_present_clicked, not _on_presenter: the shortcut
             # used to open the presenter against whatever the last build
-            # left behind, while the button beside it built first.
-            ("presenter",    self._on_present_clicked,                    "<primary>p"),
-            # F1 for shortcuts (#45 / #86)
-            ("shortcuts",    self._on_shortcuts,                          "F1"),
+            # left behind, while the button beside it built first.  F5 is
+            # what every other presentation tool starts a slideshow with.
+            ("presenter",    self._on_present_clicked,                    ["F5"]),
+            # Ctrl+? is the HIG's key for this; F1 is Help, and stays bound
+            # here only because Presence ships no help manual for it to open.
+            ("shortcuts",    self._on_shortcuts,          ["<primary>question", "F1"]),
             ("insert-image",   self._on_insert_image,   None),
             ("insert-comment", self._on_insert_comment, None),
-            ("bold",   lambda *_: self._editor.bold(),         "<primary>b"),
-            ("italic", lambda *_: self._editor.italic(),       "<primary>i"),
-            ("link",   lambda *_: self._editor.insert_link(),  "<primary>k"),
+            ("bold",   lambda *_: self._editor.bold(),         ["<primary>b"]),
+            ("italic", lambda *_: self._editor.italic(),       ["<primary>i"]),
+            ("link",   lambda *_: self._editor.insert_link(),  ["<primary>k"]),
             # Panel toggles: slides F9, themes F10 (#75)
-            ("toggle-sidebar",       self._on_toggle_sidebar,       "F9"),
-            ("toggle-theme-panel",   self._on_toggle_theme_panel,   "F10"),
+            ("toggle-sidebar",       self._on_toggle_sidebar,       ["F9"]),
+            ("toggle-theme-panel",   self._on_toggle_theme_panel,   ["F10"]),
         ]
-        for name, cb, accel in actions:
+        for name, cb, accels in actions:
             action = Gio.SimpleAction.new(name, None)
             action.connect("activate", cb)
             self.add_action(action)
-            if accel:
+            if accels:
                 self.get_application().set_accels_for_action(
-                    f"win.{name}", [accel]
+                    f"win.{name}", accels
                 )
+
+        # app.preferences is the Application's action, but only a window is
+        # ever around to bind it; Ctrl+comma is the GNOME-wide key for it.
+        self.get_application().set_accels_for_action(
+            "app.preferences", ["<primary>comma"]
+        )
 
         # Focus mode carries state so the menu can draw it checked, which
         # the plain actions above cannot do.
@@ -1442,14 +1410,11 @@ class MainWindow(Adw.ApplicationWindow):
         self._save_as_dialog()
 
     def _on_settings(self, *_) -> None:
-        dlg = SettingsDialog(self)
-        # Store a weak reference so theme_manager_ui can refresh the combo
-        # after uninstall without a circular reference (fixes #2)
-        self._settings_dialog_ref = dlg
-        def _on_closed(*_):
-            self._settings_dialog_ref = None
-        dlg.connect("closed", _on_closed)
-        dlg.present()
+        # The window used to hold a reference to the open dialog so that
+        # theme_manager_ui could reach back through it to refresh the
+        # inspector after an uninstall.  That page is no longer in
+        # Preferences, and it is handed the panel to refresh directly.
+        SettingsDialog(self).present(self)
 
     def _on_presenter(self, *_) -> None:
         if not self._html_uri or not self._slide_info:

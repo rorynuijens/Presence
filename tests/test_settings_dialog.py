@@ -171,15 +171,19 @@ def test_preferences_holds_the_settings_that_are_the_apps(settings):
         assert app_setting in titles
 
 
-def test_preferences_has_the_three_pages_it_documents(settings):
-    assert _page_titles(settings()) == ["Presentation", "Editor", "Manage themes"]
+def test_preferences_has_the_two_pages_it_documents(settings):
+    assert _page_titles(settings()) == ["Presentation", "Editor"]
 
 
-def test_the_themes_page_is_about_packages_not_about_choosing_one(settings):
+def test_preferences_is_no_longer_a_theme_library(settings):
+    # Installing, editing and removing themes was a third page here.  A
+    # library of content is not a setting, and keeping it under Settings
+    # split the subject: the inspector chose a theme, this dialog made one.
+    # It is a page of the inspector's theme chooser now.
     titles = _row_titles(settings())
-    assert "Install from file" in titles
-    assert "Create new theme" in titles
-    assert "Open themes folder" in titles
+    for moved in ("Install from file", "Create new theme",
+                  "Open themes folder"):
+        assert moved not in titles
 
 
 # ── Opening with what was saved ───────────────────────────────────────────────
@@ -286,9 +290,3 @@ def test_saving_editor_prefs_records_the_whole_form(settings):
     assert saved["syntax_highlight"] is True
 
 
-# ── Keeping the inspector in step ─────────────────────────────────────────────
-
-def test_installing_a_theme_refreshes_the_inspector(settings):
-    dialog = settings()
-    dialog.refresh_themes()
-    assert dialog._test_parent._theme_panel.refreshed == 1

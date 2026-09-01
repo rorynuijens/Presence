@@ -1,5 +1,16 @@
 """
-theme_manager_ui.py — Theme browser / manager panel.
+theme_manager_ui.py — Installing, editing and removing theme packages.
+
+This page used to be the third page of Preferences.  Preferences holds
+settings; a theme library is content, and the project had already moved
+theme *selection* out of here for exactly that reason — leaving the odd
+split where you chose a theme in the inspector and made one two dialogs
+away, under Settings.  ``build_themes_page()`` is now pushed onto the theme
+chooser's own ``Adw.NavigationView``, so every theme action lives beside the
+themes.
+
+*refresher* is anything with a ``refresh_themes()`` method — in practice the
+``ThemePanel``, whose swatches have to follow an install or an uninstall.
 """
 
 import shutil
@@ -112,17 +123,17 @@ _thumb_cache = ThumbCache()
 # ── Public builder ────────────────────────────────────────────────────────────
 
 def build_themes_page(parent_window, converter,
-                      settings_dialog=None) -> Adw.PreferencesPage:
+                      refresher=None) -> Adw.PreferencesPage:
     """
-    Build the "Manage themes" preferences page.
+    Build the "Manage themes" page.
 
     This page handles installing, uninstalling and locating theme packages.
-    Theme *selection* lives in the inspector, beside the document whose
-    frontmatter it writes — there is no "Use this theme" button here, to
-    avoid the split-controls anti-pattern.
+    Theme *selection* is the job of the chooser that pushes this page — there
+    is no "Use this theme" button here, to avoid the split-controls
+    anti-pattern.
 
-    *settings_dialog* is the SettingsDialog that owns this page; it is used
-    to refresh the inspector's swatches after install/uninstall.
+    *refresher* is told (``refresh_themes()``) whenever the installed set
+    changes, so the chooser's swatches follow.
     """
     page = Adw.PreferencesPage()
     page.set_title("Manage themes")
@@ -188,12 +199,12 @@ def build_themes_page(parent_window, converter,
     themes_group._presence_rows = []
     page.add(themes_group)
 
-    _populate_themes(themes_group, parent_window, converter)
+    _populate_themes(themes_group, parent_window, converter, refresher)
 
-    page._themes_group    = themes_group
-    page._parent_window   = parent_window
-    page._converter       = converter
-    page._settings_dialog = settings_dialog
+    page._themes_group  = themes_group
+    page._parent_window = parent_window
+    page._converter     = converter
+    page._refresher     = refresher
 
     return page
 
@@ -201,7 +212,7 @@ def build_themes_page(parent_window, converter,
 # ── Theme list population ─────────────────────────────────────────────────────
 
 def _populate_themes(group: Adw.PreferencesGroup, parent_window,
-                     converter) -> None:
+                     converter, refresher=None) -> None:
     for row in getattr(group, "_presence_rows", []):
         group.remove(row)
     group._presence_rows = []
@@ -209,14 +220,15 @@ def _populate_themes(group: Adw.PreferencesGroup, parent_window,
     all_themes = load_all_themes()
     for slug, theme in sorted(all_themes.items()):
         row = _build_theme_row(theme, parent_window, converter, group,
-                               is_builtin=(slug in BUILTIN_THEMES))
+                               is_builtin=(slug in BUILTIN_THEMES),
+                               refresher=refresher)
         group.add(row)
         group._presence_rows.append(row)
 
 
 def _build_theme_row(theme: Theme, parent_window, converter,
                      group: Adw.PreferencesGroup,
-                     is_builtin: bool) -> Adw.ExpanderRow:
+                     is_builtin: bool, refresher=None) -> Adw.ExpanderRow:
     row = Adw.ExpanderRow(
         title=theme.name,
         subtitle=f"{theme.author}  ·  v{theme.version}",
@@ -280,7 +292,9 @@ def _build_theme_row(theme: Theme, parent_window, converter,
             lambda *_: ThemeEditor(
                 parent_window,
                 existing_theme=theme,
-                on_installed=lambda t: _populate_themes(group, parent_window, converter),
+                on_installed=lambda t: _after_change(
+                    group, parent_window, converter, refresher
+                ),
             ).present(parent_window),
         )
         actions_row.add_suffix(edit_btn)
@@ -290,7 +304,8 @@ def _build_theme_row(theme: Theme, parent_window, converter,
         del_btn.add_css_class("flat")
         del_btn.set_valign(Gtk.Align.CENTER)
         del_btn.connect("clicked", lambda btn, *_: _on_uninstall(
-            theme.slug, btn.get_root() or parent_window, group, converter
+            theme.slug, btn.get_root() or parent_window, group, converter,
+            refresher,
         ))
         actions_row.add_suffix(del_btn)
         row.add_row(actions_row)
@@ -333,16 +348,23 @@ def _on_install_response(dialog, result, page, converter) -> None:
         except (ValueError, OSError) as exc:
             # Use the settings dialog as parent if it is still open;
             # fall back to the main window if it has been closed.
-            parent = page._settings_dialog or page._parent_window
-            GLib.idle_add(_show_install_error, str(exc), parent)
+            parent = page._parent_window
+            GLib.idle_add(_show_error, "Failed to install theme",
+                          str(exc), parent)
 
     threading.Thread(target=_do_install, daemon=True).start()
 
 
+def _after_change(group, parent_window, converter, refresher) -> None:
+    """Put the list and whatever displays themes elsewhere back in step."""
+    _populate_themes(group, parent_window, converter, refresher)
+    if refresher is not None:
+        refresher.refresh_themes()
+
+
 def _on_installed(theme: Theme, page, converter) -> bool:
-    _populate_themes(page._themes_group, page._parent_window, converter)
-    if page._settings_dialog is not None:
-        page._settings_dialog.refresh_themes()
+    _after_change(page._themes_group, page._parent_window, converter,
+                  page._refresher)
     # Show a toast via the window's toast overlay (fixes #2)
     toast = Adw.Toast(title=f"Theme '{theme.name}' installed")
     toast.set_timeout(3)
@@ -352,9 +374,10 @@ def _on_installed(theme: Theme, page, converter) -> bool:
     return GLib.SOURCE_REMOVE
 
 
-def _show_install_error(message: str, parent_window) -> bool:
+def _show_error(heading: str, message: str, parent_window) -> bool:
+    """An alert names what failed rather than heading itself "Error"."""
     dialog = Adw.AlertDialog(
-        heading="Failed to install theme",
+        heading=heading,
         body=message,
     )
     dialog.add_response("ok", "OK")
@@ -363,7 +386,8 @@ def _show_install_error(message: str, parent_window) -> bool:
     return GLib.SOURCE_REMOVE
 
 
-def _on_uninstall(slug: str, parent_window, group, converter) -> None:
+def _on_uninstall(slug: str, parent_window, group, converter,
+                  refresher=None) -> None:
     # Look up the display name for the confirmation dialog so users see
     # the friendly name ("My Dark Theme") rather than the slug ("my-dark-theme").
     all_themes = load_all_themes()
@@ -384,14 +408,11 @@ def _on_uninstall(slug: str, parent_window, group, converter) -> None:
             try:
                 _thumb_cache.invalidate(slug)
                 uninstall_theme(slug)
-                _populate_themes(group, parent_window, converter)
-                # Sync the inspector's swatches via the stored dialog ref (#2)
-                if hasattr(parent_window, "_settings_dialog_ref"):
-                    sd = parent_window._settings_dialog_ref
-                    if sd is not None:
-                        sd.refresh_themes()
+                # The list this row is in, and the swatches elsewhere.
+                _after_change(group, parent_window, converter, refresher)
             except (ValueError, OSError) as exc:
-                _show_install_error(str(exc), parent_window)
+                _show_error("Could not uninstall the theme", str(exc),
+                            parent_window)
 
     dialog.connect("response", _on_response)
     dialog.present(parent_window)

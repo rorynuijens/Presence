@@ -1,11 +1,12 @@
 """
 test_theme_manager_ui.py — the Manage-themes page and its thumbnail cache.
 
-This page manages theme *packages* — install, uninstall, open the folder.
-Choosing a theme is the inspector's job, beside the document whose
-frontmatter it writes, so what is checked here is that the page never grows a
-"use this theme" affordance of its own, and that every path that changes the
-installed set puts the list and the inspector back in step.
+This page manages theme *packages* — install, uninstall, open the folder.  It
+used to be the third page of Preferences and is now pushed onto the theme
+chooser's navigation view; choosing a theme is still the chooser's own job,
+so what is checked here is that the page never grows a "use this theme"
+affordance of its own, and that every path that changes the installed set
+puts the list and whatever displays themes elsewhere back in step.
 
 The real ``install_theme``/``uninstall_theme`` and the WeasyPrint thumbnail
 render are stubbed; both are covered where they live.
@@ -35,7 +36,9 @@ class FakeConverter:
     logo_path = None
 
 
-class FakeSettingsDialog:
+class FakeRefresher:
+    """Anything with refresh_themes() — in the app, the ThemePanel."""
+
     def __init__(self):
         self.refreshed = 0
 
@@ -66,10 +69,10 @@ def themes_page(gtk, monkeypatch):
 
     made = []
 
-    def build(settings_dialog=None):
+    def build(refresher=None):
         parent = gtk.Window()
         conv   = FakeConverter()
-        page   = tmu.build_themes_page(parent, conv, settings_dialog=settings_dialog)
+        page   = tmu.build_themes_page(parent, conv, refresher=refresher)
         made.append(parent)
         page._test_cache  = cache
         page._test_thumbs = thumb_calls
@@ -152,16 +155,16 @@ def test_repopulating_replaces_the_rows_rather_than_stacking_them(themes_page):
 
 # ── After an install ──────────────────────────────────────────────────────────
 
-def test_an_install_refreshes_the_list_and_the_inspector(themes_page):
-    sd   = FakeSettingsDialog()
-    page = themes_page(settings_dialog=sd)
+def test_an_install_refreshes_the_list_and_the_chooser(themes_page):
+    r    = FakeRefresher()
+    page = themes_page(refresher=r)
     tmu._on_installed(MINE, page, page._converter)
-    assert sd.refreshed == 1
+    assert r.refreshed == 1
     assert set(_rows(page)) == {"Light", "My Theme"}
 
 
-def test_an_install_with_preferences_already_closed_still_works(themes_page):
-    page = themes_page(settings_dialog=None)
+def test_an_install_with_nothing_to_refresh_still_works(themes_page):
+    page = themes_page(refresher=None)
     assert tmu._on_installed(MINE, page, page._converter) is not None
 
 
@@ -179,7 +182,8 @@ def test_a_failed_install_says_why(gtk, monkeypatch):
     shown = []
     monkeypatch.setattr(Adw.AlertDialog, "present",
                         lambda self, parent=None: shown.append(self))
-    tmu._show_install_error("theme.json is not valid JSON", gtk.Window())
+    tmu._show_error("Failed to install theme",
+                    "theme.json is not valid JSON", gtk.Window())
     assert len(shown) == 1
     assert shown[0].get_heading() == "Failed to install theme"
     assert shown[0].get_body() == "theme.json is not valid JSON"
@@ -250,25 +254,28 @@ def test_a_failed_uninstall_says_why_rather_than_raising(themes_page, monkeypatc
                       page._themes_group, page._converter)
     shown[0].emit("response", "remove")
 
-    assert shown[-1].get_heading() == "Failed to install theme"
+    # An alert names what failed; this one used to say "Failed to install
+    # theme" over the message from an uninstall that went wrong.
+    assert shown[-1].get_heading() == "Could not uninstall the theme"
     assert "built-in" in shown[-1].get_body()
 
 
-def test_uninstalling_syncs_an_inspector_the_window_still_holds(themes_page,
-                                                                monkeypatch):
+def test_uninstalling_syncs_whatever_else_shows_themes(themes_page,
+                                                       monkeypatch):
+    # The refresher is handed in rather than fished off the window, which is
+    # where the open Preferences dialog used to be stashed for this.
     shown = []
     monkeypatch.setattr(Adw.AlertDialog, "present",
                         lambda self, parent=None: shown.append(self))
     monkeypatch.setattr(tmu, "uninstall_theme", lambda slug: None)
-    page = themes_page()
-    sd = FakeSettingsDialog()
-    page._parent_window._settings_dialog_ref = sd
+    r    = FakeRefresher()
+    page = themes_page(refresher=r)
 
     tmu._on_uninstall("my-theme", page._parent_window,
-                      page._themes_group, page._converter)
+                      page._themes_group, page._converter, r)
     shown[0].emit("response", "remove")
 
-    assert sd.refreshed == 1
+    assert r.refreshed == 1
 
 
 # ── Opening the folder ────────────────────────────────────────────────────────

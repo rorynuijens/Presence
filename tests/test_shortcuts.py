@@ -28,14 +28,20 @@ def _normalise(accel: str) -> str | None:
 
 
 def _documented(window) -> set[str]:
-    """Every accelerator the shortcuts window lists."""
+    """
+    Every accelerator the shortcuts window lists.
+
+    One row may name more than one key — GTK's accelerator syntax takes them
+    space-separated — which is how Export PDF shows both Ctrl+P and the
+    Ctrl+Shift+E it used to answer to.
+    """
     found = set()
 
     def walk(widget):
         if type(widget).__name__ == "ShortcutsShortcut":
             accel = widget.get_property("accelerator")
             if accel:
-                found.add(_normalise(accel))
+                found.update(_normalise(a) for a in accel.split())
         child = widget.get_first_child()
         while child is not None:
             walk(child)

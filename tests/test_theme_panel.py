@@ -364,6 +364,69 @@ def test_the_chooser_is_built_once_and_reused(panel, monkeypatch):
     assert p._theme_dialog is first
 
 
+@pytest.fixture
+def chooser(panel, monkeypatch):
+    """
+    An open chooser whose manage page is built without touching disk.
+
+    theme_manager_ui binds ``load_all_themes`` at import, so stubbing the
+    loader the panel uses does not reach it.
+    """
+    monkeypatch.setattr("gi.repository.Adw.Dialog.present",
+                        lambda self, parent=None: None)
+    monkeypatch.setattr("presence.theme_manager_ui.load_all_themes",
+                        lambda *a, **k: dict(THEMES))
+    monkeypatch.setattr("presence.theme_manager_ui._thumb_cache",
+                        type("C", (), {"get_async": lambda s, t, r, cb: None,
+                                       "invalidate": lambda s, slug: None})())
+
+    def build(**kw):
+        p = panel(**kw)
+        p._on_change_theme()
+        return p
+
+    return build
+
+
+def test_the_chooser_reaches_the_manage_page_without_a_second_dialog(chooser):
+    """
+    Making a theme used to live two dialogs away, on a page of Preferences,
+    while choosing one lived here.  Both are pages of one navigation view now.
+    """
+    p = chooser()
+    assert p._theme_nav.get_visible_page().get_title() == "Themes"
+
+    p._on_manage_themes()
+    assert p._theme_nav.get_visible_page().get_title() == "Manage Themes"
+
+    p._theme_nav.pop()
+    assert p._theme_nav.get_visible_page().get_title() == "Themes"
+
+
+def test_the_manage_page_is_told_to_refresh_this_panel(chooser, monkeypatch):
+    # It reaches back through refresh_themes(), which the Preferences dialog
+    # used to answer by forwarding here.
+    import presence.theme_manager_ui as tmu
+    seen  = []
+    real  = tmu.build_themes_page
+    monkeypatch.setattr(
+        tmu, "build_themes_page",
+        lambda parent, conv, refresher=None: (
+            seen.append(refresher) or real(parent, conv, refresher=refresher)
+        ),
+    )
+    p = chooser()
+    p._on_manage_themes()
+    assert seen == [p]
+
+
+def test_refreshing_from_the_manage_page_reloads_the_swatches(panel):
+    p = panel()
+    before = [c.slug for c in _cards(p)]
+    p.refresh_themes()
+    assert [c.slug for c in _cards(p)] == before
+
+
 # ── The swatch card ───────────────────────────────────────────────────────────
 
 def test_a_card_carries_the_slug_it_stands_for(gtk):

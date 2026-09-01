@@ -45,8 +45,14 @@ def build_shortcuts_window(parent) -> Gtk.ShortcutsWindow:
             </child>
             <child>
               <object class="GtkShortcutsShortcut">
-                <property name="accelerator">&lt;Primary&gt;&lt;Shift&gt;e</property>
+                <property name="accelerator">&lt;Primary&gt;p &lt;Primary&gt;&lt;Shift&gt;e</property>
                 <property name="title">Export PDF</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkShortcutsShortcut">
+                <property name="accelerator">&lt;Primary&gt;comma</property>
+                <property name="title">Settings</property>
               </object>
             </child>
             <child>
@@ -137,8 +143,6 @@ def build_shortcuts_window(parent) -> Gtk.ShortcutsWindow:
               </object>
             </child>
             <child>
-            </child>
-            <child>
               <object class="GtkShortcutsShortcut">
                 <property name="accelerator">F10</property>
                 <property name="title">Toggle theme panel</property>
@@ -152,7 +156,7 @@ def build_shortcuts_window(parent) -> Gtk.ShortcutsWindow:
             <property name="title">Presenter mode</property>
             <child>
               <object class="GtkShortcutsShortcut">
-                <property name="accelerator">&lt;Primary&gt;p</property>
+                <property name="accelerator">F5</property>
                 <property name="title">Present (convert if needed, then present)</property>
               </object>
             </child>
@@ -187,7 +191,7 @@ def build_shortcuts_window(parent) -> Gtk.ShortcutsWindow:
             <property name="title">Help</property>
             <child>
               <object class="GtkShortcutsShortcut">
-                <property name="accelerator">F1</property>
+                <property name="accelerator">&lt;Primary&gt;question F1</property>
                 <property name="title">Keyboard shortcuts</property>
               </object>
             </child>

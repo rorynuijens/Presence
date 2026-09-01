@@ -1,8 +1,8 @@
 """
 settings_dialog.py — Application preferences dialog.
 
-Contains SettingsDialog (Adw.PreferencesDialog with three pages:
-Presentation, Editor, Manage Themes).
+Contains SettingsDialog (Adw.PreferencesDialog with two pages:
+Presentation and Editor).
 
 Kept separate from window.py to honour single-responsibility and make each
 class independently testable.
@@ -29,21 +29,23 @@ log = logging.getLogger(__name__)
 
 class SettingsDialog(Adw.PreferencesDialog):
     """
-    Three-page Preferences dialog — the app's settings, not the document's.
+    Two-page Preferences dialog — the app's settings, not the document's.
 
-    Presentation  — target duration, speaking rate
-    Editor        — font size, GtkSource toggles, convert on save
-    Manage themes — install / uninstall / open folder
+    Presentation — target duration, speaking rate
+    Editor       — font size, GtkSource toggles, convert on save
 
     Theme, aspect ratio and logo are properties of the deck and live in the
     inspector, which writes them into the document's frontmatter.
+
+    Installing, editing and removing themes was a third page here.  A theme
+    library is content rather than a setting, and keeping it under Settings
+    split the subject in two: the inspector chose a theme, this dialog made
+    one.  It is now a page of the inspector's own theme chooser.
     """
 
     def __init__(self, parent: MainWindow) -> None:
         super().__init__()
         self._parent = parent
-
-        from .theme_manager_ui import build_themes_page
 
         prefs = load_editor_prefs()
 
@@ -250,16 +252,6 @@ class SettingsDialog(Adw.PreferencesDialog):
         auto_row.set_active(pres_prefs.get("auto_convert", False))
         auto_row.connect("notify::active", self._on_auto_convert_toggled)
         behaviour_group.add(auto_row)
-
-        # ── Page 3: Manage themes ─────────────────────────────────────────────
-        themes_page = build_themes_page(
-            parent, parent._converter, settings_dialog=self
-        )
-        self.add(themes_page)
-
-    def refresh_themes(self) -> None:
-        """Reflect an installed or uninstalled theme in the inspector."""
-        self._parent._theme_panel.refresh()
 
     # ── Signal handlers ───────────────────────────────────────────────────────
 
