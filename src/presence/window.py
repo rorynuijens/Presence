@@ -150,7 +150,8 @@ class MainWindow(Adw.ApplicationWindow):
         self._html_uri:   str  = ""
         self._slide_w: int = 1280
         self._slide_h: int = 720
-        self._temp_md:  Path | None = None
+        # Where an unsaved deck's PDF goes.  There is no temporary copy of
+        # the Markdown any more: the converter is handed the buffer.
         self._temp_pdf: Path | None = None
         # Strong reference to any active Gtk.FileDialog to prevent GC collection
         # before the user completes the async operation. Cleared in each callback.
@@ -742,8 +743,8 @@ class MainWindow(Adw.ApplicationWindow):
 
     # ── Conversion ────────────────────────────────────────────────────────────
 
-    def _trigger_convert(self, *_) -> bool:
-        return self._builds.trigger()
+    def _trigger_convert(self, *_) -> None:
+        self._builds.trigger()
 
     def _build_for_export(self, on_done) -> None:
         """
@@ -756,18 +757,21 @@ class MainWindow(Adw.ApplicationWindow):
         formats finish with a toast, and this one now does too.
         """
         self._builds.after_build(on_done)
-        if self._trigger_convert():
-            self._builds.wait_for_build(self._export_busy)
+        self._builds.wait_for_build(self._export_busy)
+        self._trigger_convert()
 
     def _cleanup_temp_files(self) -> None:
-        for attr in ("_temp_md", "_temp_pdf"):
-            p = getattr(self, attr, None)
-            if p is not None:
-                try:
-                    p.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                setattr(self, attr, None)
+        """Delete the scratch deck an unsaved document was built to."""
+        if self._temp_pdf is None:
+            return
+        # The converter writes the HTML beside the PDF, so it goes too;
+        # the old cleanup took the PDF and left that one behind.
+        for path in (self._temp_pdf, self._temp_pdf.with_suffix(".html")):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        self._temp_pdf = None
 
     # ── .pres bundle support ──────────────────────────────────────────────────
 

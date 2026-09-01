@@ -16,8 +16,12 @@ What differs is only how much of the document each pass covers:
 *  ``convert()``            — the whole deck → HTML → PDF → thumbnail bitmaps.
    Seconds, background thread, drives the sidebar, export and presenter.
 
-All three share the theme/CSS resolution in ``_render_context()``, which is
-cached so no pass rebuilds a stylesheet it already has.
+All three take the document as *text*, and all three share the theme/CSS
+resolution in ``_render_context()``, which is cached so no pass rebuilds a
+stylesheet it already has.  ``convert()`` used to take a path and read it,
+which meant every build had to put the buffer on disk first — so Present and
+the exports saved the writer's document without being asked.  Only watch
+mode, where the file genuinely is the document, reads one now.
 """
 from __future__ import annotations
 
@@ -268,7 +272,8 @@ class Converter(GObject.Object):
         self._watch_source: int | None       = None
         self._watch_mtime:  float            = 0.0
         self._watch_path:   Path | None      = None
-        self._last_input:   Path | None      = None
+        self._last_text:    str | None       = None
+        self._last_base:    Path | None      = None
         self._last_output:  Path | None      = None
         self._slide_info:   list             = []
         self._thumbnails:   list             = []
@@ -288,9 +293,21 @@ class Converter(GObject.Object):
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def convert(self, input_path: Path, output_path: Path) -> None:
+    def convert(self, text: str, base_dir: Path, output_path: Path) -> None:
+        """
+        Build the whole deck from *text* and write the PDF to *output_path*.
+
+        Takes the document rather than a path to it, like the other two
+        speeds do.  Whoever holds the text is the only one who knows what
+        the deck currently says; asking for a file here would mean every
+        build had to write one first, which is how Present and Export came
+        to save the writer's document behind their back.
+
+        *base_dir* is what relative image sources resolve against.
+        """
         with self._lock:
-            self._last_input  = input_path
+            self._last_text   = text
+            self._last_base   = base_dir
             self._last_output = output_path
             if self._converting:
                 self._pending = True
@@ -300,7 +317,7 @@ class Converter(GObject.Object):
         self.emit("conversion-started")
         threading.Thread(
             target=self._run,
-            args=(input_path, output_path),
+            args=(text, base_dir, output_path),
             daemon=True,
         ).start()
 
@@ -315,7 +332,14 @@ class Converter(GObject.Object):
             mtime = self._mtime(self._watch_path)
             if mtime != self._watch_mtime:
                 self._watch_mtime = mtime
-                self.convert(input_path, output_path)
+                # Watching is the one case where the file, not an editor
+                # buffer, is the document — so this is where it gets read.
+                try:
+                    text = input_path.read_text(encoding="utf-8")
+                except OSError as exc:
+                    log.warning("Watch could not read %s: %s", input_path, exc)
+                    return GLib.SOURCE_CONTINUE
+                self.convert(text, input_path.parent, output_path)
             return GLib.SOURCE_CONTINUE
 
         self._watch_source = GLib.timeout_add(interval_ms, _poll)
@@ -575,13 +599,12 @@ class Converter(GObject.Object):
 
     # ── Background thread ─────────────────────────────────────────────────────
 
-    def _run(self, input_path: Path, output_path: Path) -> None:
+    def _run(self, raw_text: str, base_dir: Path, output_path: Path) -> None:
         t0 = time.monotonic()
         try:
-            raw_text = input_path.read_text(encoding="utf-8")
             meta, text = parse_frontmatter(raw_text)
 
-            ctx = self._render_context(meta, input_path.parent)
+            ctx = self._render_context(meta, base_dir)
 
             slides = split_slides(text)
             if not slides:
@@ -590,7 +613,7 @@ class Converter(GObject.Object):
             html, slide_info = md_to_html_slides(
                 slides, ctx.css, ctx.logo_b64, meta,
                 width=ctx.width, height=ctx.height, theme_bg=ctx.theme_bg,
-                base_url=str(input_path.parent),
+                base_url=str(base_dir),
                 line_offsets=compute_slide_start_lines(raw_text),
             )
 
@@ -602,7 +625,7 @@ class Converter(GObject.Object):
                     "WeasyPrint is not installed — cannot generate PDF."
                 )
             wp_doc    = _weasyprint.HTML(
-                string=html, base_url=str(input_path.parent)
+                string=html, base_url=str(base_dir)
             ).render()
             pdf_bytes = wp_doc.write_pdf()
             output_path.write_bytes(pdf_bytes)
@@ -652,13 +675,14 @@ class Converter(GObject.Object):
             self._converting = False
             pending          = self._pending
             self._pending    = False
-            pending_in       = self._last_input
+            pending_text     = self._last_text
+            pending_base     = self._last_base
             pending_out      = self._last_output
 
         self.emit("conversion-complete", n_slides, duration, pdf_path, html_uri)
 
-        if pending and pending_in and pending_out:
-            self.convert(pending_in, pending_out)
+        if pending and pending_text is not None and pending_base and pending_out:
+            self.convert(pending_text, pending_base, pending_out)
         return GLib.SOURCE_REMOVE
 
     def _on_failure(self, message: str) -> bool:
@@ -666,15 +690,16 @@ class Converter(GObject.Object):
             self._converting = False
             pending          = self._pending
             self._pending    = False
-            pending_in       = self._last_input
+            pending_text     = self._last_text
+            pending_base     = self._last_base
             pending_out      = self._last_output
 
         self.emit("conversion-failed", message)
 
         # Run the queued conversion even after failure so watch mode recovers
         # automatically on the next save (fixes #76).
-        if pending and pending_in and pending_out:
-            self.convert(pending_in, pending_out)
+        if pending and pending_text is not None and pending_base and pending_out:
+            self.convert(pending_text, pending_base, pending_out)
         return GLib.SOURCE_REMOVE
 
     @staticmethod

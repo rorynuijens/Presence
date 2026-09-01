@@ -1,9 +1,11 @@
 """
 build_coordinator.py — When the PDF gets made, and who is waiting for it.
 
-Saving writes the Markdown; building makes the deck.  They are separate, and
-this module owns the second one: what starts a build, what the header chip
-says about it, and what runs once it lands.
+Saving writes the Markdown; building makes the deck.  They are separate in
+both directions — a save builds only if the writer asked for that in
+Settings, and a build never saves — and this module owns the second one:
+what starts a build, what the header chip says about it, and what runs once
+it lands.
 
 Three things live here that used to be spread through the window:
 
@@ -49,39 +51,42 @@ class BuildCoordinator:
 
     # ── Starting a build ──────────────────────────────────────────────────────
 
-    def trigger(self, *_) -> bool:
+    def trigger(self, *_) -> None:
         """
         Build the document as it currently stands.
 
-        Returns False when no build was started, so a caller holding a busy
-        indicator can let go of it rather than spin forever.
+        **A build does not save.**  The editor's buffer is the document, and
+        that is what goes to the converter — so Present, Ctrl+Return, the
+        chip and the three exports made from the PDF all render what the
+        writer is looking at without writing it anywhere the writer did not
+        ask for.  It used to be the other way round: the converter read from
+        a path, so a build first wrote the buffer over the file on disk, and
+        an untitled document got a temporary copy of itself to be read back.
         """
         win = self._win
         if win._file_path is None:
-            # Nothing on disk yet, so the converter — which reads from a
-            # path — gets a temporary copy to read.
-            win._cleanup_temp_files()
-            fd, tmp_str = tempfile.mkstemp(suffix=".md")
-            try:
-                os.write(fd, win._editor.get_text().encode("utf-8"))
-            finally:
-                os.close(fd)
-            win._temp_md  = Path(tmp_str)
-            win._temp_pdf = win._temp_md.with_suffix(".pdf")
-            input_path, output_path = win._temp_md, win._temp_pdf
+            # No document directory, so relative image sources have nothing
+            # to resolve against and the PDF has nowhere of its own to go.
+            # One scratch file serves every build until the deck is saved.
+            output_path = self._scratch_pdf()
+            base_dir    = output_path.parent
         else:
-            # The converter reads from disk, so pending edits must land first.
-            # write_document() rather than save() so auto-convert cannot
-            # recurse back into here.
-            if win._modified and not win._documents.write_document():
-                win._after_build = None
-                self._settle_waits()
-                return False
-            win._cleanup_temp_files()
-            input_path, output_path = win._file_path, win._output_path
+            output_path = win._output_path or win._file_path.with_suffix(".pdf")
+            # The document's own directory, never the output's: Export PDF
+            # re-points the build at wherever the writer chose to save it,
+            # and the deck's pictures still live next to the Markdown.
+            base_dir    = win._file_path.parent
 
-        win._converter.convert(input_path, output_path)
-        return True
+        win._converter.convert(win._editor.get_text(), base_dir, output_path)
+
+    def _scratch_pdf(self) -> Path:
+        """The PDF path for a deck that has never been saved."""
+        win = self._win
+        if win._temp_pdf is None:
+            fd, tmp_str = tempfile.mkstemp(suffix=".pdf")
+            os.close(fd)
+            win._temp_pdf = Path(tmp_str)
+        return win._temp_pdf
 
     def with_current_build(self, action, on_wait=None) -> None:
         """

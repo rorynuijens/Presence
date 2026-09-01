@@ -10,8 +10,10 @@ control the writer pressed looked broken rather than busy.
 What must hold:
 
 *  A button that waits is released when the build lands, and also when it
-   fails, and also when no build was started at all.  A button left spinning
-   forever is worse than no indicator.
+   fails.  A button left spinning forever is worse than no indicator.
+   There used to be a third case — a build that never started, because
+   triggering one first had to save and the save was refused.  A build no
+   longer saves, so it no longer has a way to decline to start.
 *  Waits are counted, not flagged: an export holds one for the build and
    another for the render, and the two overlap.
 
@@ -114,22 +116,6 @@ def test_the_button_is_released_when_the_build_fails():
     assert button.sensitive is True
 
 
-def test_a_build_that_never_started_releases_the_button_at_once():
-    """Saving can refuse, and then there is no build to wait for."""
-    # The real trigger() this time — its refusal is the thing under test.
-    win = FakeWindow(current="edited", built="original")
-    coord = BuildCoordinator(win)
-    win._file_path = _Path("deck.md")
-    win._modified = True
-    win._documents = _RefusingDocuments()
-    busy, button = indicator()
-
-    coord.with_current_build(lambda: None, on_wait=busy)
-
-    assert busy.busy is False
-    assert button.sensitive is True
-
-
 # ── Overlapping waits ─────────────────────────────────────────────────────────
 
 def test_a_second_wait_keeps_the_button_busy_after_the_first_is_released():
@@ -170,15 +156,6 @@ def test_two_buttons_waiting_on_one_build_are_both_released():
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-
-class _Path(str):
-    """Just enough of a path for the coordinator's ``is None`` checks."""
-
-
-class _RefusingDocuments:
-    def write_document(self) -> bool:
-        return False
-
 
 class _Converter:
     def __init__(self):
