@@ -86,6 +86,10 @@ def isolated_session(tmp_path, monkeypatch):
     monkeypatch.setattr(session, "_data_dir", lambda: data)
 
 
+# Serial number for test application ids — see app_factory.
+_app_serial = 0
+
+
 @pytest.fixture
 def app_factory(gtk):
     """
@@ -95,6 +99,14 @@ def app_factory(gtk):
     registered, and registering exports an object on the session bus — so each
     one gets a unique id, and NON_UNIQUE so a test run never talks to a
     Presence the user has open.  Windows made here are never presented.
+
+    The id comes from a counter that outlives the fixture.  It used to be
+    ``len(made)`` plus ``id(made) & 0xffff``, and both restart with every
+    test: ``made`` is a fresh list each time, and CPython hands a freed
+    address straight back, so two tests in one run could be given the same
+    id and the second would fail to register with "An object is already
+    exported".  It struck perhaps one run in three, wherever the collision
+    happened to land.
     """
     from gi.repository import Gio
 
@@ -103,8 +115,10 @@ def app_factory(gtk):
     made = []
 
     def build():
+        global _app_serial
+        _app_serial += 1
         app = Application()
-        app.set_application_id(f"{APP_ID}.Test{len(made)}{id(made) & 0xffff:x}")
+        app.set_application_id(f"{APP_ID}.Test{_app_serial}")
         app.set_flags(Gio.ApplicationFlags.NON_UNIQUE
                       | Gio.ApplicationFlags.HANDLES_OPEN)
         app.register(None)
