@@ -12,9 +12,15 @@ What it does not own is how a slide is *classified*. `slides/layout.py` decides
 from the slide's own content whether it is text, a full-bleed picture, one
 picture beside words, two portraits flanking them, or a gallery — because those
 decisions need measurements CSS cannot take: a word count, an image's aspect
-ratio, and how many lone pictures came before this slide in the deck. The
-engine publishes what it found as classes and attributes; the stylesheet
-decides what they look like.
+ratio, and how many lone pictures came before this slide in the deck.
+
+So the engine says what it measured and the stylesheet decides what that means.
+The rule throughout: **a classification is a data attribute, a measurement is a
+custom property, and nothing that a theme might want to change is written as an
+inline style** — an inline style outranks every selector, so anything set that
+way would not be the theme's to decide. Section 3 lists what is published;
+overriding the rules that read it is how a theme arranges a slide differently
+from the way Presence would have.
 
 Everything below was measured against WeasyPrint 68.1, the engine that renders
 every deck, thumbnail, live preview and export.
@@ -81,21 +87,24 @@ generated from theme.json  →  your theme.css  →  (end of sheet)
 Later wins on equal specificity, so a bare `.slide h1 { … }` in your file beats
 the generated `h1 { … }` without `!important`.
 
-**Except against inline styles.** Six things are computed in Python and written
-onto the element, and no selector outranks them:
+Nothing else outranks you. The only inline styles in the document are custom
+properties carrying a measurement, and each has a rule in the generated sheet
+that reads it — which is the rule you override:
 
-| Element | Inline properties | Why |
-|---|---|---|
-| `.slide-image` | `top left right bottom width height` | the panel geometry `layout.py` chose |
-| `.slide-image img` | `opacity` | always `1`; see `AUTO_IMAGE_LAYOUT` |
-| `.slide-text` | `padding-left` / `padding-right` | clears the picture beside it |
-| `.gallery` | `grid-template-columns` `grid-auto-rows` | the row height must be definite or `height:100%` cells collapse |
-| `.gallery-cell img` | `object-fit` | crop or letterbox, from the image's aspect |
-| `.progress-bar-fill` | `width` | position in the deck |
+| Custom property | Set on | Read by | Carries |
+|---|---|---|---|
+| `--p-img-size` | `.slide-image`, `.slide-image-a/-b` | the panel's `width` (or `height`) | the width `auto_size()` chose from the word count, or `PAIR_SIZE` |
+| `--p-img-pad` | `.slide-text` | the padding that clears the picture | the same figure, in `%` beside the text and `px` above or below it |
+| `--p-img-pad-a` / `-b` | `.slide-text` | the same, for the flanking pair | |
+| `--p-gallery-columns` | `.gallery` | `grid-template-columns` | e.g. `repeat(3, 1fr)` |
+| `--p-gallery-row` | `.gallery` | `grid-auto-rows` | the measured row height in `px` |
+| `--p-progress` | `.progress-bar-fill` | `width` | how far into the deck this slide is |
 
-Override these with `!important` only if you mean it — you are overruling a
-measurement, and the gallery row height in particular will render an empty grid
-if you make it indefinite.
+To rearrange, override the property that reads one — `.slide[data-layout="single"]
+.slide-image { width: 33% }` — not the custom property, which is a measurement
+and inline. **One caution:** `grid-auto-rows` must stay a definite length. An
+image at `height:100%` in an indefinite row collapses, and WeasyPrint then
+renders the whole grid empty.
 
 ### Custom properties
 
@@ -117,10 +126,35 @@ with the aspect ratio; `base_size` and paddings scale with it).
 
 ```
 div.slide[data-slide-index]              ← every slide, always
+        [data-layout][data-text][data-images][data-shapes]
     …the slide's blocks, each with data-src-line…
     div.slide-number
     div.progress-bar-track > div.progress-bar-fill
 ```
+
+### What the engine measured
+
+Every slide div carries these, stamped at the one dispatch site so a new
+layout cannot ship without them. They are the facts the arrangement was chosen
+from, published so a stylesheet can reach a different conclusion.
+
+| Attribute | Values | Means |
+|---|---|---|
+| `data-layout` | `title` `text` `bleed` `single` `pair` `gallery` | the arrangement `choose_layout()` picked |
+| `data-text` | `none` `short` `long` | how much text shares the slide; the boundary between `short` and `long` is 40 words, the same one that decides whether a picture gets half the slide or 40% |
+| `data-images` | an integer | how many pictures the slide holds |
+| `data-shapes` | space-separated `portrait` `landscape` `square` `unknown` | one per picture, in order; `unknown` where the file could not be read |
+
+`data-shapes` is a whole-slide list, so use `~=` to ask about any one picture:
+`.slide[data-shapes~="portrait"]`. A gallery cell also carries its own
+`data-shape`, plus `data-fit` (`cover` or `contain`) — the crop-or-letterbox
+call `cell_fit()` made — because the slide-level list cannot address a single
+cell.
+
+These are worth knowing for what they let a theme do that Presence would not:
+a lone picture goes beside the words and never behind them, but
+`.slide[data-layout="single"][data-text="short"] .slide-image { width: 100% }`
+is a theme deciding otherwise.
 
 The cover is `div.slide.title-slide` and carries neither a slide number nor a
 progress bar; it may hold `p.title-meta` (author · date, when the frontmatter
@@ -137,7 +171,7 @@ The five layouts, as emitted:
 | pair | `.slide.has-two-images[data-split="h"]` | `.slide-image-a`, `.slide-image-b`, `.slide-text` |
 | gallery | `.slide.has-gallery` | `.gallery-text`, `.gallery > .gallery-cell[data-span] > img` |
 
-Also emitted, conditionally: `data-img-fit` when the fit is not `cover`,
+Also emitted on the slide div, conditionally: `data-img-fit` when the fit is not `cover`,
 `data-img-focal` when the focal point is not centred, `data-span="2"` on the
 gallery cell that spans two columns (the third of three images), and
 `data-p-theme="light"` or `"dark"` on a slide pinned to one of those.
@@ -278,6 +312,14 @@ of normal flow.
 ---
 
 ## History
+
+On 2026-09-01 the arrangement moved out of inline styles and into the
+stylesheet. Panel geometry, gallery tracks, cell `object-fit` and the progress
+bar's width were all written onto the element in Python, where no selector
+could reach them; each is now a rule in the generated sheet reading a published
+measurement. The same change began stamping `data-layout`, `data-text`,
+`data-images` and `data-shapes`. Rendering was unchanged — 166 renders across
+every layout and all 29 installed themes came back pixel-identical.
 
 Until 2026-09-01 `build_css()` ended by appending a block that blanked
 `.slide::before` and `::after`, every heading border and padding, link

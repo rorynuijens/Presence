@@ -146,6 +146,7 @@ body {{
 
 .progress-bar-fill {{
     height: 100%;
+    width: var(--p-progress, 0%);
     background: var(--p-accent);
 }}
 
@@ -380,8 +381,14 @@ a {{
  *   data-img-fit   : contain  (omitted = cover, the default)
  *   data-img-focal : focal-top | focal-center | focal-bottom
  *
- * Geometry (panel size/position) is expressed as inline styles on each element
- * in html.py so any integer size 1-100 works without per-size CSS rules here.
+ * The panel's geometry is here, keyed on data-img-pos.  html.py passes in only
+ * the width layout.py measured, as --p-img-size, with --p-img-pad the matching
+ * clearance for the text beside it — a percentage on the horizontal axis, and
+ * pixels on the vertical, because a vertical padding percentage resolves
+ * against the container's width rather than its height.
+ *
+ * Which is to say: a theme can rearrange any of this by overriding these
+ * rules, and could not when they were inline styles.
  *
  * A picture used to carry a gradient of the theme's background across its
  * edge, to keep a caption legible on top of it.  Captions are gone and the
@@ -396,6 +403,38 @@ a {{
     z-index: 0;
     transform: translateZ(0);
 }}
+
+/* ── Panel geometry, from the size layout.py chose ── */
+
+.slide.has-image[data-img-pos="background"] .slide-image {{
+    top: 0; left: 0; right: 0; bottom: 0;
+    width: 100%; height: 100%;
+}}
+
+.slide.has-image[data-img-pos="right"] .slide-image {{
+    top: 0; right: 0; bottom: 0;
+    width: var(--p-img-size, 50%); height: 100%;
+}}
+
+.slide.has-image[data-img-pos="left"] .slide-image {{
+    top: 0; left: 0; bottom: 0;
+    width: var(--p-img-size, 50%); height: 100%;
+}}
+
+.slide.has-image[data-img-pos="top"] .slide-image {{
+    top: 0; left: 0; right: 0;
+    width: 100%; height: var(--p-img-size, 50%);
+}}
+
+.slide.has-image[data-img-pos="bottom"] .slide-image {{
+    bottom: 0; left: 0; right: 0;
+    width: 100%; height: var(--p-img-size, 50%);
+}}
+
+.slide.has-image[data-img-pos="right"]  .slide-text {{ padding-right:  var(--p-img-pad, 0); }}
+.slide.has-image[data-img-pos="left"]   .slide-text {{ padding-left:   var(--p-img-pad, 0); }}
+.slide.has-image[data-img-pos="top"]    .slide-text {{ padding-top:    var(--p-img-pad, 0); }}
+.slide.has-image[data-img-pos="bottom"] .slide-text {{ padding-bottom: var(--p-img-pad, 0); }}
 
 .slide.has-image .slide-image img {{
     position: absolute;
@@ -582,6 +621,38 @@ a {{
     z-index: 0;
 }}
 
+/* ── Panel geometry, from the sizes html.py passed in ── */
+
+.slide.has-two-images[data-split="h"] .slide-image-a {{
+    top: 0; left: 0; bottom: 0;
+    width: var(--p-img-size, 30%); height: 100%;
+}}
+
+.slide.has-two-images[data-split="h"] .slide-image-b {{
+    top: 0; right: 0; bottom: 0;
+    width: var(--p-img-size, 30%); height: 100%;
+}}
+
+.slide.has-two-images[data-split="v"] .slide-image-a {{
+    top: 0; left: 0; right: 0;
+    width: 100%; height: var(--p-img-size, 30%);
+}}
+
+.slide.has-two-images[data-split="v"] .slide-image-b {{
+    bottom: 0; left: 0; right: 0;
+    width: 100%; height: var(--p-img-size, 30%);
+}}
+
+.slide.has-two-images[data-split="h"] .slide-text {{
+    padding-left:  var(--p-img-pad-a, 0);
+    padding-right: var(--p-img-pad-b, 0);
+}}
+
+.slide.has-two-images[data-split="v"] .slide-text {{
+    padding-top:    var(--p-img-pad-a, 0);
+    padding-bottom: var(--p-img-pad-b, 0);
+}}
+
 .slide.has-two-images .slide-image-a img,
 .slide.has-two-images .slide-image-b img {{
     position: absolute;
@@ -613,6 +684,12 @@ a {{
     display: grid;
     gap: {int(height * 0.025)}px;
     width: 100%;
+    grid-template-columns: var(--p-gallery-columns, repeat(2, 1fr));
+    /* The row height must end up definite: an image at height:100% inside an
+       indefinite row collapses, and WeasyPrint then renders the whole grid
+       empty.  html.py measures it; overriding it with anything intrinsic
+       (auto, min-content) empties the grid. */
+    grid-auto-rows: var(--p-gallery-row, 200px);
 }}
 
 /* Cells share the space equally and crop rather than distort: a grid of
@@ -629,6 +706,13 @@ a {{
     height: 100%;
     object-fit: cover;
     display: block;
+}}
+
+/* A picture whose shape disagrees badly with its cell keeps its bars rather
+   than losing most of itself to the crop; cell_fit() decides which, and says
+   so on the cell. */
+.slide.has-gallery .gallery-cell[data-fit="contain"] img {{
+    object-fit: contain;
 }}
 
 .slide.has-gallery .gallery-cell[data-span="2"] {{

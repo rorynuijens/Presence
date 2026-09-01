@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 
 __all__ = ["LayoutPlan", "AUTO_IMAGE_LAYOUT", "choose_layout",
            "gallery_columns", "auto_size", "cell_fit", "single_side",
-           "PAIR_SIZE"]
+           "shape_of", "text_weight", "PAIR_SIZE", "TEXT_LONG_WORDS"]
 
 
 # How wide each picture of a flanking pair is, leaving the rest for the text
@@ -37,6 +37,15 @@ _SIDES = ("right", "left")
 # rather than a row. Two of them either side of the text is the arrangement
 # that used to need |left| and |right|.
 _PORTRAIT_ASPECT = 0.9
+
+# Above this, a picture is wide enough to read as landscape rather than
+# square. Nothing here branches on the difference; it is published so a
+# stylesheet can.
+_LANDSCAPE_ASPECT = 1.15
+
+# Above this many words the text stops fitting in half a slide and takes the
+# extra width. auto_size() acts on it; text_weight() names it.
+TEXT_LONG_WORDS = 40
 
 
 # What an automatically placed image looks like. Mostly the values the token
@@ -86,6 +95,13 @@ class LayoutPlan:
     size:     str | None = None  # single: chosen width
     position: str | None = None  # single: which side the picture takes
 
+    # What the decision was made from, rather than what it decided. These
+    # are published on the slide div so a stylesheet can arrive at its own
+    # arrangement; see THEME-CONTRACT.md.
+    text:     str = "none"     # "none" | "short" | "long"
+    images:   int = 0
+    shapes:   tuple = field(default_factory=tuple)  # per image, see shape_of()
+
 
 def single_side(ordinal: int) -> str:
     """
@@ -103,9 +119,40 @@ def single_side(ordinal: int) -> str:
     return _SIDES[ordinal % len(_SIDES)]
 
 
+def shape_of(aspect: "float | None") -> str:
+    """
+    Name an image's proportions: portrait, landscape, square, or unknown.
+
+    Only "portrait" changes any decision here — it is what earns two pictures
+    the flanking pair. The other three are published rather than used, because
+    a stylesheet may well want to treat a tall picture differently from a wide
+    one in a gallery cell, and it cannot measure the file itself.
+    """
+    if aspect is None:
+        return "unknown"
+    if aspect < _PORTRAIT_ASPECT:
+        return "portrait"
+    if aspect > _LANDSCAPE_ASPECT:
+        return "landscape"
+    return "square"
+
+
+def text_weight(cleaned_md: str) -> str:
+    """
+    How much of the slide the words want: "none", "short" or "long".
+
+    The same threshold auto_size() sizes a picture by, named so it can be
+    selected on. "none" is the condition that makes a lone picture a bleed.
+    """
+    words = len(cleaned_md.split())
+    if words == 0:
+        return "none"
+    return "short" if words <= TEXT_LONG_WORDS else "long"
+
+
 def _is_portrait(aspect: "float | None") -> bool:
     """Whether an image is tall enough to want a column of its own."""
-    return aspect is not None and aspect < _PORTRAIT_ASPECT
+    return shape_of(aspect) == "portrait"
 
 
 def auto_size(word_count: int) -> str:
@@ -120,7 +167,7 @@ def auto_size(word_count: int) -> str:
     coarse on purpose: layout that shifts with every word typed would be
     worse than one that is merely imperfect.
     """
-    if word_count <= 40:
+    if word_count <= TEXT_LONG_WORDS:
         return "50"
     return "40"
 
@@ -184,33 +231,38 @@ def choose_layout(cleaned_md: str, images: list,
     Kinds: "text", "bleed", "single", "pair", "gallery".
     """
     count = len(images)
-    if count == 0:
-        return LayoutPlan("text")
-
     aspects = list(aspects or [])
 
     def aspect(i: int) -> "float | None":
         return aspects[i] if i < len(aspects) else None
 
+    # The facts every plan carries, whatever it decides.
+    facts = dict(text=text_weight(cleaned_md), images=count,
+                 shapes=tuple(shape_of(aspect(i)) for i in range(count)))
+
+    if count == 0:
+        return LayoutPlan("text", **facts)
+
     if count == 1:
         # Nothing to set the picture beside, so it takes the slide. Anything
         # else would be a half-empty slide.
         if not cleaned_md.strip():
-            return LayoutPlan("bleed")
+            return LayoutPlan("bleed", **facts)
         # Everything else goes beside the words rather than behind them.
         # A heading and a picture used to be laid out as a caption over a
         # full-bleed image, which is a strong effect to apply to a slide
         # whose author only wrote a title and dropped in a photograph.
         return LayoutPlan("single",
                           size=auto_size(len(cleaned_md.split())),
-                          position=single_side(side_ordinal))
+                          position=single_side(side_ordinal),
+                          **facts)
 
     if count == 2 and cleaned_md.strip():
         # Two tall pictures with text between them is a row of three
         # columns. Two wide ones stacked would leave the text nowhere to go,
         # so those keep the gallery.
         if _is_portrait(aspect(0)) and _is_portrait(aspect(1)):
-            return LayoutPlan("pair")
+            return LayoutPlan("pair", **facts)
 
     columns, spans = gallery_columns(count)
-    return LayoutPlan("gallery", columns, spans)
+    return LayoutPlan("gallery", columns, spans, **facts)

@@ -4,6 +4,7 @@ html.py — Assemble the full HTML document from rendered slide fragments.
 
 import base64 as _base64
 import html as _html
+from dataclasses import replace as _replace
 import re as _re
 from io import BytesIO as _BytesIO
 from pathlib import Path as _Path
@@ -93,10 +94,22 @@ from .splitter import (is_title_slide, extract_speaker_notes,
                           extract_images, infer_slide_title, split_two_columns)
 from .renderer    import render_slide_content
 from .layout      import (AUTO_IMAGE_LAYOUT, PAIR_SIZE, choose_layout,
-                          cell_fit)
+                          cell_fit, shape_of)
 from .utils       import image_aspect, image_is_missing
 from .frontmatter import extract_slide_directives
 from .utils       import logo_img_tag, progress_bar_html
+
+
+def _stamp_slide_attrs(html_frag: str, attrs: str) -> str:
+    """Add *attrs* to the fragment's outermost slide div."""
+    marker = '<div class="slide'
+    at = html_frag.find(marker)
+    if at == -1:
+        return html_frag
+    close = html_frag.find(">", at)
+    if close == -1:
+        return html_frag
+    return html_frag[:close] + attrs + html_frag[close:]
 
 
 def _stamp_slide_index(html_frag: str, index: int) -> str:
@@ -106,16 +119,26 @@ def _stamp_slide_index(html_frag: str, index: int) -> str:
     Done here rather than in each of the five per-layout renderers, so a new
     layout cannot be added without it.
     """
-    marker = '<div class="slide'
-    at = html_frag.find(marker)
-    if at == -1:
-        return html_frag
-    close = html_frag.find(">", at)
-    if close == -1:
-        return html_frag
-    return (html_frag[:close]
-            + f' data-slide-index="{index}"'
-            + html_frag[close:])
+    return _stamp_slide_attrs(html_frag, f' data-slide-index="{index}"')
+
+
+def _stamp_layout(html_frag: str, plan) -> str:
+    """
+    Publish what layout.py measured, on the slide div.
+
+    These are the facts the arrangement was chosen from — how many pictures,
+    what shape each one is, how much text shares the slide — rather than the
+    arrangement itself. A stylesheet cannot count words or read an image
+    header, so it cannot arrive at its own arrangement unless the engine says
+    what it found. Stamped at the dispatch site for the same reason the slide
+    index is: a sixth layout cannot be added without them.
+    """
+    attrs = (f' data-layout="{_html.escape(plan.kind)}"'
+             f' data-text="{_html.escape(plan.text)}"'
+             f' data-images="{plan.images}"')
+    if plan.shapes:
+        attrs += f' data-shapes="{_html.escape(" ".join(plan.shapes))}"'
+    return _stamp_slide_attrs(html_frag, attrs)
 
 
 def md_to_html_slides(
@@ -200,17 +223,26 @@ def md_to_html_slides(
         if only_index is not None and i != only_index:
             continue
 
+        # Ask what the slide should be rather than branching on how many
+        # images it happens to have; see layout.py for the rules. Shapes are
+        # read from the file headers (cached on mtime), which is what lets
+        # the pair layout be chosen rather than written.
+        #
+        # Asked for every slide, not only the ones with pictures, because the
+        # plan is also what gets published on the slide div — a slide of pure
+        # text still says so.
+        aspects = [image_aspect(img.get("src", ""), base_url)
+                   for img in images] if images else []
+        plan = choose_layout(cleaned_md, images, aspects, side_ordinal)
+
         if title_slide:
+            # The cover is dispatched on its own before any of this, so name
+            # it as the arrangement it is rather than the one its content
+            # would otherwise have earned.
+            plan = _replace(plan, kind="title")
             html_frag = _render_title_slide(cleaned_md, meta, logo_b64,
                                             line_offset=line_offset)
         elif images:
-            # Ask what the slide should be rather than branching on how many
-            # images it happens to have; see layout.py for the rules.
-            # Shapes are read from the file headers (cached on mtime), which
-            # is what lets the pair layout be chosen rather than written.
-            aspects = [image_aspect(img.get("src", ""), base_url)
-                       for img in images]
-            plan = choose_layout(cleaned_md, images, aspects, side_ordinal)
             if plan.kind == "gallery":
                 html_frag = _render_gallery_slide(
                     cleaned_md, images, plan,
@@ -259,7 +291,8 @@ def md_to_html_slides(
         # content overflows its box makes WeasyPrint emit a continuation
         # page, so a PDF page number is not a slide number; this is what
         # lets the build say which page each slide actually starts on.
-        slide_htmls.append(_stamp_slide_index(html_frag, i))
+        slide_htmls.append(
+            _stamp_slide_index(_stamp_layout(html_frag, plan), i))
 
     lang = _html.escape(str(meta.get("lang", "en")) or "en")
     document = f"""<!DOCTYPE html>
@@ -280,30 +313,36 @@ def md_to_html_slides(
 
 # ── Geometry helpers ─────────────────────────────────────────────────────────
 
+def _style_attr(declarations: str) -> str:
+    """Return a style attribute for *declarations*, or nothing when empty."""
+    return f' style="{declarations}"' if declarations else ""
+
 def _image_geometry(pos: str, size: int, height: int) -> tuple[str, str]:
     """
-    Return (img_style, text_pad_style) inline CSS strings for a single-image
-    slide panel.  All size-dependent layout is expressed as inline styles so
-    any integer size 1-100 works without fixed CSS rules.
+    Return (img_style, text_style): what the panel *measured*, as custom
+    properties, for the stylesheet to arrange with.
+
+    Which edge the picture takes is already on the slide div as data-img-pos,
+    and every rule that positions the panel is in css.py keyed on it. Only the
+    width layout.py chose has to be passed through, because it is a
+    measurement — auto_size() reads it off the word count — and no stylesheet
+    can arrive at it alone. Writing `width` here instead of `--p-img-size`
+    would put the whole arrangement beyond a theme's reach: an inline style
+    outranks every selector.
+
+    The padding is given separately from the width because a percentage means
+    different things on the two axes — CSS resolves a vertical padding against
+    the container's *width* — so a top or bottom panel needs its own value in
+    pixels to keep the text clear of the picture.
     """
     if pos == "background" or size >= 100:
-        img_style = "top:0;left:0;right:0;bottom:0;width:100%;height:100%;"
-        text_pad  = ""
-    elif pos == "right":
-        img_style = f"top:0;right:0;bottom:0;width:{size}%;height:100%;"
-        text_pad  = f"padding-right:{size}%;"
-    elif pos == "left":
-        img_style = f"top:0;left:0;bottom:0;width:{size}%;height:100%;"
-        text_pad  = f"padding-left:{size}%;"
-    elif pos == "top":
-        img_style = f"top:0;left:0;right:0;width:100%;height:{size}%;"
-        text_pad  = f"padding-top:{int(height * size / 100)}px;"
-    elif pos == "bottom":
-        img_style = f"bottom:0;left:0;right:0;width:100%;height:{size}%;"
-        text_pad  = f"padding-bottom:{int(height * size / 100)}px;"
-    else:
-        img_style = text_pad = ""
-    return img_style, text_pad
+        return "", ""
+    if pos in ("left", "right"):
+        return f"--p-img-size:{size}%;", f"--p-img-pad:{size}%;"
+    if pos in ("top", "bottom"):
+        return (f"--p-img-size:{size}%;",
+                f"--p-img-pad:{int(height * size / 100)}px;")
+    return "", ""
 
 
 # ── Slide type renderers ──────────────────────────────────────────────────────
@@ -391,10 +430,19 @@ def _render_image_slide(
     focal_attr = (f' data-img-focal="{_html.escape(focal)}"'
                   if focal != "focal-center" and fit == "cover" else "")
 
+    # A panel at full width is a full-bleed picture however it was asked for,
+    # and the markup now says which arrangement it is rather than leaving the
+    # attribute pointing at a side the picture does not take.
+    if size >= 100:
+        pos = "background"
+
     img_style, text_pad = _image_geometry(pos, size, height)
 
     # Build img inline style (opacity + transforms only — filter handled below)
-    img_css_parts = [f"opacity:{opacity / 100:.2f}"]
+    # Every automatically placed picture is shown at full strength, so the
+    # declaration is omitted rather than written out as a no-op that a theme
+    # could not override.
+    img_css_parts = [] if opacity >= 100 else [f"opacity:{opacity / 100:.2f}"]
     transforms = []
     if zoom != 100:
         transforms.append(f"scale({zoom / 100:.2f})")
@@ -432,8 +480,10 @@ def _render_image_slide(
         )
     else:
         if css_grayscale > 0:
-            img_inline += f";filter:grayscale({css_grayscale}%)"
-        img_el = f'<img src="{escaped_src}" style="{img_inline}" alt="">'
+            img_inline = f"{img_inline};" if img_inline else img_inline
+            img_inline += f"filter:grayscale({css_grayscale}%)"
+        img_style_attr = f' style="{img_inline}"' if img_inline else ""
+        img_el = f'<img src="{escaped_src}"{img_style_attr} alt="">'
 
     tint_div = ""
     if tint:
@@ -441,12 +491,12 @@ def _render_image_slide(
                     f' style="background:{_html.escape(tint)};"'
                     f' aria-hidden="true"></div>')
 
-    text_style = f' style="{text_pad}"' if text_pad else ""
+    text_style = _style_attr(text_pad)
 
     return (
         f'<div class="slide has-image"'
         f' data-img-pos="{_html.escape(pos)}"{fit_attr}{focal_attr}{t_attr}>'
-        f'  <div class="slide-image" style="{img_style}">'
+        f'  <div class="slide-image"{_style_attr(img_style)}>'
         f'    {img_el}'
         f'    {tint_div}'
         f'  </div>'
@@ -549,17 +599,26 @@ def _render_gallery_slide(
         spans_two = (index + 1) in plan.spans
         span = ' data-span="2"' if spans_two else ""
         this_w = cell_w * 2 + gap if spans_two else cell_w
-        fit = cell_fit(image_aspect(raw_src, base_url),
-                       this_w / row_h if row_h else 0)
+        aspect = image_aspect(raw_src, base_url)
+        fit = cell_fit(aspect, this_w / row_h if row_h else 0)
+        # Both are the cell's own facts: what shape the picture is, and
+        # whether that shape fits its cell closely enough to be cropped. The
+        # slide's data-shapes cannot address one cell, so each carries its
+        # own; object-fit itself is set from data-fit in css.py.
         cells.append(
-            f'<div class="gallery-cell"{span}>'
-            f'<img src="{src}" alt="" style="object-fit:{fit}">'
+            f'<div class="gallery-cell"{span}'
+            f' data-shape="{shape_of(aspect)}" data-fit="{fit}">'
+            f'<img src="{src}" alt="">'
             f'</div>'
         )
 
     t_attr = _theme_attr(theme_override)
-    style = (f"grid-template-columns: repeat({plan.columns}, 1fr);"
-             f"grid-auto-rows: {row_h}px;")
+    # The grid's shape is measured — the row height especially, which must
+    # end up definite — so it is published for the stylesheet to build the
+    # tracks from rather than written onto the element as the tracks
+    # themselves.
+    style = (f"--p-gallery-columns: repeat({plan.columns}, 1fr);"
+             f"--p-gallery-row: {row_h}px;")
     text_html = f'<div class="gallery-text">{text}</div>' if text else ""
     return (
         f'<div class="slide has-gallery"{t_attr}>'
@@ -642,21 +701,20 @@ def _render_two_image_slide(
 
     axis = "h" if horizontal else "v"
 
-    # Geometry is inline; the stylesheet only positions the panels.
+    # Only the widths are measured here; where the panels sit is in css.py,
+    # keyed on data-split. See _image_geometry() for why the padding is
+    # carried separately from the size.
+    img_a_style = f"--p-img-size:{size_a}%;"
+    img_b_style = f"--p-img-size:{size_b}%;"
     if horizontal:
-        img_a_style = f"top:0;left:0;bottom:0;width:{size_a}%;height:100%;"
-        img_b_style = f"top:0;right:0;bottom:0;width:{size_b}%;height:100%;"
-        text_style  = f"padding-left:{size_a}%;padding-right:{size_b}%;"
+        text_style = f"--p-img-pad-a:{size_a}%;--p-img-pad-b:{size_b}%;"
     else:
-        img_a_style = f"top:0;left:0;right:0;width:100%;height:{size_a}%;"
-        img_b_style = f"bottom:0;left:0;right:0;width:100%;height:{size_b}%;"
-        pad_top     = int(height * size_a / 100)
-        pad_bot     = int(height * size_b / 100)
-        text_style  = f"padding-top:{pad_top}px;padding-bottom:{pad_bot}px;"
+        text_style = (f"--p-img-pad-a:{int(height * size_a / 100)}px;"
+                      f"--p-img-pad-b:{int(height * size_b / 100)}px;")
 
     # CSS filter fallback for two-image slides (PIL unavailable / remote src)
     def _two_img_el(src: str, opacity: float, css_gs: int, css_bl: int) -> str:
-        style = f"opacity:{opacity:.2f}"
+        style = "" if opacity >= 1 else f"opacity:{opacity:.2f}"
         if css_bl > 0:
             fparts = []
             if css_gs > 0:
@@ -670,8 +728,9 @@ def _render_two_image_slide(
             )
             return wrap
         if css_gs > 0:
-            style += f";filter:grayscale({css_gs}%)"
-        return f'<img src="{src}" style="{style}" alt="">'
+            style = f"{style};" if style else style
+            style += f"filter:grayscale({css_gs}%)"
+        return f'<img src="{src}"{_style_attr(style)} alt="">'
 
     return (
         f'<div class="slide has-two-images" data-split="{axis}"{t_attr}>'

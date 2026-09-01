@@ -90,11 +90,17 @@ def logo_img_tag(logo_b64: str | None) -> str:
 
 
 def progress_bar_html(current: int, total: int) -> str:
-    """Return a progress bar HTML fragment for slide *current* of *total*."""
+    """
+    Return a progress bar HTML fragment for slide *current* of *total*.
+
+    How far along the deck is, is a measurement; how the bar draws it is the
+    stylesheet's, which reads --p-progress. Setting `width` here instead would
+    have put the bar out of a theme's reach.
+    """
     pct = int(current / total * 100) if total else 0
     return (
         f'<div class="progress-bar-track">'
-        f'<div class="progress-bar-fill" style="width:{pct}%"></div>'
+        f'<div class="progress-bar-fill" style="--p-progress:{pct}%"></div>'
         f'</div>'
     )
 
