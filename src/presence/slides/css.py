@@ -663,28 +663,6 @@ a {{
                 log.warning("Cannot read custom CSS '%s': %s",
                             t.custom_css_path, e)
 
-    # Applied last so it overrides any border/stripe rules in theme custom CSS.
-    css += """
-/* ── No-lines override ──────────────────────────────────────────────────── */
-.slide::before, .slide::after { display: none; }
-.slide h1, .slide h2, .slide h3, .slide h4,
-.slide.title-slide h1, .slide.title-slide h2, .slide.title-slide h3 {
-    border: none;
-    padding-top: 0;
-    padding-bottom: 0;
-    padding-left: 0;
-}
-.slide a                    { border-bottom: none; }
-.slide pre, .slide .highlight { border: none; }
-.slide code                 { border: none; }
-.slide blockquote           { border-left: none; }
-.slide table                { border: none; }
-.slide th, .slide td        { border: none; }
-.slide tr:nth-child(even) td,
-.slide tr:nth-child(odd)  td { background: transparent; }
-.two-col > .col             { border: none; }
-"""
-
     return css
 
 
