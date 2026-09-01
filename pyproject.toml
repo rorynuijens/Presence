@@ -34,7 +34,7 @@ presence-cli = "presence.slides.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"presence" = ["presence-markdown.xml"]
+"presence" = ["presence-markdown*.xml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

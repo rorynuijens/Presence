@@ -78,7 +78,7 @@ class SlideshowWindow(Adw.Window):
                  presenter_window: "PresenterWindow",
                  parent_window, slide_pages=None, **kwargs) -> None:
         super().__init__(**kwargs)
-        self.set_title("Presence — Slideshow")
+        self.set_title("Slideshow")
         self.set_default_size(1280, 720)
         # Not transient — a transient window is constrained to its parent's
         # output on some compositors, which prevents multi-monitor placement.
@@ -474,7 +474,7 @@ class PresenterWindow(Adw.Window):
                  thumbnails: list, parent_window, pdf_path=None,
                  **kwargs) -> None:
         super().__init__(**kwargs)
-        self.set_title("Presence — Presenter Mode")
+        self.set_title("Presenter")
         self.set_default_size(1280, 800)
         self.set_transient_for(parent_window)
 
@@ -522,6 +522,8 @@ class PresenterWindow(Adw.Window):
         self._slideshow.present()
         self._slideshow.load()
 
+        self._hold_the_session_awake()
+
         key_ctrl = Gtk.EventControllerKey()
         # CAPTURE phase: intercept key events before they reach the
         # script view, which would otherwise consume them.
@@ -534,6 +536,45 @@ class PresenterWindow(Adw.Window):
         # paint thumbnails into them (prevents GtkGizmo snapshot warning).
         GLib.idle_add(self._enter_fullscreen)
         GLib.idle_add(self._deferred_start)
+
+    def _hold_the_session_awake(self) -> None:
+        """
+        Ask the session not to blank or lock while the talk is running.
+
+        A speaker is talking, not typing, and GNOME blanks the screen after
+        five minutes of no input — so a slide discussed for longer than that
+        took the audience screen down with it.  Nothing here inhibited idle,
+        even though the app has a target duration measured in minutes.
+
+        The cookie is the release token; 0 means the session manager refused
+        or is not there, and there is nothing to release.
+        """
+        self._inhibit_cookie = 0
+        get_app = getattr(self._parent_window, "get_application", None)
+        app = get_app() if callable(get_app) else None
+        if app is None:
+            return
+        try:
+            self._inhibit_cookie = app.inhibit(
+                self, Gtk.ApplicationInhibitFlags.IDLE, "Presenting a slideshow"
+            )
+        except Exception as e:                       # no session manager
+            log.debug("could not inhibit idle: %s", e)
+
+    def _let_the_session_sleep(self) -> None:
+        """Give the idle inhibit back, with the window that took it."""
+        cookie = getattr(self, "_inhibit_cookie", 0)
+        if not cookie:
+            return
+        self._inhibit_cookie = 0
+        get_app = getattr(self._parent_window, "get_application", None)
+        app = get_app() if callable(get_app) else None
+        if app is None:
+            return
+        try:
+            app.uninhibit(cookie)
+        except Exception as e:
+            log.debug("could not release idle inhibit: %s", e)
 
     def _enter_fullscreen(self) -> bool:
         # Maximize the presenter window rather than fullscreening —
@@ -554,15 +595,25 @@ class PresenterWindow(Adw.Window):
         Build the teleprompter-style presenter layout.
 
         Layout:
-          Top bar  : [← slide →] [counter]  [timer] [+/-] [blank] [✕]
+          Header   : [← counter →] [screen]  timer/pace  [End −A +A ⇄ ▣] [□✕]
+          Progress : one dot per slide, filled to here
           Body     : [left column]  |  [notes area]
                       current thumb      slide title (bold)
                       next thumb         notes text (large, readable)
-          No bottom bar — all controls are in the top bar.
+          No bottom bar — all controls are in the header.
 
         The notes area takes ~70% of the width.  The left column holds the
         two thumbnails and the slide counter.  The entire window background
-        is forced dark so the presenter's eyes are not strained.
+        is forced dark so the presenter's eyes are not strained — a stage
+        view, not a document window, which is the one thing here that does
+        not follow the system style.
+
+        The controls used to live in a plain Gtk.Box, and this window had no
+        header bar at all: no title, no close button, nothing to drag, and no
+        way out but the End button or Escape.  They are in an Adw.HeaderBar
+        now, so the window has the controls every window is supposed to have,
+        and the dark stylesheet below is extended to cover it rather than
+        leaving a light strip pasted across the top.
         """
         # ── Force dark colours on this window only ───────────────────────────
         # Installed for the whole display, with every selector scoped under
@@ -586,7 +637,13 @@ class PresenterWindow(Adw.Window):
             "#presenter-window .notes-hint { color: #666666; }"
             "#presenter-window .thumb-label { color: #888888; font-size: 11px; }"
             "#presenter-window .counter-label { color: #aaaaaa; }"
-            "#presenter-window .presenter-topbar "
+            # The header bar and the progress strip under it are one surface,
+            # so they carry the same fill and only the strip draws the edge.
+            "#presenter-window headerbar "
+            "  { background: #0d0d0d; color: #e8e8e8; border: none;"
+            "    box-shadow: none; }"
+            "#presenter-window headerbar button { color: #e8e8e8; }"
+            "#presenter-window .presenter-progress "
             "  { background: #0d0d0d; border-bottom: 1px solid #2a2a2a; }"
             "#presenter-window .pace-label { color: #8a8a8a; }"
             "#presenter-window .pace-label.ahead  { color: #78c078; }"
@@ -601,43 +658,32 @@ class PresenterWindow(Adw.Window):
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
         )
 
-        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        root = Adw.ToolbarView()
         self.set_content(root)
 
-        # ── Top bar ───────────────────────────────────────────────────────────
-        topbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        topbar.add_css_class("presenter-topbar")
-        topbar.set_margin_start(12)
-        topbar.set_margin_end(12)
-        topbar.set_margin_top(6)
-        topbar.set_margin_bottom(6)
+        # ── Header bar ────────────────────────────────────────────────────────
+        # An Adw.HeaderBar rather than a Gtk.Box, so this window has a title,
+        # window controls and something to drag, like every other window.
+        header = Adw.HeaderBar()
+        root.add_top_bar(header)
 
-        # Left zone: navigation
+        # Start zone: where you are in the deck, and which screen it is on.
+        nav = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        nav.add_css_class("linked")
+
         prev_btn = Gtk.Button()
         prev_btn.set_child(Gtk.Image.new_from_icon_name("go-previous-symbolic"))
         prev_btn.add_css_class("flat")
         prev_btn.set_tooltip_text("Previous slide (←)")
         prev_btn.update_property([Gtk.AccessibleProperty.LABEL], ["Previous slide"])
         prev_btn.connect("clicked", lambda *_: self._prev())
-        topbar.append(prev_btn)
+        nav.append(prev_btn)
 
         self._counter_label = Gtk.Label(label="1 / 1")
         self._counter_label.set_width_chars(7)
         self._counter_label.add_css_class("counter-label")
         self._counter_label.add_css_class("monospace")
-        topbar.append(self._counter_label)
-
-        # Progress dot bar — one dot per slide, filled up to current position.
-        # Drawn via Cairo so it scales cleanly and costs nothing at runtime.
-        # Capped at _PROGRESS_MAX_DOTS dots; beyond that the bar compresses
-        # evenly so it always fits in the top bar without wrapping.
-        self._progress_bar = Gtk.DrawingArea()
-        self._progress_bar.set_content_height(20)
-        self._progress_bar.set_hexpand(True)
-        self._progress_bar.set_valign(Gtk.Align.CENTER)
-        self._progress_bar.set_tooltip_text("Slide progress")
-        self._progress_bar.set_draw_func(self._draw_progress)
-        topbar.append(self._progress_bar)
+        nav.append(self._counter_label)
 
         next_btn = Gtk.Button()
         next_btn.set_child(Gtk.Image.new_from_icon_name("go-next-symbolic"))
@@ -645,78 +691,59 @@ class PresenterWindow(Adw.Window):
         next_btn.set_tooltip_text("Next slide (→)")
         next_btn.update_property([Gtk.AccessibleProperty.LABEL], ["Next slide"])
         next_btn.connect("clicked", lambda *_: self._next())
-        topbar.append(next_btn)
+        nav.append(next_btn)
+        header.pack_start(nav)
 
-        # Monitor indicator (left zone, after nav)
         self._monitor_icon = Gtk.Image.new_from_icon_name("video-display-symbolic")
         self._monitor_icon.set_tooltip_text("Checking for second monitor…")
         self._monitor_icon.set_margin_start(8)
-        topbar.append(self._monitor_icon)
+        header.pack_start(self._monitor_icon)
 
-        # Centre spacer → timer
-        spacer_l = Gtk.Box()
-        spacer_l.set_hexpand(True)
-        topbar.append(spacer_l)
+        # Title zone: the clock, and underneath it whether the clock is the
+        # right number for where you have got to.  A header bar's title is
+        # what the window is about, and during a talk that is the time.
+        title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        title_box.set_valign(Gtk.Align.CENTER)
+
+        timer_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        timer_row.set_halign(Gtk.Align.CENTER)
+        timer_row.append(Gtk.Image.new_from_icon_name("alarm-symbolic"))
 
         # Timer — large, centred, readable from across the room
-        timer_icon = Gtk.Image.new_from_icon_name("alarm-symbolic")
-        topbar.append(timer_icon)
-
         self._timer_label = Gtk.Label(label="00:00")
         self._timer_label.add_css_class("monospace")
         self._timer_label.add_css_class("title-2")
         self._timer_label.set_width_chars(7)
-        self._timer_label.set_margin_start(4)
-        self._timer_label.set_margin_end(4)
-        topbar.append(self._timer_label)
-
-        reset_btn = Gtk.Button()
-        reset_btn.set_child(Gtk.Image.new_from_icon_name("view-refresh-symbolic"))
-        reset_btn.set_tooltip_text("Reset timer")
-        reset_btn.update_property([Gtk.AccessibleProperty.LABEL], ["Reset timer"])
-        reset_btn.add_css_class("flat")
-        reset_btn.connect("clicked", self._reset_timer)
-        topbar.append(reset_btn)
+        timer_row.append(self._timer_label)
+        title_box.append(timer_row)
 
         # Pace: the clock says how long you have been talking, this says
         # whether that is the right amount for where you have got to.
         self._pace_label = Gtk.Label(label="")
         self._pace_label.add_css_class("pace-label")
         self._pace_label.add_css_class("monospace")
-        self._pace_label.set_margin_start(12)
+        self._pace_label.add_css_class("caption")
         self._pace_label.set_tooltip_text(
             "How your elapsed time compares with the script up to this slide"
         )
-        topbar.append(self._pace_label)
+        title_box.append(self._pace_label)
+        header.set_title_widget(title_box)
 
-        spacer_r = Gtk.Box()
-        spacer_r.set_hexpand(True)
-        topbar.append(spacer_r)
-
-        # Right zone: font size, blank, close
-        font_down_btn = Gtk.Button()
-        font_down_btn.set_child(
-            Gtk.Image.new_from_icon_name("zoom-out-symbolic")
+        # End zone, right to left as packed: the ways out and the ways to
+        # change what the room sees.  "End" is packed last so it sits at the
+        # far left of the group rather than beside the window's own close
+        # button, which does the same thing.
+        blank_btn = Gtk.Button()
+        blank_btn.set_child(
+            Gtk.Image.new_from_icon_name("display-projector-symbolic")
         )
-        font_down_btn.set_tooltip_text("Decrease notes font size")
-        font_down_btn.update_property(
-            [Gtk.AccessibleProperty.LABEL], ["Decrease notes font size"]
+        blank_btn.set_tooltip_text("Blank audience screen (B)")
+        blank_btn.update_property(
+            [Gtk.AccessibleProperty.LABEL], ["Blank audience screen"]
         )
-        font_down_btn.add_css_class("flat")
-        font_down_btn.connect("clicked", self._on_font_decrease)
-        topbar.append(font_down_btn)
-
-        font_up_btn = Gtk.Button()
-        font_up_btn.set_child(
-            Gtk.Image.new_from_icon_name("zoom-in-symbolic")
-        )
-        font_up_btn.set_tooltip_text("Increase notes font size")
-        font_up_btn.update_property(
-            [Gtk.AccessibleProperty.LABEL], ["Increase notes font size"]
-        )
-        font_up_btn.add_css_class("flat")
-        font_up_btn.connect("clicked", self._on_font_increase)
-        topbar.append(font_up_btn)
+        blank_btn.add_css_class("flat")
+        blank_btn.connect("clicked", lambda *_: self._toggle_blank("black"))
+        header.pack_end(blank_btn)
 
         # Swap screens: move slideshow to the other monitor
         swap_btn = Gtk.Button()
@@ -729,36 +756,76 @@ class PresenterWindow(Adw.Window):
         )
         swap_btn.add_css_class("flat")
         swap_btn.connect("clicked", lambda *_: self._swap_screens())
-        topbar.append(swap_btn)
+        header.pack_end(swap_btn)
 
-        blank_btn = Gtk.Button()
-        blank_btn.set_child(
-            Gtk.Image.new_from_icon_name("display-projector-symbolic")
-        )
-        blank_btn.set_tooltip_text("Blank audience screen (B)")
-        blank_btn.update_property(
-            [Gtk.AccessibleProperty.LABEL], ["Blank audience screen"]
-        )
-        blank_btn.add_css_class("flat")
-        blank_btn.connect("clicked", lambda *_: self._toggle_blank("black"))
-        topbar.append(blank_btn)
+        reset_btn = Gtk.Button()
+        reset_btn.set_child(Gtk.Image.new_from_icon_name("view-refresh-symbolic"))
+        reset_btn.set_tooltip_text("Reset timer")
+        reset_btn.update_property([Gtk.AccessibleProperty.LABEL], ["Reset timer"])
+        reset_btn.add_css_class("flat")
+        reset_btn.connect("clicked", self._reset_timer)
+        header.pack_end(reset_btn)
 
+        font_up_btn = Gtk.Button()
+        font_up_btn.set_child(
+            Gtk.Image.new_from_icon_name("zoom-in-symbolic")
+        )
+        font_up_btn.set_tooltip_text("Increase notes font size")
+        font_up_btn.update_property(
+            [Gtk.AccessibleProperty.LABEL], ["Increase notes font size"]
+        )
+        font_up_btn.add_css_class("flat")
+        font_up_btn.connect("clicked", self._on_font_increase)
+        header.pack_end(font_up_btn)
+
+        font_down_btn = Gtk.Button()
+        font_down_btn.set_child(
+            Gtk.Image.new_from_icon_name("zoom-out-symbolic")
+        )
+        font_down_btn.set_tooltip_text("Decrease notes font size")
+        font_down_btn.update_property(
+            [Gtk.AccessibleProperty.LABEL], ["Decrease notes font size"]
+        )
+        font_down_btn.add_css_class("flat")
+        font_down_btn.connect("clicked", self._on_font_decrease)
+        header.pack_end(font_down_btn)
+
+        # Not destructive-action.  That styling is a warning that something
+        # will be lost, and ending a talk loses nothing — the deck, the file
+        # and the window behind it are all still there.
         close_btn = Gtk.Button(label="End")
         close_btn.set_tooltip_text("End presentation (Escape)")
         close_btn.update_property(
             [Gtk.AccessibleProperty.LABEL], ["End presentation"]
         )
-        close_btn.add_css_class("destructive-action")
         close_btn.connect("clicked", lambda *_: self.close())
-        topbar.append(close_btn)
+        header.pack_end(close_btn)
 
-        root.append(topbar)
+        # ── Progress strip ────────────────────────────────────────────────────
+        # One dot per slide, filled up to the current position.  Drawn via
+        # Cairo so it scales cleanly and costs nothing at runtime.  Capped at
+        # _PROGRESS_MAX_DOTS dots; beyond that the bar compresses evenly so it
+        # always fits without wrapping.  Its own bar under the header, where it
+        # gets the full width it wants instead of fighting the timer for it.
+        progress_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        progress_row.add_css_class("presenter-progress")
+
+        self._progress_bar = Gtk.DrawingArea()
+        self._progress_bar.set_margin_start(12)
+        self._progress_bar.set_margin_end(12)
+        self._progress_bar.set_content_height(20)
+        self._progress_bar.set_hexpand(True)
+        self._progress_bar.set_valign(Gtk.Align.CENTER)
+        self._progress_bar.set_tooltip_text("Slide progress")
+        self._progress_bar.set_draw_func(self._draw_progress)
+        progress_row.append(self._progress_bar)
+        root.add_top_bar(progress_row)
 
         # ── Body: left column + notes area ────────────────────────────────────
         body = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
         body.set_vexpand(True)
         body.set_hexpand(True)
-        root.append(body)
+        root.set_content(body)
 
         # ── Left column: thumbnails + slide counter ───────────────────────────
         left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -958,10 +1025,17 @@ class PresenterWindow(Adw.Window):
         slide and all previous slides are filled with the accent colour;
         future slides are drawn as outlines.  When the deck has more slides
         than _PROGRESS_MAX_DOTS the dots compress to fit, otherwise each dot
-        is 8 px wide with 4 px gaps.
+        is 8 px wide.
+
+        The dots are spread across the whole strip rather than packed at a
+        fixed pitch, so how far along the row a dot sits is how far into the
+        deck it is — which is the thing being read from the back of a room.
+        A fixed pitch was right while this was a slot between two buttons in
+        the old top bar; in a strip of its own it left a short cluster
+        marooned in the middle of the window.
 
         Designed to be readable at a glance from 2–3 metres:
-          ● ● ● ○ ○ ○ ○ ○   ← clear at-a-glance progress
+          ●   ●   ●   ○   ○   ○   ← clear at-a-glance progress
         """
         n = self._n_slides
         if n < 2:
@@ -971,11 +1045,11 @@ class PresenterWindow(Adw.Window):
         n_dots   = min(n, self._PROGRESS_MAX_DOTS)
         # Dot diameter: 8 px normally, compressed if many slides
         dot_d    = min(8, max(4, (width - 8) // (n_dots * 2)))
-        gap      = max(2, dot_d // 2)
-        total_w  = n_dots * dot_d + (n_dots - 1) * gap
-        x0       = (width - total_w) / 2
         cy       = height / 2
         r        = dot_d / 2
+        # First and last dot sit against the ends, so the row measures the
+        # whole strip.  A one-dot row would divide by zero, hence the guard.
+        step     = (width - dot_d) / (n_dots - 1) if n_dots > 1 else 0.0
 
         # ── Colours from GTK style context ────────────────────────────────────
         # Use the Adwaita accent colour so the bar inherits any user accent.
@@ -1003,7 +1077,7 @@ class PresenterWindow(Adw.Window):
         filled_dots = round((self._current + 1) / n * n_dots)
 
         for i in range(n_dots):
-            cx = x0 + i * (dot_d + gap) + r
+            cx = r + i * step
             cr.arc(cx, cy, r, 0, 2 * math.pi)
             if i < filled_dots:
                 cr.set_source_rgba(fill_r, fill_g, fill_b, fill_a)
@@ -1359,6 +1433,8 @@ class PresenterWindow(Adw.Window):
         if self._timer_src:
             GLib.source_remove(self._timer_src)
             self._timer_src = None
+        # The talk is over, so the session may blank and lock again.
+        self._let_the_session_sleep()
         # Disconnect monitor handler — must happen before any surface ops
         # to prevent _on_monitors_changed_presenter firing on a dead object
         if self._monitors_handler is not None:

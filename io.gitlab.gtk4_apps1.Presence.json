@@ -219,6 +219,8 @@
                 "pip3 install --prefix=/app --no-build-isolation --no-deps --no-index .",
                 "install -Dm644 data/openssl.cnf /app/etc/openssl.cnf",
                 "install -Dm644 src/presence/presence-markdown.xml /app/share/gtksourceview-5/styles/presence-markdown.xml",
+                "install -Dm644 src/presence/presence-markdown-light.xml /app/share/gtksourceview-5/styles/presence-markdown-light.xml",
+                "install -Dm644 src/presence/presence-markdown-dark.xml /app/share/gtksourceview-5/styles/presence-markdown-dark.xml",
                 "install -Dm644 io.gitlab.gtk4_apps1.Presence.svg /app/share/icons/hicolor/scalable/apps/io.gitlab.gtk4_apps1.Presence.svg",
                 "install -Dm644 application-x-presence.svg /app/share/icons/hicolor/scalable/mimetypes/application-x-presence.svg",
                 "install -Dm644 io.gitlab.gtk4_apps1.Presence.desktop /app/share/applications/io.gitlab.gtk4_apps1.Presence.desktop",

@@ -346,7 +346,7 @@ def _build_theme_row(theme: Theme, parent_window, converter,
 def _on_install(parent_window, page, converter) -> None:
     from .app_utils import make_file_filter, make_filter_store
     dialog = Gtk.FileDialog()
-    dialog.set_title("Choose Theme Package")
+    dialog.set_title("Choose theme package")
     dialog.set_filters(make_filter_store(
         make_file_filter("Theme packages (folder or .zip)", "*.zip")
     ))

@@ -594,7 +594,7 @@ class ThemePanel(Gtk.Box):
             return
         from .app_utils import make_file_filter, make_filter_store
         dialog = Gtk.FileDialog()
-        dialog.set_title("Choose Logo Image")
+        dialog.set_title("Choose logo image")
         dialog.set_filters(make_filter_store(
             make_file_filter("Images (PNG, JPEG, SVG)",
                              "*.png", "*.jpg", "*.jpeg", "*.svg")

@@ -325,7 +325,7 @@ class DocumentController:
     def save_as_dialog(self, on_done=None) -> bool:
         win = self._win
         dialog = Gtk.FileDialog()
-        dialog.set_title("Save As")
+        dialog.set_title("Save as")
         dialog.set_filters(make_filter_store(
             make_file_filter("Presence bundle", "*.pres"),
             make_file_filter("Markdown files", "*.md"),

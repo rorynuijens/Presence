@@ -203,7 +203,7 @@ class ExportController:
         """Export each slide as a full-resolution PNG into a chosen folder."""
         win = self._win
         dialog = Gtk.FileDialog()
-        dialog.set_title("Choose Export Folder")
+        dialog.set_title("Choose export folder")
 
         def _response(dlg, result) -> None:
             win.hold_file_dialog(None)
@@ -270,7 +270,7 @@ class ExportController:
         """Export the talk as a document: each slide with its script."""
         win = self._win
         self._ask_save_path(
-            title="Export Handout",
+            title="Export handout",
             suffix=".pdf",
             filter_label="PDF files",
             initial_name=f"{self._document_stem()}-handout.pdf",

@@ -26,7 +26,7 @@ from .app_utils        import png_bytes_to_texture, make_file_filter, make_filte
 log = logging.getLogger(__name__)
 from .converter  import Converter
 from .export_controller import ExportController
-from .document_controller import DocumentController
+from .document_controller import UNTITLED, DocumentController
 from .build_coordinator import BuildCoordinator
 from .settle_clock import SettleClock
 from .presenter  import PresenterWindow
@@ -130,7 +130,10 @@ class _BusyIndicator:
 class MainWindow(Adw.ApplicationWindow):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
-        self.set_title("Presence")
+        # The same name the header shows before a document has one.  This was
+        # the app name, so a fresh window's title bar and its task-switcher
+        # entry disagreed with each other until the first save.
+        self.set_title(UNTITLED)
 
         state = load_window_state()
         self.set_default_size(state.get("width", 1400), state.get("height", 860))
@@ -554,7 +557,7 @@ class MainWindow(Adw.ApplicationWindow):
         s4 = Gio.Menu()
         s4.append("Keyboard shortcuts", "win.shortcuts")
         s4.append("Settings…",          "app.preferences")
-        s4.append("About",              "app.about")
+        s4.append("About Presence",     "app.about")
         menu.append_section(None, s4)
         return menu
 
@@ -1083,7 +1086,7 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _show_open_dialog(self) -> None:
         dialog = Gtk.FileDialog()
-        dialog.set_title("Open File")
+        dialog.set_title("Open file")
         dialog.set_filters(make_filter_store(
             make_file_filter("Presence files", "*.pres", "*.md"),
             make_file_filter("Presence bundle", "*.pres"),
@@ -1249,7 +1252,10 @@ class MainWindow(Adw.ApplicationWindow):
         setattr(self, attr, GLib.timeout_add(delay_ms, _fire))
 
     def set_document_title(self, name: str) -> None:
-        self.set_title(f"{name} — Presence")
+        # The document's name, and only that.  A window title carrying the
+        # app name as well says it twice: the shell already knows which
+        # application the window belongs to and shows it alongside.
+        self.set_title(name)
         self._title_label.set_title(name)
 
     def mark_modified(self) -> None:

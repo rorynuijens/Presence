@@ -41,6 +41,61 @@ except (ValueError, ImportError):
 
 log = logging.getLogger(__name__)
 
+# ── The editor's own colours ──────────────────────────────────────────────────
+#
+# One scheme per system style, picked in _apply_style() and re-picked on
+# Adw.StyleManager's notify::dark.  There used to be one scheme, pinned to a
+# white background, so a writer in GNOME's dark style got dark chrome around a
+# white sheet with no preference anywhere to change it.
+#
+# The chains end in GtkSourceView's own Adwaita pair, which every install has.
+# `presence-markdown` is the frozen (mode 444) original: it is still installed,
+# still light, and still pins the selection colour to the pre-GNOME-47 blue, so
+# it sits behind the file that replaced it rather than in front of it.
+_SCHEMES_LIGHT = ("presence-markdown-light", "presence-markdown",
+                  "Adwaita", "tango", "classic")
+_SCHEMES_DARK  = ("presence-markdown-dark", "Adwaita-dark",
+                  "classic-dark", "solarized-dark")
+
+# Tag colours the buffer sets itself, rather than the scheme: (light, dark).
+# Read against the scheme's background above — dimmer than the body text on a
+# white sheet means darker, and on a dark one means lighter, so one value
+# cannot serve both.
+_TAG_COLOURS = {
+    # The "---" itself, demoted behind the band drawn over it.
+    "presence-separator": ("#9a9996", "#8b8a88"),
+    # ![ ]( ) delimiters, the description, and the path.
+    "presence-img-punct": ("#888888", "#8f8f8f"),
+    "presence-img-desc":  ("#555577", "#b3b3d4"),
+    "presence-img-src":   ("#777777", "#9a9a9a"),
+    # Focus mode's wash over the slides you are not writing.
+    "presence-unfocused": ("#b6b6b6", "#5f5f5f"),
+}
+
+_schemes_registered = False
+
+
+def _register_style_schemes() -> None:
+    """
+    Make the bundled schemes findable however Presence was installed.
+
+    meson drops them in ``datadir/gtksourceview-5/styles``, which is already on
+    the manager's search path; a pip install leaves them next to this file,
+    which is not — and there the editor silently fell back to plain Adwaita and
+    none of Presence's own Markdown colours were ever seen.  Appending the
+    package directory covers both, and costs nothing when the installed copy is
+    found first.
+    """
+    global _schemes_registered
+    if _schemes_registered or not _GTKSOURCE_AVAILABLE:
+        return
+    _schemes_registered = True
+    mgr = GtkSource.StyleSchemeManager.get_default()
+    here = str(Path(__file__).parent)
+    if here not in mgr.get_search_path():
+        mgr.append_search_path(here)
+
+
 # Regex shared with md_to_slides.slides — keep in sync.
 _IMAGE_RE = re.compile(
     r'!\[([^\]]*)\]'
@@ -138,6 +193,10 @@ class _TableInsertPopover(Gtk.Popover):
         found, accent = style.lookup_color("accent_bg_color")
         if not found:
             accent = style.get_color()
+        # The unlit cells and their edges are the popover's own foreground at
+        # low alpha, not a fixed grey: a grid drawn in one shade would be a
+        # dark block on a light popover or an invisible one on a dark popover.
+        fg = style.get_color()
         for row in range(self._MAX_ROWS):
             for col in range(self._MAX_COLS):
                 x = col * (sz + gap) + gap
@@ -147,10 +206,10 @@ class _TableInsertPopover(Gtk.Popover):
                 if selected:
                     cr.set_source_rgba(accent.red, accent.green, accent.blue, 0.85)
                 else:
-                    cr.set_source_rgba(0.28, 0.28, 0.30, 0.9)
+                    cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.18)
                 cr.rectangle(x, y, sz, sz)
                 cr.fill()
-                cr.set_source_rgba(1.0, 1.0, 1.0, 0.08)
+                cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.35)
                 cr.rectangle(x, y, sz, sz)
                 cr.stroke()
 
@@ -359,11 +418,27 @@ class Editor(Gtk.Box):
             # After realize, measure the gutter width and wire up scroll.
             self._view.connect('realize', self._on_view_realize_badges)
 
+        # Follow the system style.  The style manager is a singleton that
+        # outlives every window, so a handler left on it would keep this
+        # editor and its buffer alive after the window closed; it comes off
+        # when the widget leaves its window, which is what unroots it.
+        self._style_manager = Adw.StyleManager.get_default()
+        self._dark_handler = self._style_manager.connect(
+            "notify::dark", lambda *_: self._apply_style()
+        )
+        self.connect("notify::root", self._on_root_changed)
+
         self._drop_target = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.COPY)
         self._drop_target.connect("drop",   self._on_drop)
         self._drop_target.connect("motion", self._on_drop_motion)
         # "leave" signal not connected — no visual feedback needed on drag leave
         self._view.add_controller(self._drop_target)
+
+    def _on_root_changed(self, *_) -> None:
+        """Let go of the style manager once this editor has no window."""
+        if self.get_root() is None and self._dark_handler is not None:
+            self._style_manager.disconnect(self._dark_handler)
+            self._dark_handler = None
 
     # ── View initialisation ───────────────────────────────────────────────────
 
@@ -1658,21 +1733,37 @@ class Editor(Gtk.Box):
 
     # ── Style ─────────────────────────────────────────────────────────────────
 
+    def _is_dark(self) -> bool:
+        """Whether the system is asking for the dark style right now."""
+        try:
+            return Adw.StyleManager.get_default().get_dark()
+        except Exception:
+            return False
+
+    def _tag_colour(self, name: str) -> str:
+        """The colour tag *name* should carry against the current background."""
+        light, dark = _TAG_COLOURS[name]
+        return dark if self._is_dark() else light
+
     def _apply_style(self) -> None:
-        """Apply syntax highlighting scheme and separator tag."""
+        """
+        Apply the colour scheme for the system style, and the buffer's tags.
+
+        Called again on every notify::dark, so everything it touches has to be
+        a re-colouring rather than a first-time creation: the tags below exist
+        by the second call, and each sets its colour whether it made the tag or
+        found it.
+        """
         if not _GTKSOURCE_AVAILABLE:
             return
 
+        _register_style_schemes()
         mgr = GtkSource.StyleSchemeManager.get_default()
-        scheme = mgr.get_scheme("presence-markdown")
-        if scheme:
-            self._buffer.set_style_scheme(scheme)
-        else:
-            for name in ("Adwaita", "adwaita", "tango", "classic"):
-                s = mgr.get_scheme(name)
-                if s:
-                    self._buffer.set_style_scheme(s)
-                    break
+        for name in (_SCHEMES_DARK if self._is_dark() else _SCHEMES_LIGHT):
+            scheme = mgr.get_scheme(name)
+            if scheme:
+                self._buffer.set_style_scheme(scheme)
+                break
 
         self._apply_separator_tag()
         self._apply_image_tag()
@@ -1696,11 +1787,7 @@ class Editor(Gtk.Box):
         if tag is None:
             tag = self._buffer.create_tag("presence-current-slide")
 
-        dark = False
-        try:
-            dark = Adw.StyleManager.get_default().get_dark()
-        except Exception:
-            pass
+        dark = self._is_dark()
         rgba = Gdk.RGBA()
         # Lighten on dark backgrounds, darken on light ones: the same
         # translucent black would only ever muddy a dark theme.
@@ -1717,11 +1804,12 @@ class Editor(Gtk.Box):
         should read as one quiet block, not as dimmer highlighting that still
         asks to be parsed.
 
-        One grey, not a light and a dark one.  The wash picks its colour off
-        Adw.StyleManager.get_dark(), but presence-markdown.xml pins the
-        editor's own background to #ffffff whatever the system is set to, so
-        the system's answer does not describe this widget.  Read against the
-        background the scheme actually paints instead.
+        Two greys, one per system style.  This used to be a single grey, on
+        the grounds that the editor's background was pinned to #ffffff
+        whatever the system was set to and so the system's answer did not
+        describe this widget.  It follows the system now, so the answer does
+        describe it, and one grey would be either invisible on a dark sheet
+        or too dark to read as quiet on a light one.
         """
         table = self._buffer.get_tag_table()
         tag = table.lookup("presence-unfocused")
@@ -1732,7 +1820,7 @@ class Editor(Gtk.Box):
         # Far enough from the background to stay legible when you glance at
         # it — focus mode hides nothing — and far enough from the foreground
         # that the eye does not land there.
-        rgba.parse("#b6b6b6")
+        rgba.parse(self._tag_colour("presence-unfocused"))
         tag.set_property("foreground-rgba", rgba)
         self._tinted_block = _NO_BLOCK      # force a repaint at the new colour
 
@@ -1888,11 +1976,11 @@ class Editor(Gtk.Box):
 
     def _apply_separator_tag(self) -> None:
         """
-        Create a TextTag that highlights slide-separator lines (---).
+        Create (or recolour) the tag that quietens separator lines (---).
 
-        Uses @accent_color-equivalent orange that works in both light and
-        dark mode.  The tag is re-applied on every buffer change via
-        _on_buffer_changed so separators are always highlighted.
+        The tag is re-applied on every buffer change via _on_buffer_changed so
+        separators are always highlighted, and recoloured by _apply_style when
+        the system style changes.
         """
         tag_table = self._buffer.get_tag_table()
 
@@ -1908,10 +1996,12 @@ class Editor(Gtk.Box):
             # them, and slides would still run together as one stream.
             self._buffer.create_tag(
                 "presence-separator",
-                foreground="#9a9996",
                 pixels_above_lines=self._SEP_SPACE,
                 pixels_below_lines=self._SEP_SPACE,
             )
+        tag_table.lookup("presence-separator").set_property(
+            "foreground", self._tag_colour("presence-separator")
+        )
 
         # Initial application — buffer may already have content
         self._highlight_separators()
@@ -1971,10 +2061,10 @@ class Editor(Gtk.Box):
           • presence-img-desc   — dim colour for the description
           • presence-img-src    — dim italic for the file path / URL
 
-        These are GtkTextBuffer tags, not GtkSource language rules, so they
-        work even when GtkSourceView is not available and survive theme changes
-        because they use fixed colours chosen to contrast on both light/dark
-        editor backgrounds.
+        These are GtkTextBuffer tags, not GtkSource language rules, so they are
+        the buffer's to colour rather than the scheme's — which means they have
+        to be recoloured when the system style changes.  _apply_style calls
+        this again on every notify::dark for exactly that.
 
         The tags are created once and re-applied on every buffer change via
         the same 'changed' signal used by the separator highlighter.
@@ -1986,25 +2076,24 @@ class Editor(Gtk.Box):
 
         # Punctuation: ![ ]( ) — muted so they don't compete with content
         if tag_table.lookup("presence-img-punct") is None:
-            self._buffer.create_tag(
-                "presence-img-punct",
-                foreground="#888888",
-            )
+            self._buffer.create_tag("presence-img-punct")
 
         # The alt text (the human-readable description):
         # slightly muted so the punctuation and path frame it
         if tag_table.lookup("presence-img-desc") is None:
-            self._buffer.create_tag(
-                "presence-img-desc",
-                foreground="#555577",
-            )
+            self._buffer.create_tag("presence-img-desc")
 
         # Source path / URL: dim italic — important but secondary
         if tag_table.lookup("presence-img-src") is None:
             self._buffer.create_tag(
                 "presence-img-src",
-                foreground="#777777",
                 style=2,                # Pango.Style.ITALIC
+            )
+
+        for name in ("presence-img-punct", "presence-img-desc",
+                     "presence-img-src"):
+            tag_table.lookup(name).set_property(
+                "foreground", self._tag_colour(name)
             )
 
         # Initial scan

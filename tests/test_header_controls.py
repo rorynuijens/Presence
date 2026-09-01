@@ -142,3 +142,39 @@ def test_activating_a_row_runs_its_export_and_closes_the_popover(window,
     _rows(popover)[3].emit("activated")
     assert called == ["handout"]
     assert down == [popover]
+
+
+# ── What the window calls itself ──────────────────────────────────────────────
+
+def test_the_window_title_is_the_document_and_not_the_app(window):
+    """
+    The shell already says which application a window belongs to, so
+    "Untitled — Presence" said it twice.  The header widget only ever showed
+    the document's name; the title bar and the task switcher now agree with
+    it.
+    """
+    _app, win = window
+    assert win.get_title() == "Untitled"
+
+    win.set_document_title("barns.md")
+    assert win.get_title() == "barns.md"
+    assert win._title_label.get_title() == "barns.md"
+
+
+def test_the_menu_names_the_app_in_its_about_item(window):
+    """
+    "About" alone is the one place the app's name belongs, and the only
+    header-menu item the HIG spells out.
+    """
+    _app, win = window
+    menu = win._build_app_menu()
+    labels = []
+    for section in range(menu.get_n_items()):
+        link = menu.get_item_link(section, "section")
+        if link is None:
+            continue
+        for i in range(link.get_n_items()):
+            label = link.get_item_attribute_value(i, "label", None)
+            if label is not None:
+                labels.append(label.get_string())
+    assert "About Presence" in labels

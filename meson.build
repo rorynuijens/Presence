@@ -24,6 +24,13 @@ py.install_sources(
   subdir: 'presence/slides'
 )
 
-install_data('src/presence/presence-markdown.xml',
+# Both halves of the editor's colour scheme, plus the frozen original they
+# replaced, which stays installed as the last fallback before Adwaita's own.
+install_data(
+  [
+    'src/presence/presence-markdown.xml',
+    'src/presence/presence-markdown-light.xml',
+    'src/presence/presence-markdown-dark.xml',
+  ],
   install_dir: join_paths(get_option('datadir'), 'gtksourceview-5/styles')
 )
