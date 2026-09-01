@@ -123,9 +123,20 @@ _CALLOUT_KINDS = {
 }
 
 _CALLOUT_RE = re.compile(
-    r"<blockquote>\s*<p>\[!([a-zA-Z]+)\](.*?)</blockquote>",
+    r"<blockquote([^>]*)>\s*<p[^>]*>\[!([a-zA-Z]+)\](.*?)</blockquote>",
     re.DOTALL,
 )
+
+# The one attribute that has to survive a block being rewritten: it is what
+# ties a laid-out box back to the line the writer edits, and what a reveal
+# step is measured against.
+_SRC_LINE_RE = re.compile(r'\s*(data-src-line="\d+")')
+
+
+def _carried(attrs: str) -> str:
+    """The source-line stamp out of *attrs*, ready to append to a new tag."""
+    m = _SRC_LINE_RE.search(attrs or "")
+    return f" {m.group(1)}" if m else ""
 
 
 def _transform_callouts(html: str) -> str:
@@ -133,12 +144,20 @@ def _transform_callouts(html: str) -> str:
     Convert GitHub-style callout blockquotes to <div class="callout-KIND"> elements.
 
     Handles both same-paragraph (> [!info]\n> text) and split-paragraph forms.
+
+    The blockquote and its first paragraph are matched with their attributes
+    rather than bare, because every block carries a ``data-src-line`` stamp
+    in a real build and the bare form silently matched nothing there — a
+    callout reached the PDF as a blockquote reading "[!tip]".  The stamp is
+    carried onto the div it becomes, so the fold and the reveal steps can
+    still find the block.
     """
     def _replace(m: "re.Match[str]") -> str:
-        kind = _CALLOUT_KINDS.get(m.group(1).lower())
+        kind = _CALLOUT_KINDS.get(m.group(2).lower())
         if kind is None:
             return m.group(0)
-        after = m.group(2)
+        stamp = _carried(m.group(1))
+        after = m.group(3)
         if after.startswith("</p>"):
             # Separate paragraphs: [!type]</p>\n<p>content</p>\n
             inner = after[4:].strip()
@@ -148,7 +167,7 @@ def _transform_callouts(html: str) -> str:
             text = after[:end].strip() if end != -1 else after.strip()
             rest = after[end + 4:].strip() if end != -1 else ""
             inner = f"<p>{text}</p>{rest}" if text else rest
-        return f'<div class="callout-{kind}">{inner}</div>'
+        return f'<div class="callout-{kind}"{stamp}>{inner}</div>'
 
     return _CALLOUT_RE.sub(_replace, html)
 
@@ -157,17 +176,24 @@ def _highlight_code_blocks(html: str) -> str:
     """
     Replace <pre><code class="language-X">...</code></pre> blocks with
     Pygments-highlighted equivalents.
+
+    The attributes either side of the class are matched rather than assumed
+    away: a real build stamps every block with ``data-src-line``, and the
+    bare form matched none of them, so no build ever highlighted anything.
+    The stamp moves out to the wrapper, which is the element a fold names
+    and a reveal step hides — background and all, not just the letters.
     """
     # Match <pre><code class="language-LANG">CONTENT</code></pre>
     pattern = re.compile(
-        r'<pre><code class="language-([^"]+)">(.*?)</code></pre>',
+        r'<pre><code\b([^>]*?)\bclass="language-([^"]+)"([^>]*)>(.*?)</code></pre>',
         re.DOTALL,
     )
 
     def _replace(m: "re.Match[str]") -> str:
-        lang = m.group(1)
+        lang  = m.group(2)
+        stamp = _carried(m.group(1) + m.group(3))
         # markdown-it HTML-escapes the code content; unescape before highlighting
-        code = _html.unescape(m.group(2))
+        code = _html.unescape(m.group(4))
         try:
             lexer = _get_lexer(lang, stripall=True)
         except Exception:
@@ -176,7 +202,7 @@ def _highlight_code_blocks(html: str) -> str:
         highlighted = _highlight(code, lexer, formatter)
         safe_lang = _html.escape(lang)
         return (
-            f'<div class="highlight">'
+            f'<div class="highlight"{stamp}>'
             f'<pre><code class="language-{safe_lang}">'
             f"{highlighted}"
             f"</code></pre></div>"

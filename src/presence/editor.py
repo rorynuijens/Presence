@@ -64,6 +64,9 @@ _SCHEMES_DARK  = ("presence-markdown-dark", "Adwaita-dark",
 _TAG_COLOURS = {
     # The "---" itself, demoted behind the band drawn over it.
     "presence-separator": ("#9a9996", "#8b8a88"),
+    # The "+++" that holds the rest of a slide back — the same hand, quieter,
+    # because a step is a boundary inside a slide rather than between two.
+    "presence-step":      ("#b0aeab", "#7a7977"),
     # ![ ]( ) delimiters, the description, and the path.
     "presence-img-punct": ("#888888", "#8f8f8f"),
     "presence-img-desc":  ("#555577", "#b3b3d4"),
@@ -108,6 +111,7 @@ _IMAGE_RE = re.compile(
 # Same heading rule the sidebar's titles use, so a band and its
 # thumbnail never disagree about what a slide is called.
 from .slides.splitter import _strip_inline_markdown
+from .slides.reveal import STEP_MARKER
 
 
 def _same_file(a: Path, b: Path) -> bool:
@@ -289,6 +293,9 @@ class Editor(Gtk.Box):
     # Blank space opened above and below a separator line.  The band's rule is
     # drawn in the upper half of it, clear of the "---" glyphs.
     _SEP_SPACE = 16
+    # The same for a "+++" step marker: half as much, because it divides a
+    # slide rather than the deck.
+    _STEP_SPACE = 8
 
     def __init__(self) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -317,6 +324,8 @@ class Editor(Gtk.Box):
         # slide boundary.  Rebuilt by _update_badge_starts on every change,
         # so unlike the fold rules these need no marks to stay accurate.
         self._sep_bands: list[tuple[int, int, str]] = []
+        # Lines holding a "+++", drawn as a lighter rule inside the slide.
+        self._step_bands: list[int] = []
         # Line range currently washed as "the slide you are in", so the tag is
         # only reapplied when the cursor actually crosses a boundary.
         self._tinted_block: tuple[int, int] | None = _NO_BLOCK
@@ -1006,6 +1015,8 @@ class Editor(Gtk.Box):
                             "New slide (---)", lambda *_: self._new_slide()))
         bar.append(icon_btn("view-dual-symbolic",
                             "Two columns (|||)", lambda *_: self._two_columns()))
+        bar.append(icon_btn("go-next-symbolic",
+                            "Reveal step (+++)", lambda *_: self._reveal_step()))
         bar.append(icon_btn("document-edit-symbolic",
                             "Speaker notes (^^^)", lambda *_: self._speaker_notes()))
         bar.append(sep())
@@ -1125,6 +1136,8 @@ class Editor(Gtk.Box):
 
     def _new_slide(self)     -> None: self._replace_selection("\n\n---\n\n")
     def _two_columns(self)   -> None: self._replace_selection("\n\n|||\n\n")
+    def _reveal_step(self)   -> None:
+        self._replace_selection(f"\n\n{STEP_MARKER}\n\n")
     def _speaker_notes(self) -> None:
         self._replace_selection("\n\n^^^\n\nSpeaker notes here")
 
@@ -1420,6 +1433,10 @@ class Editor(Gtk.Box):
         """Return True if line *ln* is a notes separator (^^^)."""
         return bool(re.match(r'^\^{3,}' + r'\s*$', self._get_line_text(ln)))
 
+    def _is_step_sep(self, ln: int) -> bool:
+        """Return True if line *ln* is a reveal step marker (+++)."""
+        return self._get_line_text(ln) == STEP_MARKER
+
     def _on_view_realize_badges(self, view) -> None:
         """
         Called once after the GtkSourceView is realized.
@@ -1493,6 +1510,8 @@ class Editor(Gtk.Box):
         in_notes      = False        # True after ^^^ within a slide
         tint_last     = body_start   # last line included in tint so far
 
+        step_lines: list[int] = []
+
         for ln in range(body_start, n):
             t = self._get_line_text(ln)
             is_sep   = self._is_slide_sep(ln)
@@ -1532,6 +1551,11 @@ class Editor(Gtk.Box):
             if in_notes:
                 continue  # skip prose notes
 
+            # A step marker divides the slide, so it opens no slide and
+            # takes no title — only a rule saying the rest waits here.
+            if self._is_step_sep(ln):
+                step_lines.append(ln)
+
             tint_last = ln  # extend tint to this line
             if badge_line < 0 and t:  # first non-empty, non-sep, non-notes line
                 badge_line = ln
@@ -1559,6 +1583,8 @@ class Editor(Gtk.Box):
             for num, (sep, title) in enumerate(zip(sep_lines, titles), start=1)
             if sep >= 0
         ]
+
+        self._step_bands = step_lines
 
         if getattr(self, "_sep_draw", None) is not None:
             self._sep_draw.queue_draw()
@@ -1596,7 +1622,8 @@ class Editor(Gtk.Box):
         the source scrolls like a deck, and the slide numbers no longer need
         a second home in the gutter.
         """
-        if not self._sep_bands or not self._view.get_realized():
+        if not (self._sep_bands or self._step_bands) \
+                or not self._view.get_realized():
             return
 
         layout = None
@@ -1641,6 +1668,28 @@ class Editor(Gtk.Box):
                 cr.move_to(width - label_w - 12.0, y - 7.0)
                 _PangoCairo.show_layout(cr, layout)
                 cr.restore()
+
+        # A step marker is a boundary inside a slide, so it gets a rule of
+        # the same hand and less of it: dashed, half width, no name — there
+        # is nothing to name, since what follows is the same slide.
+        for step_line in self._step_bands:
+            y = self._line_y(step_line)
+            if y is None or y < -40 or y > height + 40:
+                continue
+
+            fade = 1.0
+            if focus is not None and not focus[0] <= step_line <= focus[1]:
+                fade = 0.3
+
+            y = round(y - self._STEP_SPACE / 2) + 0.5
+            cr.save()
+            cr.set_source_rgba(0.55, 0.55, 0.55, 0.35 * fade)
+            cr.set_line_width(1.0)
+            cr.set_dash([3.0, 3.0])
+            cr.move_to(0.0, y)
+            cr.line_to(max(0.0, width * 0.5), y)
+            cr.stroke()
+            cr.restore()
 
     # ── Fold rules ────────────────────────────────────────────────────────────
 
@@ -2003,6 +2052,18 @@ class Editor(Gtk.Box):
             "foreground", self._tag_colour("presence-separator")
         )
 
+        # The step marker gets the same demotion and half the room: it holds
+        # a slide back rather than ending one.
+        if tag_table.lookup("presence-step") is None:
+            self._buffer.create_tag(
+                "presence-step",
+                pixels_above_lines=self._STEP_SPACE,
+                pixels_below_lines=self._STEP_SPACE,
+            )
+        tag_table.lookup("presence-step").set_property(
+            "foreground", self._tag_colour("presence-step")
+        )
+
         # Initial application — buffer may already have content
         self._highlight_separators()
 
@@ -2013,16 +2074,19 @@ class Editor(Gtk.Box):
             self._buffer._separator_connected = True
 
     def _highlight_separators(self) -> None:
-        """Scan the buffer and apply/clear the separator tag on --- lines."""
+        """Apply the separator tags to the --- and +++ lines, and only those."""
         tag_table = self._buffer.get_tag_table()
-        tag = tag_table.lookup("presence-separator")
+        tag  = tag_table.lookup("presence-separator")
+        step = tag_table.lookup("presence-step")
         if tag is None:
             return
 
-        # Remove tag from entire buffer first
+        # Remove tags from entire buffer first
         start = self._buffer.get_start_iter()
         end   = self._buffer.get_end_iter()
         self._buffer.remove_tag(tag, start, end)
+        if step is not None:
+            self._buffer.remove_tag(step, start, end)
 
         # Re-apply to every line whose stripped content is exactly "---"
         n = self._buffer.get_line_count()
@@ -2032,9 +2096,11 @@ class Editor(Gtk.Box):
                 continue
             line_end = line_start.copy()
             line_end.forward_to_line_end()
-            text = self._buffer.get_text(line_start, line_end, False)
-            if text.strip() == "---":
+            text = self._buffer.get_text(line_start, line_end, False).strip()
+            if text == "---":
                 self._buffer.apply_tag(tag, line_start, line_end)
+            elif text == STEP_MARKER and step is not None:
+                self._buffer.apply_tag(step, line_start, line_end)
 
     # ── Image-tag syntax highlighting ─────────────────────────────────────────
 

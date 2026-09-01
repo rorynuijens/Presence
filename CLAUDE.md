@@ -111,17 +111,18 @@ The codebase lives entirely under `src/presence/` and splits into two layers:
 
 1. `frontmatter.py` — strips and parses YAML frontmatter from the top of the document.
 2. `splitter.py` — splits Markdown into per-slide strings on `---` separators; also handles `|||` (two-column split), `^^^` (speaker notes), and title-slide detection. All operations work on raw strings only. `parse_image_layout()` still parses the retired alt-text tokens — the file is mode `444` — but nothing downstream reads its answer; see the scope rules.
-3. `renderer.py` — converts Markdown fragments to HTML using `markdown-it-py` with optional Pygments syntax highlighting.
-4. `css.py` — builds the full CSS string from a `Theme` object via `build_css(theme, width, height, logo_b64)`. Colour values from theme files are validated against an allowlist to prevent CSS injection.
-5. `layout.py` — decides how a slide is laid out: `choose_layout(cleaned_md, images, aspects, side_ordinal)` returns one of `text`, `bleed`, `single`, `pair`, `gallery`. It picks a width from how much text shares the slide (`auto_size`: half and half until the words stop fitting in half a slide), whether each gallery cell crops or letterboxes (`cell_fit`), and whether two portraits should flank it. **A lone picture goes beside the words, never behind them** — only a slide with no text at all gets a full-bleed image, because there is nothing to set it beside. A picture is shown as it is: the gradient that used to wash the theme's background across its edge, and the 75% opacity that faded the whole thing, both existed to keep a caption legible on a photograph and went when the caption did. `AUTO_IMAGE_LAYOUT` has no `gradient` or `fade` key, `css.py` no rule to honour one, and `opacity` is 100 — which is what the gallery always rendered at, since it never read the value. Which side it takes alternates down the deck (`single_side`), and that is the one thing here that is not a function of the slide's own content: `side_ordinal` counts the lone pictures before it, so `html.py` must count them over *every* slide, before its `only_index` skip, or a single-slide render and the build would put the same picture on opposite sides. Shapes come from `utils.image_aspect()`, which reads the header via Pillow cached on mtime, so the live render can afford it. `AUTO_IMAGE_LAYOUT` is the single owner of what an automatically placed image looks like — no other module may read a treatment value off a parsed image. **Every plan also carries what it was decided from** — `text` (`none`/`short`/`long`, from `text_weight()` over the same 40-word threshold `auto_size()` uses), `images`, and `shapes` (`shape_of()` per picture) — because a stylesheet can neither count words nor read an image header, and without them a theme could not arrive at an arrangement of its own. Those are facts, not decisions: nothing here branches on `shapes` except the portrait test that earns the pair.
-6. `html.py` — assembles the complete HTML document; dispatches to per-slide-type renderers (`_render_title_slide`, `_render_normal_slide`, `_render_image_slide`, `_render_two_image_slide`, `_render_gallery_slide`) according to the layout plan. Gallery rows carry an inline pixel height: indefinite rows collapse images set to `height:100%`, which renders the whole grid empty. Every slide div is stamped with `data-slide-index` by `_stamp_slide_index()` at the dispatch site, not in the five renderers, so a new layout cannot be added without it — and with `data-layout`, `data-text`, `data-images` and `data-shapes` by `_stamp_layout()` beside it, for the same reason. `choose_layout()` is therefore called for *every* slide, including a cover and a slide of pure text, since the plan is what gets published as much as what gets dispatched on.
+3. `reveal.py` — reads a slide's *steps* off it: the ``+++`` markers, or every top-level list item under `reveal: lists`. Returns the Markdown to render — markers blanked, never deleted, so every line number after one is still the line the fold names — together with the line each step begins at. It also marks a rendered fragment (`mark_hidden`, `expand`), which it can do without knowing any HTML because it works off the `data-src-line` stamps the renderer already writes. Imports the splitter's `_fence_aware_split` rather than restating what a code fence is.
+4. `renderer.py` — converts Markdown fragments to HTML using `markdown-it-py` with optional Pygments syntax highlighting. **The two post-render passes match a block's attributes rather than assuming it has none.** They did not, and every build stamps `data-src-line` on every block — so `<pre><code data-src-line="7" class="language-python">` matched neither the highlighter's pattern nor the callout's, and a real build shipped unhighlighted code and a blockquote reading `[!tip]` out loud. Only the preview, which passes no line offsets, ever saw either feature work. Both now carry the stamp onto the element they produce, because that is what a fold names and what a reveal step hides.
+5. `css.py` — builds the full CSS string from a `Theme` object via `build_css(theme, width, height, logo_b64)`. Colour values from theme files are validated against an allowlist to prevent CSS injection.
+6. `layout.py` — decides how a slide is laid out: `choose_layout(cleaned_md, images, aspects, side_ordinal)` returns one of `text`, `bleed`, `single`, `pair`, `gallery`. It picks a width from how much text shares the slide (`auto_size`: half and half until the words stop fitting in half a slide), whether each gallery cell crops or letterboxes (`cell_fit`), and whether two portraits should flank it. **A lone picture goes beside the words, never behind them** — only a slide with no text at all gets a full-bleed image, because there is nothing to set it beside. A picture is shown as it is: the gradient that used to wash the theme's background across its edge, and the 75% opacity that faded the whole thing, both existed to keep a caption legible on a photograph and went when the caption did. `AUTO_IMAGE_LAYOUT` has no `gradient` or `fade` key, `css.py` no rule to honour one, and `opacity` is 100 — which is what the gallery always rendered at, since it never read the value. Which side it takes alternates down the deck (`single_side`), and that is the one thing here that is not a function of the slide's own content: `side_ordinal` counts the lone pictures before it, so `html.py` must count them over *every* slide, before its `only_index` skip, or a single-slide render and the build would put the same picture on opposite sides. Shapes come from `utils.image_aspect()`, which reads the header via Pillow cached on mtime, so the live render can afford it. `AUTO_IMAGE_LAYOUT` is the single owner of what an automatically placed image looks like — no other module may read a treatment value off a parsed image. **Every plan also carries what it was decided from** — `text` (`none`/`short`/`long`, from `text_weight()` over the same 40-word threshold `auto_size()` uses), `images`, and `shapes` (`shape_of()` per picture) — because a stylesheet can neither count words nor read an image header, and without them a theme could not arrive at an arrangement of its own. Those are facts, not decisions: nothing here branches on `shapes` except the portrait test that earns the pair.
+7. `html.py` — assembles the complete HTML document; dispatches to per-slide-type renderers (`_render_title_slide`, `_render_normal_slide`, `_render_image_slide`, `_render_two_image_slide`, `_render_gallery_slide`) according to the layout plan. Gallery rows carry an inline pixel height: indefinite rows collapse images set to `height:100%`, which renders the whole grid empty. Every slide div is stamped with `data-slide-index` by `_stamp_slide_index()` at the dispatch site, not in the five renderers, so a new layout cannot be added without it — and with `data-layout`, `data-text`, `data-images` and `data-shapes` by `_stamp_layout()` beside it, for the same reason. `choose_layout()` is therefore called for *every* slide, including a cover and a slide of pure text, since the plan is what gets published as much as what gets dispatched on. With `reveal=True` a slide holding steps is written out once per step, stamped `data-step` / `data-steps` by `_stamp_step()` beside the others.
 
 **A measurement is a custom property; an arrangement is a rule.** Panel geometry, the gallery's tracks, a cell's `object-fit` and the progress bar's width used to be written onto the element as inline styles, which outrank every selector — so the arrangement was not a theme's to change, whatever the stylesheet said. `_image_geometry()` now returns only `--p-img-size` and `--p-img-pad`, and `css.py` holds the rules that read them, keyed on `data-img-pos` and `data-split`. The remaining inline styles in a rendered deck are custom properties and nothing else; `test_layout_attrs.py` fails if a raw `width`, `padding`, `object-fit`, `opacity` or grid track goes back inline. The one value a theme must leave definite is `grid-auto-rows`: an image at `height:100%` in an indefinite row collapses and empties the grid.
-7. `themes.py` / `theme_loader.py` — `Theme` dataclass and discovery of theme directories.
-8. `pagination.py` — what can be read back off a page WeasyPrint has already laid out: which page each slide starts on, which slides were fragmented, where each slide's fold falls, and the PDF built from the slide pages alone. Pure WeasyPrint, no GTK, because both engines need it.
-9. `diagnostics.py` — the sentences a finished build has to say. Overflowing slides, pictures that did not resolve, a theme that is not installed: each produces a slide that looks deliberate, so none can be left to the rendering to convey. One function over one set of facts, so the CLI's stderr and the window's banner agree about the same deck.
-10. `thumbnails.py` / `thumbnails_render.py` — PDF-to-picture rendering, by Poppler and Cairo. `render_thumbnails()` (strip), `render_slides_hires()` (image and handout export) and `render_page_png()` (one page, for the strip's live row and the slideshow) all take an optional `pages` list saying which PDF page each slide starts on.
-11. `handout.py` — the talk as a document: each slide's picture with the `^^^` script beneath it, images inlined as data URIs. Deliberately unthemed — a theme is display type for a room, a handout is read at arm's length.
+8. `themes.py` / `theme_loader.py` — `Theme` dataclass and discovery of theme directories.
+9. `pagination.py` — what can be read back off a page WeasyPrint has already laid out: which page each slide starts on and which page each of its reveal steps is on, which slides were fragmented, where each slide's fold falls, and the PDF built from those pages alone. `page_the_deck()` does all of it in the one order that gets right answers, so both engines take the same steps rather than each keeping its own copy of them. Pure WeasyPrint, no GTK, because both engines need it.
+10. `diagnostics.py` — the sentences a finished build has to say. Overflowing slides, pictures that did not resolve, a theme that is not installed: each produces a slide that looks deliberate, so none can be left to the rendering to convey. One function over one set of facts, so the CLI's stderr and the window's banner agree about the same deck.
+11. `thumbnails.py` / `thumbnails_render.py` — PDF-to-picture rendering, by Poppler and Cairo. `render_thumbnails()` (strip), `render_slides_hires()` (image and handout export) and `render_page_png()` (one page, for the strip's live row and the slideshow) all take an optional `pages` list saying which PDF page each slide starts on.
+12. `handout.py` — the talk as a document: each slide's picture with the `^^^` script beneath it, images inlined as data URIs. Deliberately unthemed — a theme is display type for a room, a handout is read at arm's length.
 
 **`src/presence/`** (GTK 4 / Libadwaita frontend):
 
@@ -195,6 +196,58 @@ permanently. `test_recovery.py` pins all of it; `tests/test_session.py` is mode
 
 **The fold marker.** A slide is a fixed 1280x720 box with `overflow: hidden`, so a layout knows exactly where each slide runs out of room. `renderer.py` stamps every block with `data-src-line` (slide start line from `compute_slide_start_lines()`, plus the block's line within the slide), and after layout `pagination.measure_folds()` walks WeasyPrint's box tree for the topmost block crossing the slide's text area. Both the build and the live render measure this, from the same engine, so they agree; `BuildCoordinator` keeps the live answer for the slide being edited and the build's for the rest, which is why the rule now moves as you type rather than waiting for a build. The editor draws it anchored to a `Gtk.TextMark` so it follows the content while you edit. Measured against the content box, not the page edge, because themes reserve the lower padding for the slide number and progress bar.
 
+**Holding part of a slide back.** A slide arrives complete, so the room reads
+all six bullets in two seconds and stops listening while the speaker is still
+on the first — which is the presenter view's script-first design arguing with
+the deck it renders. `+++` on its own line holds the rest of the slide back;
+`reveal: lists` (frontmatter, or `<!-- reveal: lists -->` on one slide, and
+`<!-- reveal: none -->` to opt out) steps a list item by item instead.
+
+**A step is a page, not a re-render.** The slide is laid out once, and each
+step is that one fragment with the blocks that have not arrived yet carrying
+`.not-yet` — `visibility: hidden` in the generated stylesheet, which WeasyPrint
+keeps the box for and paints nothing of, and does not put in the PDF's text
+either. So the blocks that *have* arrived cannot move as the rest lands, the
+fold and the fragmentation check give the same answer at every step, and
+`choose_layout()` sees one slide however many times it is written out. A theme
+may redefine `.not-yet` — dimming what is coming instead of hiding it is a
+house style's decision — and `[data-step]` is on the slide div to key it on.
+
+**The markers are removed whether or not anything acts on them.** `+++`
+becomes a *blank line*, never nothing: every line after it is a fold
+measurement and an editor position. Between blocks a blank line is already
+there, so a slide with markers renders exactly as the same slide without them —
+`tests/test_reveal.py` pins that identity. Between two list items it does not,
+which is the whole reason the list directive exists rather than asking the
+writer to put `+++` between bullets. The same applies to `<!-- key: value -->`
+directives, which `strip_slide_directives()` now takes out: raw HTML is off in
+the renderer, so an unremoved one reached the slide as that literal text.
+
+**Text reveals; pictures do not.** A step is marked on the blocks the renderer
+stamped, and `extract_images()` takes image tags out of the Markdown before any
+of that, so an automatically placed picture carries no source line and arrives
+with its slide. Steps run in document order across a `|||` split, which is the
+order they were written in rather than column by column.
+
+**Stops, not slides.** The advance key moves through *stops* — one per slide
+until a slide reveals, then one per step — and everything that describes the
+talk goes on counting slides: the script, the schedule, the progress dots, the
+title, the timing. `presenter._stops_from()` builds both lists off
+`slide_info["step_pages"]`, `SlideshowWindow` deals only in stops
+(`show_step()`), and the presenter keeps `_pos` (stop) beside `_current`
+(slide). Right/space walk steps; **Down and Up move by slide**, past whatever
+it is still holding back. The "Next" pane shows the next *stop* and renames
+itself "Next step" when that is what it is — its picture comes off the built
+PDF by page, because the strip's thumbnails are per slide and cannot answer
+for a step.
+
+**What steps and what collapses.** The PDF and the HTML deck are the talk as
+it was given, so they carry a page per step — a stepped PDF is also what you
+present from on somebody else's laptop. The exported images and the handout
+are materials *about* the talk and take each slide complete, one per slide;
+both index by `slide_info["page_index"]`, which is now **the page showing the
+slide complete — its last step** — so neither needed changing.
+
 **A PDF page is not a slide, so the PDF drops the pages that are not slides.** WeasyPrint fragments a block that does not fit rather than clipping it, so a slide with too much text emits a continuation page — a headerless remainder starting mid-sentence, sometimes followed by a page carrying nothing but the theme's footer — and the deck's page count exceeds its slide count. No CSS fixes the fragmentation: `overflow: clip`, `break-inside: avoid` and a `max-height` wrapper were all tried.
 
 `slides/pagination.py` owns what is read back off a laid-out page, because both engines need it and the CLI must not import GTK. `slide_page_indices()` reads the `data-slide-index` stamps off the box tree and records, per slide, the page it starts on. `slide_pages_pdf()` then writes the PDF from exactly those pages and returns the bytes **together with the page numbering inside them** — `range(n_slides)` when the trim succeeded, the original list when it could not, so nothing downstream has to assume which it got. That list lands in `slide_info["page_index"]` and is what the thumbnail strip, the image export, the handout and the slideshow all index by.
@@ -250,7 +303,12 @@ A buffer replaced wholesale is not an edit and is not debounced: `Editor.set_tex
 | `---` on its own line | Slide separator |
 | `\|\|\|` on its own line | Two-column split within a slide |
 | `^^^` on its own line | Speaker notes separator |
+| `+++` on its own line | Reveal step; the rest of the slide waits |
 | `![description](src)` | Image; the slide decides where it goes |
+
+`reveal: lists` — in the frontmatter for the deck, or `<!-- reveal: lists -->`
+for one slide — steps every top-level list item instead. A slide may opt out
+of a deck-wide setting with `<!-- reveal: none -->`.
 
 ## Theme system
 

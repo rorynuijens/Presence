@@ -20,8 +20,7 @@ from .css          import build_css
 from .splitter import split_slides, is_title_slide
 from .html         import md_to_html_slides
 from .thumbnails   import build_thumbnail_index
-from .pagination   import (slide_page_indices, slide_pages_pdf,
-                           measure_folds, fragmented_slides)
+from .pagination   import page_the_deck
 from .diagnostics  import build_warnings
 from .utils        import (encode_logo, safe_subpath,
                            compute_slide_start_lines)
@@ -147,6 +146,11 @@ def convert(
             # what the window does — the numbers name lines in the file the
             # writer has open.
             line_offsets=compute_slide_start_lines(raw_text),
+            # The PDF and the HTML deck are the talk as it was given, so a
+            # slide that reveals gets a page per step.  The handout and the
+            # exported images are materials *about* the talk and take each
+            # slide complete; both read page_index, which is the last step.
+            reveal=True,
         )
 
         # ── 7. Write HTML ──────────────────────────────────────────────────────
@@ -167,27 +171,23 @@ def convert(
         ).render()
 
         n_slides = len(slides)
-        # Where each slide landed before anything is dropped: a slide that
-        # overflows leaves a continuation page behind it, so from there on
-        # the n-th page is no longer the n-th slide.
-        laid_out = slide_page_indices(document, n_slides)
-
-        for info, fold in zip(slide_info,
-                              measure_folds(document, n_slides, laid_out)):
-            info["fold_line"] = fold
-        # Measured before the trim, which is the only moment the extra pages
-        # still exist to be counted.
-        for index in fragmented_slides(document, laid_out):
-            slide_info[index]["clipped"] = True
-
-        # The continuation pages are not slides — they are a headerless
+        # Everything the laid-out document has to be asked, in the one order
+        # that gets right answers; see pagination.page_the_deck.  The
+        # continuation pages it drops are not slides — they are a headerless
         # remainder starting mid-sentence, and sometimes a page holding
         # nothing but the footer.  A slide is overflow:hidden, so the deck
         # shows what fits; the file handed to a reader now says the same.
-        pdf_bytes, pages = slide_pages_pdf(document, laid_out)
-        output_path.write_bytes(pdf_bytes)
-        for info, page in zip(slide_info, pages):
-            info["page_index"] = page
+        paged = page_the_deck(document, n_slides)
+
+        for index, (info, fold, steps) in enumerate(
+                zip(slide_info, paged.folds, paged.steps)):
+            info["fold_line"]  = fold
+            info["page_index"] = steps[-1]
+            info["step_pages"] = steps
+            if index in paged.fragmented:
+                info["clipped"] = True
+
+        output_path.write_bytes(paged.pdf)
         log.info("PDF written: %s", output_path)
 
         # Nothing here stops a deck being produced, and none of it is

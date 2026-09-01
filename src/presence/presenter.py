@@ -23,16 +23,32 @@ from .slides.script import (
 from .slides.thumbnails_render import render_page_png, render_slides_hires
 
 
-def _slide_pages_from(slide_info: list) -> "list[int] | None":
+def _stops_from(slide_info: list) -> "tuple[list[tuple[int, int]], list[int]]":
     """
-    The PDF page each slide starts on, or None if the build did not say.
+    Every stop of the talk: which slide it belongs to, and its PDF page.
 
-    A build made before slides carried a page index gives Nones here; the
-    slideshow then falls back to one page per slide, which is what that build
-    assumed anyway.
+    A stop is a press of the advance key.  Nearly always that is a slide,
+    but a slide with reveal steps has one stop per step and the audience
+    screen has a page for each, so navigation counts stops and everything
+    that describes the talk — the script, the schedule, the dots — keeps
+    counting slides.
+
+    A build made before slides carried a page index gives no pages at all;
+    the slideshow then falls back to one page per slide, which is what that
+    build assumed anyway.
     """
-    pages = [info.get("page_index") for info in slide_info]
-    return pages if pages and all(p is not None for p in pages) else None
+    if not all(info.get("page_index") is not None for info in slide_info):
+        return ([(index, 0) for index in range(len(slide_info))],
+                list(range(len(slide_info))))
+
+    stops: list[tuple[int, int]] = []
+    pages: list[int] = []
+    for index, info in enumerate(slide_info):
+        for step, page in enumerate(info.get("step_pages")
+                                    or [info["page_index"]]):
+            stops.append((index, step))
+            pages.append(page)
+    return stops, pages
 
 
 # ── SlideshowWindow ───────────────────────────────────────────────────────────
@@ -74,9 +90,9 @@ class SlideshowWindow(Adw.Window):
     because the main window is far likelier to be on the first.
     """
 
-    def __init__(self, pdf_path, n_slides: int,
+    def __init__(self, pdf_path, n_steps: int,
                  presenter_window: "PresenterWindow",
-                 parent_window, slide_pages=None, **kwargs) -> None:
+                 parent_window, step_pages=None, **kwargs) -> None:
         super().__init__(**kwargs)
         self.set_title("Slideshow")
         self.set_default_size(1280, 720)
@@ -86,7 +102,9 @@ class SlideshowWindow(Adw.Window):
 
         self._pdf_path         = Path(pdf_path) if pdf_path else None
         self._pdf_bytes: bytes | None = None
-        self._n_slides         = n_slides
+        # Stops, not slides: a slide that reveals in steps has one of these
+        # per step, and this window shows one page for each of them.
+        self._n_steps          = n_steps
         self._presenter        = presenter_window
         self._parent_window    = parent_window
         self._pending          = 0
@@ -95,17 +113,17 @@ class SlideshowWindow(Adw.Window):
         self._monitor_index: int | None = None
         self._closing              = False   # True when close_by_presenter() called
         self._monitors_handler     = None    # GLib signal handler id
-        # One rendered page per slide, filled in by load(); None until the
-        # background pass reaches that slide.
-        self._pages: list = [None] * max(0, n_slides)
-        # Which page of the built PDF each slide is on.  The build drops the
+        # One rendered page per stop, filled in by load(); None until the
+        # background pass reaches it.
+        self._pages: list = [None] * max(0, n_steps)
+        # Which page of the built PDF each stop is on.  The build drops the
         # continuation pages an overflowing slide leaves behind, so this is
-        # normally the slide's own index — but it is still passed in rather
+        # normally the stop's own index — but it is still passed in rather
         # than assumed, because a trim that could not be taken falls back to
         # the whole document.  See slides/pagination.slide_pages_pdf.
-        self._slide_pages: list = (
-            list(slide_pages) if slide_pages
-            else list(range(max(0, n_slides)))
+        self._step_pages: list = (
+            list(step_pages) if step_pages
+            else list(range(max(0, n_steps)))
         )
         self._render_w: int = 1920
         self._blanked: bool = False
@@ -346,7 +364,7 @@ class SlideshowWindow(Adw.Window):
             return
         try:
             pages = render_slides_hires(pdf_bytes, self._render_w,
-                                        pages=self._slide_pages)
+                                        pages=self._step_pages)
         except Exception as e:
             log.warning("Slideshow pre-render failed: %s", e)
             return
@@ -363,9 +381,14 @@ class SlideshowWindow(Adw.Window):
             self._show_page(self._pending)
         return GLib.SOURCE_REMOVE
 
-    def show_slide(self, index: int) -> None:
-        """Show *index*, rendering it on the spot if the prefetch has not."""
-        index = max(0, min(index, self._n_slides - 1))
+    def show_step(self, index: int) -> None:
+        """
+        Show stop *index*, rendering it on the spot if the prefetch has not.
+
+        A stop, not a slide: a slide revealed in three steps is three of
+        these, and the presenter counts them so this window does not have to.
+        """
+        index = max(0, min(index, self._n_steps - 1))
         self._pending = index
         self._blanked = False
         self._apply_surround("#000000")
@@ -388,9 +411,9 @@ class SlideshowWindow(Adw.Window):
             self._picture.set_paintable(texture)
 
     def _page_for(self, index: int) -> int:
-        """The PDF page holding slide *index*."""
-        if 0 <= index < len(self._slide_pages):
-            return self._slide_pages[index]
+        """The PDF page holding stop *index*."""
+        if 0 <= index < len(self._step_pages):
+            return self._step_pages[index]
         return index
 
     def set_blank(self, colour: str | None) -> None:
@@ -485,6 +508,17 @@ class PresenterWindow(Adw.Window):
         self._current     = 0
         self._n_slides    = len(slide_info)
         self._elapsed     = 0
+        # Where the advance key stops, and which of them belongs to which
+        # slide.  One stop per slide until a slide reveals in steps.
+        self._stops, self._step_pages = _stops_from(slide_info)
+        self._pos         = 0
+        self._first_stop  = [self._stops.index((index, 0))
+                             if (index, 0) in self._stops else index
+                             for index in range(len(slide_info))]
+        # Step pictures are rendered from the built PDF the first time they
+        # are wanted; the per-slide thumbnails cannot answer for a step.
+        self._step_pngs: dict[int, bytes] = {}
+        self._pdf_bytes: bytes | None = None
         self._timer_src   = None
         self._blank_color: str = ""   # "" = not blanked, "black" or "white" (#91)
         self._monitors_handler = None
@@ -514,8 +548,8 @@ class PresenterWindow(Adw.Window):
 
         self._slideshow = SlideshowWindow(
             pdf_path=pdf_path,
-            slide_pages=_slide_pages_from(slide_info),
-            n_slides=self._n_slides,
+            step_pages=self._step_pages,
+            n_steps=len(self._stops),
             presenter_window=self,
             parent_window=parent_window,
         )
@@ -865,13 +899,17 @@ class PresenterWindow(Adw.Window):
         left.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
 
         # Next slide thumbnail
-        next_lbl = Gtk.Label(label="Next slide")
-        next_lbl.add_css_class("thumb-label")
-        next_lbl.set_xalign(0)
-        next_lbl.set_margin_top(12)
-        next_lbl.set_margin_start(12)
-        next_lbl.set_margin_bottom(4)
-        left.append(next_lbl)
+        # Named on every move rather than fixed: on a slide that reveals,
+        # what this pane shows is the next *step* of the slide already on the
+        # screen, and calling that the next slide would be a lie the speaker
+        # reads mid-sentence.
+        self._next_label = Gtk.Label(label="Next slide")
+        self._next_label.add_css_class("thumb-label")
+        self._next_label.set_xalign(0)
+        self._next_label.set_margin_top(12)
+        self._next_label.set_margin_start(12)
+        self._next_label.set_margin_bottom(4)
+        left.append(self._next_label)
 
         self._next_picture = Gtk.Picture()
         self._next_picture.set_content_fit(Gtk.ContentFit.CONTAIN)
@@ -980,27 +1018,33 @@ class PresenterWindow(Adw.Window):
         return GLib.SOURCE_REMOVE
 
     def _go_to(self, index: int) -> None:
+        """Go to the beginning of slide *index*, whatever it reveals."""
         if not self._slide_info:
             return
         index = max(0, min(index, self._n_slides - 1))
+        self._go_to_stop(self._first_stop[index])
+
+    def _go_to_stop(self, pos: int) -> None:
+        if not self._stops:
+            return
+        pos = max(0, min(pos, len(self._stops) - 1))
+        self._pos = pos
+        index, step = self._stops[pos]
         self._current = index
 
         # Drive the audience screen through SlideshowWindow — the
         # presenter screen shows thumbnails and notes, not a rendered page.
-        self._slideshow.show_slide(index)
+        self._slideshow.show_step(pos)
 
-        # Current slide thumbnail
-        if index < len(self._thumbnails) and self._thumbnails[index]:
-            self._set_thumbnail(self._current_picture, self._thumbnails[index])
-        else:
-            self._current_picture.set_paintable(None)
-
-        # Next slide thumbnail
-        next_idx = index + 1
-        if next_idx < len(self._thumbnails) and self._thumbnails[next_idx]:
-            self._set_thumbnail(self._next_picture, self._thumbnails[next_idx])
-        else:
-            self._next_picture.set_paintable(None)
+        # What is on the screen now, and what the next press will put there.
+        # Not "the next slide" when this one is still arriving: what the
+        # speaker needs to see is what comes next, whatever it is part of.
+        self._set_thumbnail(self._current_picture, self._picture_for(pos))
+        self._set_thumbnail(self._next_picture, self._picture_for(pos + 1))
+        coming = (self._stops[pos + 1][0] if pos + 1 < len(self._stops)
+                  else None)
+        self._next_label.set_label("Next step" if coming == index
+                                   else "Next slide")
 
         # Slide title above the script — the section heading says the same
         # thing, but it scrolls away and this does not.
@@ -1011,10 +1055,50 @@ class PresenterWindow(Adw.Window):
         self._update_slide_time()
         self._update_pace()
 
-        self._counter_label.set_text(f"{index + 1} / {self._n_slides}")
+        # The deck is counted in slides; the steps of one are said beside it,
+        # because "4 / 20" jumping nowhere on three presses reads as broken.
+        steps = self._steps_of(index)
+        counter = f"{index + 1} / {self._n_slides}"
+        if steps > 1:
+            counter += f" · {step + 1} of {steps}"
+        self._counter_label.set_text(counter)
         # Guard against drawing before the widget has been allocated
         if self._progress_bar.get_realized():
             self._progress_bar.queue_draw()
+
+    def _steps_of(self, index: int) -> int:
+        """How many stops slide *index* takes."""
+        return sum(1 for slide, _step in self._stops if slide == index)
+
+    def _picture_for(self, pos: int) -> "bytes | None":
+        """
+        The picture of stop *pos*, or None when there is nothing after the end.
+
+        A slide that does not reveal is its build thumbnail, which is already
+        rasterized.  A step has no thumbnail of its own — the strip shows
+        slides — so it is rendered off the built PDF the first time it is
+        asked for and kept.
+        """
+        if not 0 <= pos < len(self._stops):
+            return None
+        index, _step = self._stops[pos]
+        if self._steps_of(index) == 1:
+            return (self._thumbnails[index]
+                    if index < len(self._thumbnails) else None)
+
+        if pos not in self._step_pngs:
+            if self._pdf_bytes is None and self._pdf_path is not None:
+                try:
+                    self._pdf_bytes = Path(self._pdf_path).read_bytes()
+                except OSError as exc:
+                    log.warning("Presenter could not read the built PDF: %s", exc)
+                    self._pdf_path = None
+            png = None
+            if self._pdf_bytes is not None and pos < len(self._step_pages):
+                png = render_page_png(self._pdf_bytes,
+                                      self._step_pages[pos], 432)
+            self._step_pngs[pos] = png
+        return self._step_pngs[pos]
 
     def _draw_progress(self, area: Gtk.DrawingArea, cr,
                        width: int, height: int) -> None:
@@ -1281,10 +1365,25 @@ class PresenterWindow(Adw.Window):
         )
 
     def _next(self) -> None:
-        self._go_to(self._current + 1)
+        """The next thing to show: the rest of this slide, or the next one."""
+        self._go_to_stop(self._pos + 1)
 
     def _prev(self) -> None:
-        self._go_to(self._current - 1)
+        self._go_to_stop(self._pos - 1)
+
+    def _next_slide(self) -> None:
+        """Skip whatever this slide is still holding back."""
+        self._go_to(self._current + 1)
+
+    def _prev_slide(self) -> None:
+        """
+        Back to the top of this slide, or to the one before it.
+
+        Where Left walks back through the reveals, Up leaves them: a speaker
+        going back a slide wants the slide, not its last step.
+        """
+        self._go_to(self._current - 1 if self._pos == self._first_stop[self._current]
+                    else self._current)
 
     def _toggle_blank(self, color: str) -> None:
         """Toggle a solid black or white screen on the slideshow (#91).
@@ -1416,6 +1515,14 @@ class PresenterWindow(Adw.Window):
         if keyval in (Gdk.KEY_Left, Gdk.KEY_Page_Up, Gdk.KEY_BackSpace):
             self._prev()
             return True
+        # Down and Up move by slide, past whatever it is still revealing —
+        # the way out when the room has read ahead of the build anyway.
+        if keyval == Gdk.KEY_Down:
+            self._next_slide()
+            return True
+        if keyval == Gdk.KEY_Up:
+            self._prev_slide()
+            return True
         if keyval == Gdk.KEY_Escape:
             # Presenter uses maximize(), not fullscreen(). Escape always closes.
             self.close()
@@ -1423,9 +1530,9 @@ class PresenterWindow(Adw.Window):
         return False
 
     def _set_thumbnail(self, picture: Gtk.Picture,
-                        png_bytes: bytes) -> None:
-        """Load *png_bytes* into *picture*, clearing on failure."""
-        texture = png_bytes_to_texture(png_bytes)
+                        png_bytes: "bytes | None") -> None:
+        """Load *png_bytes* into *picture*, clearing on failure or on None."""
+        texture = png_bytes_to_texture(png_bytes) if png_bytes else None
         picture.set_paintable(texture)  # None clears the picture on failure
 
     def do_close_request(self) -> bool:

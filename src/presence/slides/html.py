@@ -96,7 +96,8 @@ from .renderer    import render_slide_content
 from .layout      import (AUTO_IMAGE_LAYOUT, PAIR_SIZE, choose_layout,
                           cell_fit, shape_of)
 from .utils       import image_aspect, image_is_missing
-from .frontmatter import extract_slide_directives
+from .frontmatter import extract_slide_directives, strip_slide_directives
+from .            import reveal as _reveal
 from .utils       import logo_img_tag, progress_bar_html
 
 
@@ -141,6 +142,19 @@ def _stamp_layout(html_frag: str, plan) -> str:
     return _stamp_slide_attrs(html_frag, attrs)
 
 
+def _stamp_step(html_frag: str, step: int, steps: int) -> str:
+    """
+    Say which of a slide's reveal steps this copy is.
+
+    Only ever written on a slide that has more than one, so a deck that
+    reveals nothing carries not one attribute it did not carry before.  A
+    theme can read it — ``[data-step] .not-yet`` is how a house style dims
+    what has not arrived instead of hiding it.
+    """
+    return _stamp_slide_attrs(
+        html_frag, f' data-step="{step}" data-steps="{steps}"')
+
+
 def md_to_html_slides(
     slides:   list[str],
     css:      str,
@@ -153,6 +167,7 @@ def md_to_html_slides(
     base_url: "str | None" = None,
     only_index: "int | None" = None,
     line_offsets: "list[int] | None" = None,
+    reveal: bool = False,
 ) -> tuple[str, list[dict]]:
     """
     Render all slides to a complete HTML string.
@@ -170,6 +185,14 @@ def md_to_html_slides(
     *line_offsets* gives each slide's starting line in the source document.
     When present, blocks carry ``data-src-line``, so a layout measurement of
     the rendered page can name the line that overflows.
+
+    With *reveal* set, a slide holding step markers is written out once per
+    step — the same fragment each time, with the blocks that have not
+    arrived yet marked — so the paged engine can give the room one page per
+    step.  Off by default, and off for anything unpaged: the live render and
+    the exported HTML show each slide complete, and a deck that reveals
+    nothing produces byte-identical markup either way.  Steps need
+    *line_offsets*, which is what the blocks are marked by.
     """
     slide_htmls = []
     slide_info  = []
@@ -190,6 +213,13 @@ def md_to_html_slides(
         # Extract per-slide directives (e.g. <!-- theme: dark -->)
         directives = extract_slide_directives(slide_body)
         theme_override = directives.get("theme", "")
+
+        # Read before anything else looks at the text: a step marker left in
+        # would be a paragraph reading "+++" on the slide and a word in the
+        # count that picks the layout.  The lines come back numbered within
+        # the very string the renderer is about to be handed.
+        cleaned_md, step_lines = _reveal.plan(
+            strip_slide_directives(cleaned_md), directives, meta)
 
         slide_info.append({
             "title": infer_slide_title(slide_body, fallback=f"Slide {i + 1}"),
@@ -291,8 +321,19 @@ def md_to_html_slides(
         # content overflows its box makes WeasyPrint emit a continuation
         # page, so a PDF page number is not a slide number; this is what
         # lets the build say which page each slide actually starts on.
-        slide_htmls.append(
-            _stamp_slide_index(_stamp_layout(html_frag, plan), i))
+        stamped = _stamp_slide_index(_stamp_layout(html_frag, plan), i)
+
+        # One copy per step, each hiding what has not been reached yet.  The
+        # boundaries are moved into the document's own line numbering, which
+        # is what the blocks were stamped with.
+        steps = ([line_offset + line for line in step_lines]
+                 if reveal and line_offset is not None else [])
+        if steps:
+            slide_info[i]["steps"] = len(steps) + 1
+            for step, frag in enumerate(_reveal.expand(stamped, steps)):
+                slide_htmls.append(_stamp_step(frag, step, len(steps) + 1))
+        else:
+            slide_htmls.append(stamped)
 
     lang = _html.escape(str(meta.get("lang", "en")) or "en")
     document = f"""<!DOCTYPE html>

@@ -16,6 +16,7 @@ that, and the CLI must not import GTK, so it lives here rather than in
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +59,50 @@ def slide_page_indices(document, n_slides: int) -> list[int]:
         log.debug("Slide/page mapping failed", exc_info=True)
 
     return [found.get(i, i) for i in range(n_slides)]
+
+
+def step_page_indices(document, n_slides: int) -> list[list[int]]:
+    """
+    The PDF page of every reveal step, slide by slide.
+
+    A slide with no steps has one page and answers with a one-element list,
+    which is what every deck written before this existed answers with — so
+    the flattened result is exactly :func:`slide_page_indices`' answer and
+    the rest of the build cannot tell the difference.
+
+    Read from the same stamps and in the same pass: ``data-slide-index``
+    says whose page this is and ``data-step`` says which of its steps, so a
+    step's continuation pages fall away for the same reason a slide's do.
+    """
+    found: dict[tuple[int, int], int] = {}
+    try:
+        for page_number, page in enumerate(document.pages):
+            for box in walk_boxes(page._page_box):
+                element = getattr(box, "element", None)
+                if element is None or not hasattr(element, "get"):
+                    continue
+                raw = element.get("data-slide-index")
+                if raw is None:
+                    continue
+                try:
+                    index = int(raw)
+                    step  = int(element.get("data-step") or 0)
+                except ValueError:
+                    continue
+                found.setdefault((index, step), page_number)
+                break
+    except Exception:
+        log.debug("Slide/step/page mapping failed", exc_info=True)
+
+    if not found:
+        return [[i] for i in range(n_slides)]
+
+    steps: list[list[int]] = []
+    for index in range(n_slides):
+        pages = [page for (slide, _step), page in sorted(found.items())
+                 if slide == index]
+        steps.append(pages or [index])
+    return steps
 
 
 def fragmented_slides(document, pages: list[int]) -> list[int]:
@@ -119,6 +164,65 @@ def slide_pages_pdf(document, pages: list[int]) -> "tuple[bytes, list[int]]":
                     exc_info=True)
 
     return document.write_pdf(), list(pages)
+
+
+# ── The whole read-back, in one order ────────────────────────────────────────
+
+@dataclass(frozen=True)
+class Paged:
+    """What a laid-out deck turns out to be, once it has been read back."""
+
+    pdf:        bytes
+    steps:      list[list[int]]      # per slide, the page of each of its steps
+    folds:      list[int | None]     # per slide, the line that runs over
+    fragmented: list[int]            # slides that needed a second page
+
+    @property
+    def pages(self) -> list[int]:
+        """The page showing each slide complete — its last step."""
+        return [s[-1] for s in self.steps]
+
+
+def page_the_deck(document, n_slides: int) -> Paged:
+    """
+    Read a laid-out document back, and write the PDF the deck is made of.
+
+    One function because the order is the whole difficulty, and both engines
+    have to take the steps in it:
+
+    1. Where every slide and every step of one landed, *before* anything is
+       dropped — a slide that overflows leaves a continuation page behind
+       it, and from there on the n-th page is not the n-th slide.
+    2. The folds, off each slide's own first page.  Reading them in page
+       order would blame a continuation page's overrun on the next slide and
+       leave the one that really overflowed unmarked, and they can only be
+       measured on the untrimmed document, which is the only place the
+       overrun is still visible.
+    3. Which slides fragmented — asked of the step pages rather than the
+       slide pages, because two steps of one slide are two pages on purpose
+       and would otherwise read as an overflow on every revealed slide.
+    4. The PDF, from the step pages alone.
+    """
+    steps    = step_page_indices(document, n_slides)
+    flat     = [page for slide in steps for page in slide]
+    owner    = [index for index, slide in enumerate(steps) for _ in slide]
+
+    folds      = measure_folds(document, n_slides, [s[0] for s in steps])
+    fragmented = sorted({owner[i] for i in fragmented_slides(document, flat)
+                         if i < len(owner)})
+
+    pdf_bytes, pages = slide_pages_pdf(document, flat)
+
+    renumbered: list[list[int]] = [[] for _ in range(n_slides)]
+    for position, page in enumerate(pages):
+        if position < len(owner):
+            renumbered[owner[position]].append(page)
+    for index, slide in enumerate(renumbered):
+        if not slide:
+            slide.append(index)
+
+    return Paged(pdf=pdf_bytes, steps=renumbered,
+                 folds=folds, fragmented=fragmented)
 
 
 # ── The fold: where a slide runs out of room ─────────────────────────────────

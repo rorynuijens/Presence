@@ -114,6 +114,26 @@ def extract_slide_directives(slide_md: str) -> dict[str, str]:
     }
 
 
+# The same comment, matched from its own line so that removing it cannot eat
+# the blank lines above it.
+_DIRECTIVE_LINE_RE = re.compile(
+    r'^([ \t]*)<!--\s*[\w-]+\s*:\s*.+?-->[ \t]*', re.MULTILINE
+)
+
+
+def strip_slide_directives(slide_md: str) -> str:
+    """
+    *slide_md* without the directives, and with its line numbering intact.
+
+    A directive is an instruction to the engine, not something the room is
+    meant to read — but Markdown is rendered with raw HTML off, so an
+    unremoved ``<!-- theme: dark -->`` reached the slide as that literal
+    text.  Only the comment is taken, never the line, because every line
+    number after it is a fold measurement and a reveal step boundary.
+    """
+    return _DIRECTIVE_LINE_RE.sub(r'\1', slide_md)
+
+
 def _normalise(meta: dict) -> dict:
     if "ratio" in meta:
         raw = meta["ratio"]

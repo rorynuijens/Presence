@@ -50,6 +50,7 @@ class _SlideFacts:
     title:     str
     timing:    Timing
     has_notes: bool
+    steps:     int = 1      # stops the slide takes, counting its reveals
 
 
 @dataclass(frozen=True)
@@ -137,19 +138,27 @@ def read_slides(markdown_text: str, wpm: int = 110) -> "list[_SlideFacts]":
     """
     from .slides.splitter import (split_slides, infer_slide_title,
                                   extract_speaker_notes, extract_images)
-    from .slides.frontmatter import parse_frontmatter
+    from .slides.frontmatter import (parse_frontmatter, extract_slide_directives,
+                                     strip_slide_directives)
+    from .slides import reveal
 
-    _meta, body = parse_frontmatter(markdown_text)
+    meta, body = parse_frontmatter(markdown_text)
 
     facts: list[_SlideFacts] = []
     for i, slide_md in enumerate(split_slides(body)):
         slide_body, notes = extract_speaker_notes(slide_md)
         cleaned, _images  = extract_images(slide_body)
+        # Read the way the build reads it: the step markers and the
+        # directives are instructions to the engine, and counting either as
+        # words of the talk would put them in the estimate and the title.
+        cleaned, steps = reveal.plan(strip_slide_directives(cleaned),
+                                     extract_slide_directives(slide_body), meta)
         facts.append(_SlideFacts(
             key=f"{slide_body}\x00{notes}",
             title=infer_slide_title(slide_body, fallback=f"Slide {i + 1}"),
             timing=slide_timing(notes, cleaned, wpm),
             has_notes=bool(notes.strip()),
+            steps=len(steps) + 1,
         ))
     return facts
 
@@ -487,7 +496,7 @@ class Sidebar(Gtk.Box):
             row.key = f.key
             row.set_number(i + 1)
             row.set_title(f.title)
-            row.set_stats(f.timing)
+            row.set_stats(f.timing, f.steps)
             row.set_has_notes(f.has_notes)
             row.set_thumbnail(thumbnails[i] if i < len(thumbnails) else None)
             row.set_overflow(bool(overflows[i]) if i < len(overflows) else False)
@@ -742,16 +751,22 @@ class _SlideRow(Gtk.ListBoxRow):
         faded = self._stale and self._png_bytes is not None
         self._picture.set_opacity(self._STALE_OPACITY if faded else 1.0)
 
-    def set_stats(self, timing: Timing) -> None:
+    def set_stats(self, timing: Timing, steps: int = 1) -> None:
         """
         Show how long the slide takes, and the words that estimate counted.
 
         The count is named when it comes from the script, because a slide
         holding six words and ninety seconds of talking otherwise reads as
         a mistake in the arithmetic rather than as a long slide.
+
+        *steps* is said whenever there is more than one, because a row that
+        looks like every other row will be presented in three presses and
+        nothing else on the strip would say so.
         """
+        reveals = f" · {steps} steps" if steps > 1 else ""
         if timing.words == 0:
-            self._stats_label.set_visible(False)
+            self._stats_label.set_label(reveals.lstrip(" ·").strip())
+            self._stats_label.set_visible(bool(reveals))
             return
         if timing.seconds < 60:
             time_str = f"{timing.seconds}s"
@@ -759,7 +774,8 @@ class _SlideRow(Gtk.ListBoxRow):
             m, s = divmod(timing.seconds, 60)
             time_str = f"{m}m {s:02d}s"
         noun = "script words" if timing.from_script else "words"
-        self._stats_label.set_label(f"{timing.words} {noun} · ~{time_str}")
+        self._stats_label.set_label(
+            f"{timing.words} {noun} · ~{time_str}{reveals}")
         self._stats_label.set_visible(True)
 
     def set_has_notes(self, has_notes: bool) -> None:

@@ -23,7 +23,7 @@ import pytest
 pytest.importorskip("gi")
 PIL = pytest.importorskip("PIL.Image")
 
-from presence.presenter import PresenterWindow, SlideshowWindow, _slide_pages_from  # noqa: E402
+from presence.presenter import PresenterWindow, SlideshowWindow, _stops_from  # noqa: E402
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -69,7 +69,7 @@ class FakeSlideshow:
 
     def present(self):            self.presented += 1
     def load(self):               self.loaded += 1
-    def show_slide(self, index):  self.shown.append(index)
+    def show_step(self, index):   self.shown.append(index)
     def set_blank(self, colour):  self.blanks.append(colour)
     def move_to_other_monitor(self): self.moved += 1
     def close_by_presenter(self): self.closed += 1
@@ -83,9 +83,9 @@ def slideshow(gtk):
     made = []
 
     def build(n_slides=3, slide_pages=None, pdf_path=None):
-        win = SlideshowWindow(pdf_path=pdf_path, n_slides=n_slides,
+        win = SlideshowWindow(pdf_path=pdf_path, n_steps=n_slides,
                               presenter_window=None, parent_window=None,
-                              slide_pages=slide_pages)
+                              step_pages=slide_pages)
         made.append(win)
         return win
 
@@ -128,16 +128,18 @@ def presenter(gtk, monkeypatch):
 # sees, so it is the one worth pinning.
 
 def test_slide_pages_read_off_the_build():
-    assert _slide_pages_from(_slides(3, pages=[0, 1, 3])) == [0, 1, 3]
+    stops, pages = _stops_from(_slides(3, pages=[0, 1, 3]))
+    assert stops == [(0, 0), (1, 0), (2, 0)]
+    assert pages == [0, 1, 3]
 
 
-def test_slide_pages_none_when_the_build_did_not_say():
+def test_slide_pages_fall_back_when_the_build_did_not_say():
     # A build made before slides carried a page index: fall back rather than
     # index by a half-filled list.
     info = _slides(3, pages=[0, 1, 3])
     del info[1]["page_index"]
-    assert _slide_pages_from(info) is None
-    assert _slide_pages_from([]) is None
+    assert _stops_from(info) == ([(0, 0), (1, 0), (2, 0)], [0, 1, 2])
+    assert _stops_from([]) == ([], [])
 
 
 def test_slideshow_asks_for_the_page_the_slide_starts_on(slideshow):
@@ -156,16 +158,16 @@ def test_slideshow_falls_back_to_one_page_per_slide(slideshow):
 
 def test_show_slide_clamps_to_the_deck(slideshow):
     win = slideshow(n_slides=3)
-    win.show_slide(-5)
+    win.show_step(-5)
     assert win._pending == 0
-    win.show_slide(99)
+    win.show_step(99)
     assert win._pending == 2
 
 
 def test_show_slide_puts_the_page_on_screen(slideshow):
     win = slideshow(n_slides=2)
     win._pages[1] = _png()
-    win.show_slide(1)
+    win.show_step(1)
     assert win._picture.get_paintable() is not None
 
 
@@ -174,7 +176,7 @@ def test_show_slide_puts_the_page_on_screen(slideshow):
 def test_blanking_takes_the_slide_down(slideshow):
     win = slideshow(n_slides=2)
     win._pages[0] = _png()
-    win.show_slide(0)
+    win.show_step(0)
     win.set_blank("#000000")
     assert win._blanked is True
     assert win._picture.get_paintable() is None
@@ -183,7 +185,7 @@ def test_blanking_takes_the_slide_down(slideshow):
 def test_unblanking_puts_the_same_slide_back(slideshow):
     win = slideshow(n_slides=2)
     win._pages[1] = _png()
-    win.show_slide(1)
+    win.show_step(1)
     win.set_blank("#ffffff")
     win.set_blank(None)
     assert win._blanked is False
@@ -206,7 +208,7 @@ def test_moving_on_lifts_the_blank(slideshow):
     win = slideshow(n_slides=2)
     win.set_blank("#000000")
     win._pages[1] = _png()
-    win.show_slide(1)
+    win.show_step(1)
     assert win._blanked is False
     assert win._picture.get_paintable() is not None
 
@@ -224,7 +226,7 @@ def test_closing_drops_the_deck_and_disarms_every_guard(slideshow):
     assert win._monitors_handler is None
     # Every entry point a pending callback could still reach must be inert
     # rather than raising into the main loop.
-    win.show_slide(1)
+    win.show_step(1)
     win.set_blank("#000000")
     win.set_blank(None)
     win._store_pages([_png()])
@@ -252,7 +254,7 @@ def test_presenter_opens_the_audience_window(presenter):
 
 def test_presenter_hands_the_page_map_to_the_slideshow(presenter):
     win = presenter(slide_info=_slides(3, pages=[0, 1, 3]))
-    assert win._slideshow.kwargs["slide_pages"] == [0, 1, 3]
+    assert win._slideshow.kwargs["step_pages"] == [0, 1, 3]
 
 
 def test_going_to_a_slide_moves_both_screens(presenter):

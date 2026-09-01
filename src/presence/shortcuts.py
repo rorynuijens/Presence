@@ -163,19 +163,31 @@ def build_shortcuts_window(parent) -> Gtk.ShortcutsWindow:
             <child>
               <object class="GtkShortcutsShortcut">
                 <property name="accelerator">Right</property>
-                <property name="title">Next slide</property>
+                <property name="title">Next slide, or the next reveal of this one</property>
               </object>
             </child>
             <child>
               <object class="GtkShortcutsShortcut">
                 <property name="accelerator">space</property>
-                <property name="title">Next slide</property>
+                <property name="title">Next slide, or the next reveal of this one</property>
               </object>
             </child>
             <child>
               <object class="GtkShortcutsShortcut">
                 <property name="accelerator">Left</property>
-                <property name="title">Previous slide</property>
+                <property name="title">Back one step</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkShortcutsShortcut">
+                <property name="accelerator">Down</property>
+                <property name="title">Next slide, past anything it still reveals</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkShortcutsShortcut">
+                <property name="accelerator">Up</property>
+                <property name="title">Start of this slide, then the one before</property>
               </object>
             </child>
             <child>

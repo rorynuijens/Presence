@@ -133,6 +133,17 @@ body {{
     page-break-after: auto;
 }}
 
+/* ── Not yet revealed ──────────────────────────────────────────────────────
+   A slide with reveal steps is laid out once and written out once per step,
+   with the blocks that have not arrived yet carrying this class.  Hidden
+   rather than removed, so nothing above them moves as they arrive — and a
+   theme may say otherwise: `.slide .not-yet {{ opacity: .15 }}` dims the
+   rest of the slide instead of hiding it, and is a house style's to make. */
+
+.slide .not-yet {{
+    visibility: hidden;
+}}
+
 /* ── Progress bar ──────────────────────────────────────────────────────── */
 
 .progress-bar-track {{

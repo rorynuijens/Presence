@@ -127,7 +127,9 @@ with the aspect ratio; `base_size` and paddings scale with it).
 ```
 div.slide[data-slide-index]              ← every slide, always
         [data-layout][data-text][data-images][data-shapes]
+        [data-step][data-steps]          ← only a slide that reveals in steps
     …the slide's blocks, each with data-src-line…
+        .not-yet                         ← a block this step has not reached
     div.slide-number
     div.progress-bar-track > div.progress-bar-fill
 ```
@@ -143,6 +145,7 @@ from, published so a stylesheet can reach a different conclusion.
 | `data-layout` | `title` `text` `bleed` `single` `pair` `gallery` | the arrangement `choose_layout()` picked |
 | `data-text` | `none` `short` `long` | how much text shares the slide; the boundary between `short` and `long` is 40 words, the same one that decides whether a picture gets half the slide or 40% |
 | `data-images` | an integer | how many pictures the slide holds |
+| `data-step` / `data-steps` | integers | which reveal step this copy of the slide is, of how many; absent on a slide that shows all at once |
 | `data-shapes` | space-separated `portrait` `landscape` `square` `unknown` | one per picture, in order; `unknown` where the file could not be read |
 
 `data-shapes` is a whole-slide list, so use `~=` to ask about any one picture:
@@ -184,7 +187,7 @@ it in selectors; do not strip it.
 
 ## 4. What a theme may not break
 
-Four things are read back off the laid-out page (`slides/pagination.py`). They
+Five things are read back off the laid-out page (`slides/pagination.py`). They
 are the reason Presence can tell a writer that a slide overflowed, put the
 right thumbnail against the right slide, and drop continuation pages from the
 exported PDF. A stylesheet that breaks them does not fail loudly — it makes the
@@ -199,14 +202,23 @@ app quietly wrong.
    page it starts on, which the thumbnail strip, image export, handout and
    slideshow all index by.
 
-3. **Slide content should stay in normal flow.** Overflow is detected two ways —
+3. **`.not-yet` must not change what a block occupies.** A slide that reveals
+   in steps is laid out *once* and written out once per step, so the engine can
+   measure the fold and the fragmentation on any of them. The generated rule is
+   `visibility: hidden`, which keeps the box. A theme may restyle it — `opacity`
+   or `color: transparent` are both fine, and dimming what is coming rather than
+   hiding it is a legitimate house style — but `display: none`, a height of 0 or
+   anything else that takes the block out of flow makes the steps of one slide
+   different shapes, and the text will jump as the reveal lands.
+
+4. **Slide content should stay in normal flow.** Overflow is detected two ways —
    a block crossing the slide's text area, and a slide needing a second page —
    and absolutely positioned or transformed content trips neither. A theme that
    positions its body copy absolutely will silently lose the overflow warning
    for every slide that uses it. Position decoration freely; leave the text in
    flow.
 
-4. **The bottom padding is the warning line.** `.slide` is `padding: 57px 102px`
+5. **The bottom padding is the warning line.** `.slide` is `padding: 57px 102px`
    with `padding-bottom: 79px`, and the fold fires when content reaches the
    content box's bottom edge — 641px on a 720px slide, not 720px — because the
    reserved strip belongs to the slide number and the progress bar. Enlarge that
@@ -241,7 +253,9 @@ has almost no interest in effects. Nothing animates: a deck is a PDF.
 `oklch()`, `#rgba`), `background-color`, `background-image` with
 `linear-gradient`, `radial-gradient` and the `repeating-` forms,
 `background-size` / `-position` / `-repeat` / `-clip`, `opacity`,
-`currentColor`.
+`currentColor`, `visibility: hidden` — which keeps the box, paints nothing of
+it including list markers and images, and leaves the text out of the PDF
+altogether, and is what a reveal step is built on.
 
 **Transforms** — `transform` with `rotate()`, `scale()`, `translate()`,
 `matrix()`, plus `transform-origin`.

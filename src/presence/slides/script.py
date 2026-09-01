@@ -306,8 +306,9 @@ def document_timing(markdown_text: str, wpm: int = 110) -> Timing:
     ``from_script`` is true when any slide in the deck carries one, since
     that is what the total is mostly made of.
     """
-    from .frontmatter import parse_frontmatter
+    from .frontmatter import parse_frontmatter, strip_slide_directives
     from .splitter import extract_images, extract_speaker_notes, split_slides
+    from .reveal import strip_markers
 
     _, body_text = parse_frontmatter(markdown_text)
     per = []
@@ -315,7 +316,10 @@ def document_timing(markdown_text: str, wpm: int = 110) -> Timing:
         body, notes = extract_speaker_notes(slide_md)
         # Images out, as the strip's own body count has them: a picture is
         # not read aloud, and "![A chart](chart.png)" is not three words.
+        # Step markers and directives out for the same reason: nobody says
+        # "+++" from the stage.
         cleaned, _images = extract_images(body)
+        cleaned = strip_markers(strip_slide_directives(cleaned))
         per.append(slide_timing(notes, cleaned, wpm))
     return Timing(
         sum(t.seconds for t in per),

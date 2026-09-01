@@ -129,7 +129,7 @@ def test_the_presenter_does_not_repeat_the_app_name_in_its_title(presenter):
 
 
 def test_the_audience_window_does_not_either(gtk):
-    show = P.SlideshowWindow(pdf_path=None, n_slides=1,
+    show = P.SlideshowWindow(pdf_path=None, n_steps=1,
                              presenter_window=None, parent_window=None)
     try:
         assert show.get_title() == "Slideshow"

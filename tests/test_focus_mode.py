@@ -33,6 +33,7 @@ class FakeEditor:
     _get_line_text        = Editor._get_line_text
     _is_slide_sep         = Editor._is_slide_sep
     _is_notes_sep         = Editor._is_notes_sep
+    _is_step_sep          = Editor._is_step_sep
     _update_badge_starts  = Editor._update_badge_starts
     _current_slide_block  = Editor._current_slide_block
     _focus_block          = Editor._focus_block

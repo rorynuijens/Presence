@@ -50,8 +50,7 @@ from .slides.themes import ASPECT_RATIOS
 from .slides.theme_loader import load_all_themes
 from .slides.utils import (encode_logo, safe_subpath,
                             compute_slide_start_lines)
-from .slides.pagination import (slide_page_indices, slide_pages_pdf,
-                                measure_folds, fragmented_slides)
+from .slides.pagination import measure_folds, page_the_deck
 from .slides.diagnostics import build_warnings
 from .slides.thumbnails_render import render_thumbnails, render_page_png
 
@@ -489,6 +488,11 @@ class Converter(GObject.Object):
                 width=ctx.width, height=ctx.height, theme_bg=ctx.theme_bg,
                 base_url=str(base_dir),
                 line_offsets=compute_slide_start_lines(raw_text),
+                # The PDF and the HTML deck are the talk as it was given, so
+                # a slide that reveals gets a page per step.  The handout and
+                # the exported images are materials *about* the talk and take
+                # each slide complete; both read page_index, the last step.
+                reveal=True,
             )
 
             html_path = output_path.with_suffix(".html")
@@ -503,35 +507,25 @@ class Converter(GObject.Object):
             ).render()
 
             n_slides = len(slides)
-            # Where each slide sits in the document WeasyPrint just laid out.
-            # Read before anything is written, because a slide that overflows
-            # leaves a continuation page behind it and the n-th page stops
-            # being the n-th slide from there on.
-            laid_out = slide_page_indices(wp_doc, n_slides)
-
-            # Measured off each slide's own first page: reading folds in page
-            # order would attribute a continuation page's overrun to the next
-            # slide and leave the one that really overflowed unmarked.  Taken
-            # from the untrimmed document, which is the only place the
-            # overrun is still visible.
-            folds = measure_folds(wp_doc, n_slides, laid_out)
-            # Counted before the trim, which is the only moment the extra
-            # pages still exist to be counted.
-            fragmented = fragmented_slides(wp_doc, laid_out)
-
-            # The PDF is one page per slide: the continuation pages are not
+            # Everything the laid-out document has to be asked, in the one
+            # order that gets right answers; see pagination.page_the_deck.
+            # The PDF it writes is one page per slide, or per reveal step of
+            # one — the continuation pages an overflow leaves behind are not
             # slides, and the strip, the images, the handout and the
-            # slideshow have always skipped them.  The file the writer hands
-            # to somebody else now shows what the deck shows.
-            pdf_bytes, pages = slide_pages_pdf(wp_doc, laid_out)
+            # slideshow have always skipped them.
+            paged = page_the_deck(wp_doc, n_slides)
+            pdf_bytes = paged.pdf
+            pages     = paged.pages
             output_path.write_bytes(pdf_bytes)
 
-            for index, (info, fold, page) in enumerate(
-                    zip(slide_info, folds, pages)):
+            for index, (info, fold, steps) in enumerate(
+                    zip(slide_info, paged.folds, paged.steps)):
                 info["fold_line"]  = fold
-                # Which page of the file just written this slide is on.
-                info["page_index"] = page
-                info["clipped"]    = index in fragmented
+                # Which page of the file just written shows this slide
+                # complete, and which pages its steps are on.
+                info["page_index"] = steps[-1]
+                info["step_pages"] = steps
+                info["clipped"]    = index in paged.fragmented
 
             warnings = build_warnings(slide_info, ctx.theme_warning)
 
