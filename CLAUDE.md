@@ -51,6 +51,15 @@ until something calls `present()`. A class that presents one of its own from
 `test_presenter.py` builds `PresenterWindow` without fullscreening a slideshow
 onto the developer's screen.
 
+Two more fixtures come from `conftest.py`. `app_factory` builds registered
+`Application` instances — an app reports its actions and accelerators only
+once registered, and registering exports an object on the session bus, so each
+gets a unique id and `NON_UNIQUE`. `isolated_session` is **autouse**: it
+redirects `session._config_dir` and `_data_dir` to a temp directory, because
+building a `MainWindow` writes the user's session file (`__init__` sets the
+theme-panel button active, whose toggle handler saves the window state), and a
+Presence the user had open would have its state clobbered.
+
 The older controller tests still drive the real class against a stand-in
 window (`test_build_status.py` established that pattern, and
 `test_document_controller.py`, `test_export_controller.py` and

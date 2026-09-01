@@ -49,6 +49,12 @@ def build_shortcuts_window(parent) -> Gtk.ShortcutsWindow:
                 <property name="title">Export PDF</property>
               </object>
             </child>
+            <child>
+              <object class="GtkShortcutsShortcut">
+                <property name="accelerator">&lt;Primary&gt;q</property>
+                <property name="title">Quit</property>
+              </object>
+            </child>
           </object>
         </child>
         <child>

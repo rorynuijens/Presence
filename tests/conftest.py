@@ -58,3 +58,60 @@ def gtk():
         pytest.skip("Gtk.init_check() failed — no usable GDK backend")
     Adw.init()
     return Gtk
+
+
+@pytest.fixture(autouse=True)
+def isolated_session(tmp_path, monkeypatch):
+    """
+    Keep every test out of the user's real session file.
+
+    Building a ``MainWindow`` writes one: ``__init__`` sets the theme-panel
+    button active, which runs its toggle handler, which saves the window
+    state.  So a test that merely constructs a window rewrote
+    ``~/.config/presence/session.json`` — harmless in content, but it is the
+    user's file and a Presence they had open would have its state clobbered.
+
+    Autouse, so no future test has to remember.  ``test_session.py`` redirects
+    these two the same way for itself; applying it twice is harmless.
+    """
+    try:
+        import presence.session as session
+    except ImportError:                      # gi missing; nothing to isolate
+        return
+    config = tmp_path / "session-config"
+    data   = tmp_path / "session-data"
+    config.mkdir()
+    data.mkdir()
+    monkeypatch.setattr(session, "_config_dir", lambda: config)
+    monkeypatch.setattr(session, "_data_dir", lambda: data)
+
+
+@pytest.fixture
+def app_factory(gtk):
+    """
+    Build registered ``Application`` instances for tests that need real actions.
+
+    An application only reports its actions and accelerators once it is
+    registered, and registering exports an object on the session bus — so each
+    one gets a unique id, and NON_UNIQUE so a test run never talks to a
+    Presence the user has open.  Windows made here are never presented.
+    """
+    from gi.repository import Gio
+
+    from presence.application import APP_ID, Application
+
+    made = []
+
+    def build():
+        app = Application()
+        app.set_application_id(f"{APP_ID}.Test{len(made)}{id(made) & 0xffff:x}")
+        app.set_flags(Gio.ApplicationFlags.NON_UNIQUE
+                      | Gio.ApplicationFlags.HANDLES_OPEN)
+        app.register(None)
+        made.append(app)
+        return app
+
+    yield build
+    for app in made:
+        for window in list(app.get_windows()):
+            window.destroy()
