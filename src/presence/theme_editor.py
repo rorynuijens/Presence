@@ -125,6 +125,14 @@ from .slides.themes import ASPECT_RATIOS
 _SLUG_RE             = re.compile(r'^[a-z0-9_-]+$')
 _PREVIEW_DEBOUNCE_MS = 300
 
+# WCAG's thresholds for text.  The accent is held to CONTRAST_AA because
+# css.py gives it `strong` and `a` at body size, not only headings — which
+# is why relaxing it to the large-text bar would have been the wrong way to
+# make a failing palette pass.  theme_manager_ui imports CONTRAST_AA rather
+# than restating it.
+CONTRAST_AA  = 4.5
+CONTRAST_AAA = 7.0
+
 _PREVIEW_MD = """\
 # Slide heading
 
@@ -958,10 +966,10 @@ class ThemeEditor(Adw.Dialog):
             lbl.remove_css_class("dim-label")
             try:
                 ratio = _contrast_ratio(fg, bg)
-                if ratio >= 7:
+                if ratio >= CONTRAST_AAA:
                     level, icon = "AAA", "✓"
                     lbl.add_css_class("success")
-                elif ratio >= 4.5:
+                elif ratio >= CONTRAST_AA:
                     level, icon = "AA", "✓"
                     lbl.add_css_class("dim-label")
                 else:

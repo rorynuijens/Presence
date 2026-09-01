@@ -23,7 +23,10 @@ class Theme:
     # ── Palette ───────────────────────────────────────────────────────────────
     bg:            str = "#ffffff"
     fg:            str = "#1a1a2e"
-    accent:        str = "#E17000"
+    # 4.5:1 on the default white.  It was #E17000, at 3.2:1 — and the accent
+    # is not only heading colour: css.py gives `strong` and `a` to it at body
+    # size.  Darkened along its own hue by the least that clears the bar.
+    accent:        str = "#ba5d00"
     accent2:       str = ""
     heading_color: str = ""
     code_bg:       str = "#f0f4f8"
@@ -120,7 +123,7 @@ BUILTIN_THEMES: dict[str, Theme] = {
         description="Clean light theme with warm accent",
         bg="#ffffff",
         fg="#1a1a2e",
-        accent="#E17000",
+        accent="#ba5d00",
         code_bg="#f0f4f8",
         title_bg="#1a1a2e",
         title_fg="#ffffff",

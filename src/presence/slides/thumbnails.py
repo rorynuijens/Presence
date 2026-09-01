@@ -35,12 +35,12 @@ def build_thumbnail_index(
     deck_title = _html.escape(str(meta.get("title", output_path.stem)))
     # Accept both Theme dataclass and legacy dict
     if hasattr(theme, "accent"):
-        accent   = _safe_colour(theme.accent,   "#E17000")
+        accent   = _safe_colour(theme.accent,   "#ba5d00")
         bg       = _safe_colour(theme.bg,       "#ffffff")
         fg       = _safe_colour(theme.fg,       "#1a1a2e")
         title_bg = _safe_colour(theme.title_bg, "#1a1a2e")
     else:
-        accent   = _safe_colour(theme["accent"],   "#E17000")
+        accent   = _safe_colour(theme["accent"],   "#ba5d00")
         bg       = _safe_colour(theme["bg"],       "#ffffff")
         fg       = _safe_colour(theme["fg"],       "#1a1a2e")
         title_bg = _safe_colour(theme["title_bg"], "#1a1a2e")

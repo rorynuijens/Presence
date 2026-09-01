@@ -720,7 +720,7 @@ def _resolve(theme) -> Theme:
     # _safe_colour rejects values that break out of a CSS property context.
     t.bg            = _safe_colour(t.bg,            "#ffffff")
     t.fg            = _safe_colour(t.fg,            "#1a1a2e")
-    t.accent        = _safe_colour(t.accent,        "#E17000")
+    t.accent        = _safe_colour(t.accent,        "#ba5d00")
     t.accent2       = _safe_colour(t.accent2 or t.accent, t.accent)
     t.heading_color = _safe_colour(t.heading_color, t.accent) if t.heading_color else ""
     t.code_bg       = _safe_colour(t.code_bg,       "#f0f4f8")

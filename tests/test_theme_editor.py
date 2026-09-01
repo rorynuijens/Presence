@@ -136,6 +136,35 @@ def test_every_preset_is_readable_in_its_own_body_and_cover(gtk):
         assert _contrast_ratio(tfg, tbg) >= 4.5, label
 
 
+def test_the_builtin_themes_clear_the_bar_the_editor_holds_them_to(gtk):
+    """
+    The app's own default was below it: Light's #E17000 on white is 3.2:1,
+    and it is also the Theme dataclass's default accent and the fallback
+    every _safe_colour reaches for.
+    """
+    from presence.slides.themes import BUILTIN_THEMES, Theme
+    from presence.theme_editor import CONTRAST_AA
+
+    assert _contrast_ratio(Theme().accent, Theme().bg) >= CONTRAST_AA
+    for slug, t in BUILTIN_THEMES.items():
+        assert _contrast_ratio(t.accent, t.bg) >= CONTRAST_AA, slug
+        assert _contrast_ratio(t.fg, t.bg) >= CONTRAST_AA, slug
+        assert _contrast_ratio(t.title_fg, t.title_bg) >= CONTRAST_AA, slug
+
+
+def test_a_broken_accent_falls_back_to_one_that_can_be_read(gtk):
+    # css.py, theme_loader.py and thumbnails.py each name a fallback for an
+    # accent they cannot parse; all three were the failing #E17000.
+    from presence.slides.css import build_css
+    from presence.slides.themes import Theme
+    from presence.theme_editor import CONTRAST_AA
+
+    css = build_css(Theme(accent="url(javascript:evil)"), 1280, 720, None)
+    assert "#E17000" not in css
+    assert "#ba5d00" in css
+    assert _contrast_ratio("#ba5d00", "#ffffff") >= CONTRAST_AA
+
+
 # ── Slugs ─────────────────────────────────────────────────────────────────────
 
 def test_auto_slug_makes_a_filesystem_safe_identifier():

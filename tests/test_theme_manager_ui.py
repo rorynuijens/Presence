@@ -87,6 +87,26 @@ def _rows(page):
     return {r.get_title(): r for r in page._themes_group._presence_rows}
 
 
+def _subrows(row):
+    """Every Adw.ActionRow added inside an ExpanderRow."""
+    found = []
+
+    def walk(widget):
+        if isinstance(widget, Adw.ActionRow):
+            found.append(widget)
+        child = widget.get_first_child()
+        while child is not None:
+            walk(child)
+            child = child.get_next_sibling()
+
+    walk(row)
+    return found
+
+
+def _subrow_titles(row):
+    return [r.get_title() for r in _subrows(row)]
+
+
 def _buttons(row):
     """Every button label anywhere inside an ExpanderRow's added rows."""
     found = []
@@ -127,6 +147,45 @@ def test_a_user_theme_can_be_edited_and_removed(themes_page):
     labels = _buttons(_rows(page)["My Theme"])
     assert "Uninstall" in labels
     assert "Edit…" in labels
+
+
+def test_a_theme_whose_accent_cannot_be_read_says_so_on_its_row(themes_page,
+                                                                monkeypatch):
+    """
+    The accent is h1-h3, `strong`, `a` and the table header fill, so below
+    4.5:1 it is body text nobody at the back of the room can read.  The only
+    place that showed before was the editor, which means opening the theme.
+    """
+    faint = Theme(name="Faint", slug="faint", author="Me", version="1.0",
+                  bg="#ffffff", accent="#f7c200")          # 1.68:1
+    fine  = Theme(name="Fine",  slug="fine",  author="Me", version="1.0",
+                  bg="#ffffff", accent="#ba5d00")          # 4.51:1
+    monkeypatch.setattr(tmu, "load_all_themes",
+                        lambda *a, **k: {"faint": faint, "fine": fine})
+    monkeypatch.setattr(tmu, "BUILTIN_THEMES", {})
+    page = themes_page()
+
+    rows = _rows(page)
+    assert "Low contrast" in _subrow_titles(rows["Faint"])
+    assert "Low contrast" not in _subrow_titles(rows["Fine"])
+
+
+def test_the_row_quotes_the_ratio_it_measured(themes_page, monkeypatch):
+    faint = Theme(name="Faint", slug="faint", bg="#ffffff", accent="#f7c200")
+    monkeypatch.setattr(tmu, "load_all_themes", lambda *a, **k: {"faint": faint})
+    monkeypatch.setattr(tmu, "BUILTIN_THEMES", {})
+    page = themes_page()
+
+    warn = [r for r in _subrows(_rows(page)["Faint"])
+            if r.get_title() == "Low contrast"][0]
+    assert "1.7:1" in warn.get_subtitle()          # #f7c200 on white
+    assert "4.5:1" in warn.get_subtitle()
+
+
+def test_the_list_and_the_editor_hold_themes_to_the_same_bar():
+    # Imported, not restated, so the two cannot drift apart.
+    from presence.theme_editor import CONTRAST_AA
+    assert tmu.CONTRAST_AA is CONTRAST_AA
 
 
 def test_the_page_never_offers_to_apply_a_theme(themes_page):

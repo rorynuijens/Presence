@@ -203,7 +203,7 @@ def load_theme_from_dir(theme_dir: Path) -> Theme:
         description= data.get("description", ""),
         bg=          data.get("bg",          "#ffffff"),
         fg=          data.get("fg",          "#1a1a2e"),
-        accent=      data.get("accent",      "#E17000"),
+        accent=      data.get("accent",      "#ba5d00"),
         accent2=     data.get("accent2",     ""),
         heading_color=data.get("heading_color", ""),
         code_bg=     data.get("code_bg",     "#f0f4f8"),

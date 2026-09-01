@@ -26,7 +26,7 @@ from .slides.theme_loader import (load_all_themes, install_theme,
                                         uninstall_theme, user_themes_dir)
 from .slides.themes import BUILTIN_THEMES, Theme
 
-from .theme_editor import ThemeEditor
+from .theme_editor import ThemeEditor, CONTRAST_AA, _contrast_ratio
 
 # ── Thumbnail cache ───────────────────────────────────────────────────────────
 
@@ -233,6 +233,34 @@ def _build_theme_row(theme: Theme, parent_window, converter,
         title=theme.name,
         subtitle=f"{theme.author}  ·  v{theme.version}",
     )
+
+    # A theme whose accent cannot be read says so on its own row.  The
+    # accent is h1-h3, `strong`, `a` and the table header fill, so below the
+    # bar it is body text nobody at the back of the room can read — and the
+    # only place that was visible before was the editor, which you have to
+    # open the theme to reach.  _contrast_ratio and the bar are imported
+    # from the editor rather than restated, so the two cannot disagree.
+    try:
+        ratio = _contrast_ratio(theme.accent, theme.bg)
+    except Exception:
+        ratio = None
+    if ratio is not None and ratio < CONTRAST_AA:
+        warning = (
+            f"Headings, bold text and links sit at {ratio:.1f}:1 on this "
+            f"theme's background — below the {CONTRAST_AA}:1 minimum."
+        )
+        icon = Gtk.Image.new_from_icon_name("dialog-warning-symbolic")
+        icon.add_css_class("warning")
+        icon.set_tooltip_text(warning)
+        icon.update_property(
+            [Gtk.AccessibleProperty.LABEL], [f"Low contrast: {warning}"]
+        )
+        row.add_prefix(icon)
+
+        warn_row = Adw.ActionRow(title="Low contrast", subtitle=warning)
+        warn_row.add_css_class("warning")
+        warn_row.set_activatable(False)
+        row.add_row(warn_row)
 
     thumb = Gtk.Picture()
     thumb.set_size_request(213, 120)
