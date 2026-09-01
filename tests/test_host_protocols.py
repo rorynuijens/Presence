@@ -1,10 +1,10 @@
 """
 test_host_protocols.py — The seam between the window and its controllers.
 
-`BuildCoordinator`, `DocumentController` and `ExportController` each declare a
-Protocol saying exactly what they need from the window they belong to —
-`BuildHost`, `DocumentHost`, `ExportHost`.  This file is what makes those
-declarations true, in both directions:
+`BuildCoordinator`, `DocumentController`, `ExportController` and `SettleClock`
+each declare a Protocol saying exactly what they need from the window they
+belong to — `BuildHost`, `DocumentHost`, `ExportHost`, `ClockHost`.  This file
+is what makes those declarations true, in both directions:
 
 *  Everything a Host promises, `MainWindow` provides.  A rename on the window
    that a controller still calls is a control that silently does nothing,
@@ -39,12 +39,14 @@ from presence.build_coordinator import BuildCoordinator, BuildHost      # noqa: 
 from presence.document_controller import (DocumentController,           # noqa: E402
                                           DocumentHost)
 from presence.export_controller import ExportController, ExportHost     # noqa: E402
+from presence.settle_clock import SettleClock, ClockHost                # noqa: E402
 
 # Each controller, and the Protocol it takes its window as.
 SEAMS = {
     "BuildCoordinator":   (BuildCoordinator,   BuildHost),
     "DocumentController": (DocumentController, DocumentHost),
     "ExportController":   (ExportController,   ExportHost),
+    "SettleClock":        (SettleClock,        ClockHost),
 }
 
 

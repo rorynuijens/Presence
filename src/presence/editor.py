@@ -213,22 +213,19 @@ class Editor(Gtk.Box):
     contextual image-layout editing (iA Presenter-style).
 
     Signals:
-        changed (text: str)  — emitted ~400 ms after the last keystroke
+        changed (text: str)  — emitted on every buffer change, undebounced.
+            How long an edit is worth waiting for is not this widget's to
+            decide: it used to hold two timers of its own, and whoever was
+            listening held more behind them.  :class:`settle_clock.SettleClock`
+            owns that now, and this says only that the text moved.
     """
 
     __gsignals__ = {
         "changed": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
-        # Same edits, shorter fuse — drives the live render, which must keep
-        # up with typing.  Kept separate from "changed" so the heavier
-        # sidebar/word-count work stays on the longer debounce.
-        "live-changed": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         # Something the writer needs told about, raised from a place with no
         # window reference of its own. The window turns it into a toast.
         "notify-user": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
     }
-
-    DEBOUNCE_MS = 400
-    LIVE_DEBOUNCE_MS = 150
 
     # Blank space opened above and below a separator line.  The band's rule is
     # drawn in the upper half of it, clear of the "---" glyphs.
@@ -239,8 +236,6 @@ class Editor(Gtk.Box):
         self.set_hexpand(True)
         self.set_vexpand(True)
 
-        self._debounce_source:  int | None = None
-        self._live_debounce_source: int | None = None
         self._base_path:        Path | None = None
         self._insert_image_cb = None
         self._active_file_dialog = None
@@ -289,8 +284,6 @@ class Editor(Gtk.Box):
         # Must precede any menu that references editor.* actions.
         self._install_action_group()
         self._view.set_extra_menu(self._build_context_menu())
-
-        self.connect("destroy", self._on_destroy)
 
         # Find bar inside a Revealer for slide-down animation (#53)
         self._find_revealer = Gtk.Revealer()
@@ -460,9 +453,9 @@ class Editor(Gtk.Box):
         return cursor.get_offset()
 
     def set_text(self, text: str) -> None:
-        if self._debounce_source is not None:
-            GLib.source_remove(self._debounce_source)
-            self._debounce_source = None
+        # Signals stay blocked: a document being replaced is not an edit.
+        # What must follow instead is SettleClock.document_replaced(), which
+        # the callers that do this all make.
         self._buffer.handler_block_by_func(self._on_buffer_changed)
         try:
             self._buffer.set_text(text)
@@ -477,9 +470,6 @@ class Editor(Gtk.Box):
 
     def set_text_as_user_action(self, text: str) -> None:
         """Replace buffer contents as one undoable step (e.g. slide reorder)."""
-        if self._debounce_source is not None:
-            GLib.source_remove(self._debounce_source)
-            self._debounce_source = None
         self._buffer.handler_block_by_func(self._on_buffer_changed)
         try:
             if _GTKSOURCE_AVAILABLE:
@@ -2080,32 +2070,7 @@ class Editor(Gtk.Box):
             if full_text[alt_start:alt_end].strip():
                 self._buffer.apply_tag(desc_tag, _iter(alt_start), _iter(alt_end))
 
-    # ── Debounce ──────────────────────────────────────────────────────────────
+    # ── Reporting a change ────────────────────────────────────────────────────
 
     def _on_buffer_changed(self, buffer) -> None:
-        if self._debounce_source is not None:
-            GLib.source_remove(self._debounce_source)
-        self._debounce_source = GLib.timeout_add(
-            self.DEBOUNCE_MS, self._emit_changed)
-
-        if self._live_debounce_source is not None:
-            GLib.source_remove(self._live_debounce_source)
-        self._live_debounce_source = GLib.timeout_add(
-            self.LIVE_DEBOUNCE_MS, self._emit_live_changed)
-
-    def _emit_changed(self) -> bool:
-        self._debounce_source = None
         self.emit("changed", self.get_text())
-        return GLib.SOURCE_REMOVE
-
-    def _emit_live_changed(self) -> bool:
-        self._live_debounce_source = None
-        self.emit("live-changed", self.get_text())
-        return GLib.SOURCE_REMOVE
-
-    def _on_destroy(self, *_) -> None:
-        for attr in ("_debounce_source", "_live_debounce_source"):
-            source = getattr(self, attr, None)
-            if source is not None:
-                GLib.source_remove(source)
-                setattr(self, attr, None)

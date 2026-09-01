@@ -39,13 +39,21 @@ class FakeEditor:
         self.base_path = path
 
 
-class FakeSidebar:
-    def __init__(self) -> None:
-        self.texts = []
-        self.wpm = None
+class FakeClock:
+    """The settle clock, as far as the document controller can see it.
 
-    def update_from_text(self, text) -> None:
-        self.texts.append(text)
+    It owns which slide is current now, and a replaced buffer is announced
+    to it in one call rather than by the controller replaying the fan-out.
+    """
+
+    def __init__(self) -> None:
+        self.current_slide = 7          # so we can see it reset to 0
+        self.replaced = []
+
+    def document_replaced(self, text, slide=None) -> None:
+        self.replaced.append(text)
+        if slide is not None:
+            self.current_slide = slide
 
     def set_speaking_rate(self, wpm) -> None:
         self.wpm = wpm
@@ -73,23 +81,18 @@ class FakeWindow:
 
     def __init__(self, text: str = "") -> None:
         self.editor  = FakeEditor(text)
-        self.sidebar = FakeSidebar()
         self.builds  = FakeBuilds()
+        self.clock   = FakeClock()
         self.auto_convert = False
-        self.current_slide = 7          # so we can see it reset to 0
         self.title = None
         self.errors = []
         self.toasts = []
         self.dialogs = []
-        self.panel_syncs = []
 
     # collaborators the controller calls back into
     def show_error(self, message):  self.errors.append(message)
     def show_toast(self, message, timeout=None): self.toasts.append(message)
     def set_document_title(self, title):     self.title = title
-    def refresh_live_slide(self, text=None): pass
-    def sync_panel_to_document(self, text): self.panel_syncs.append(text)
-    def update_word_count(self, text):   pass
     def refresh_recent_actions(self):    pass
     def hold_file_dialog(self, dialog):  self.dialogs.append(dialog)
     def get_application(self):       return None
@@ -150,7 +153,7 @@ def test_opening_starts_at_the_first_slide(tmp_path):
 
     doc.load_into_editor(src)
 
-    assert win.current_slide == 0
+    assert win.clock.current_slide == 0
 
 
 def test_opening_an_unreadable_file_reports_rather_than_raises(tmp_path):

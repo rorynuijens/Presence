@@ -46,7 +46,7 @@ from .session import (save_last_file, save_recent_file, delete_recovery_file,
 if TYPE_CHECKING:                       # imported for the annotations only
     from .build_coordinator import BuildCoordinator
     from .editor import Editor
-    from .sidebar import Sidebar
+    from .settle_clock import SettleClock
 
 log = logging.getLogger(__name__)
 
@@ -64,21 +64,17 @@ class DocumentHost(Protocol):
     """
 
     editor:         Editor
-    sidebar:        Sidebar
     builds:         BuildCoordinator
     # Its own, read off the *other* windows when checking for a second copy
     # of a file that is already open.
     documents:      "DocumentController"
+    clock:          SettleClock
     auto_convert:   bool
-    current_slide:  int
 
     def show_toast(self, message: str, timeout: int = ...) -> None: ...
     def show_error(self, message: str) -> None: ...
     def set_document_title(self, name: str) -> None: ...
     def hold_file_dialog(self, dialog: Gtk.FileDialog | None) -> None: ...
-    def sync_panel_to_document(self, text: str) -> None: ...
-    def refresh_live_slide(self, text: str | None = ...) -> None: ...
-    def update_word_count(self, text: str) -> None: ...
     def refresh_recent_actions(self) -> None: ...
     def get_application(self) -> Gtk.Application: ...
 
@@ -239,14 +235,11 @@ class DocumentController:
         self.output_path = path.with_suffix(".pdf")
         win.editor.set_base_path(path)
         win.editor.set_text(text)
-        win.sidebar.update_from_text(text)
-        win.sync_panel_to_document(text)
-        # set_text() suppresses the editor's change signals, so drive the
-        # live render directly — a freshly opened file starts at slide 1.
-        win.current_slide = 0
-        win.refresh_live_slide(text)
-        win.update_word_count(text)
-        win.builds.update_chip()
+        # set_text() suppresses the editor's change signals — a replaced
+        # buffer is not an edit — so the clock is told outright.  It brings
+        # the strip, the inspector, the word count and the header chip up to
+        # this document and starts its first render, at slide 1.
+        win.clock.document_replaced(text, slide=0)
         self.modified = False
         display = self.pres_path or path        # known: file_path is *path*
         win.set_document_title(display.name)
@@ -269,11 +262,9 @@ class DocumentController:
         """Put a recovered draft back in the editor, still unsaved."""
         win = self._win
         win.editor.set_text(text)
-        win.sync_panel_to_document(text)
+        win.clock.document_replaced(text)
         self.modified = True
         win.set_document_title(self.display_name + " •")
-        win.refresh_live_slide(text)
-        win.builds.update_chip()
         win.builds.trigger()
 
     # ── Saving ────────────────────────────────────────────────────────────────

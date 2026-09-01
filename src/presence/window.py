@@ -28,6 +28,7 @@ from .converter  import Converter
 from .export_controller import ExportController
 from .document_controller import DocumentController
 from .build_coordinator import BuildCoordinator
+from .settle_clock import SettleClock
 from .presenter  import PresenterWindow
 from .shortcuts  import build_shortcuts_window
 from .session    import (save_last_file, load_window_state, save_window_state,
@@ -146,21 +147,10 @@ class MainWindow(Adw.ApplicationWindow):
         self._active_file_dialog = None
         # Debounce source for window-size saves (#96)
         self._size_save_source: int | None = None
-        # Debounce source for sidebar update from text (#37)
-        self._sidebar_update_source: int | None = None
-        # The document the slide now being rendered was read from.
-        self._live_render_text: str = ""
-        # Cursor-position polling source for sidebar sync (#28)
-        self._cursor_sync_source: int | None = None
-        # Cache for cursor-sync: avoid re-parsing unchanged text every 300ms
-        self._cursor_sync_cache: tuple[str, list[int]] | None = None
-        # Slide the cursor is currently in — drives the live render
-        self.current_slide: int = 0
-        # Debounce sources for the thumbnail-size slider: one to save the
-        # setting, one to re-render the slide under the cursor at the new
-        # size.  Both are deferred so dragging stays smooth.
+        # Debounce source for writing the thumbnail size down.  Deferred so
+        # dragging the slider stays smooth.  The re-render it also needs is
+        # the clock's, not this window's.
         self._thumb_size_source: int | None = None
-        self._thumb_render_source: int | None = None
         # Whether slides can be rasterized at all, so a machine without
         # Poppler or Cairo does not ask on every keystroke.
         self._can_rasterize: bool = rasterizer_available()
@@ -174,6 +164,9 @@ class MainWindow(Adw.ApplicationWindow):
         self.exports   = ExportController(self)
         self.documents = DocumentController(self)
         self.builds    = BuildCoordinator(self)
+        # When a keystroke becomes a picture, and which slide is under the
+        # cursor.  Built here with the rest; it only stores this window.
+        self.clock     = SettleClock(self)
 
         prefs = load_editor_prefs()
 
@@ -230,8 +223,7 @@ class MainWindow(Adw.ApplicationWindow):
 
         self._autosave_source: int | None = GLib.timeout_add_seconds(30, self.documents.autosave)
 
-        # Poll cursor position every 300 ms to keep sidebar in sync (#28)
-        self._cursor_sync_source = GLib.timeout_add(300, self._sync_sidebar_to_cursor)
+        self.clock.start()
 
         self.connect("notify::default-width",  self._on_size_changed)
         self.connect("notify::default-height", self._on_size_changed)
@@ -285,8 +277,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.sidebar.connect("thumbnail-size-changed", self._on_thumbnail_size)
         self.editor.connect_undo_notify(self._on_undo_state_changed)
         self.editor.set_insert_image_callback(self._on_insert_image)
-        self.editor.connect("changed",               self._on_editor_changed)
-        self.editor.connect("live-changed",          self._on_editor_live_changed)
+        self.editor.connect("changed",               self.clock.on_editor_changed)
         self.editor.connect("notify-user",           self._on_editor_notify_user)
         self._theme_panel.connect("rebuild-needed",   self._on_theme_panel_rebuild)
         self._theme_panel.connect("theme-changed",    self._on_panel_theme_changed)
@@ -708,9 +699,9 @@ class MainWindow(Adw.ApplicationWindow):
     def _shut_down(self) -> None:
         """Release everything that outlives a closed window."""
         self.converter.stop_watch()
+        self.clock.stop()
         for attr in ("_autosave_source", "_size_save_source",
-                     "_sidebar_update_source", "_cursor_sync_source",
-                     "_thumb_size_source", "_thumb_render_source"):
+                     "_thumb_size_source"):
             src = getattr(self, attr, None)
             if src is not None:
                 GLib.source_remove(src)
@@ -741,20 +732,6 @@ class MainWindow(Adw.ApplicationWindow):
         self.documents.discard_pres_temp()
 
     # ── Signal handlers ───────────────────────────────────────────────────────
-
-    def _on_editor_changed(self, editor: Editor, text: str) -> None:
-        self._mark_modified()
-        # Debounce the sidebar parse: run 200 ms after the last keystroke so
-        # we do not parse the full document on every character (#37).
-        self._debounce("_sidebar_update_source", 200, self._flush_sidebar_update, text)
-        self.update_word_count(text)
-        self.builds.update_chip()
-
-    def _flush_sidebar_update(self, text: str) -> bool:
-        self._sidebar_update_source = None
-        self.sidebar.update_from_text(text)
-        self.sync_panel_to_document(text)
-        return GLib.SOURCE_REMOVE
 
     def sync_panel_to_document(self, text: str) -> None:
         """
@@ -788,10 +765,6 @@ class MainWindow(Adw.ApplicationWindow):
 
     # ── The live slide ────────────────────────────────────────────────────────
 
-    def _on_editor_live_changed(self, editor: Editor, text: str) -> None:
-        """Editor settled for 150 ms — re-render the slide under the cursor."""
-        self.refresh_live_slide(text)
-
     def _apply_sidebar_width(self) -> None:
         """
         Size the strip to the chosen thumbnail size, and move the breakpoint.
@@ -808,7 +781,7 @@ class MainWindow(Adw.ApplicationWindow):
             Adw.BreakpointCondition.parse(f"max-width: {width + 540}px")
         )
 
-    def _live_render_width(self) -> int | None:
+    def live_render_width(self) -> int | None:
         """
         Width to rasterize the slide under the cursor at, or None for nobody.
 
@@ -820,56 +793,6 @@ class MainWindow(Adw.ApplicationWindow):
         if not self._can_rasterize or not self._left_split.get_show_sidebar():
             return None
         return self.sidebar.thumbnail_width * max(1, self.get_scale_factor())
-
-    def refresh_live_slide(self, text: str | None = None) -> None:
-        """
-        Ask for the slide under the cursor to be re-rendered for the strip.
-
-        The render runs on a background thread and lands in _on_live_frame;
-        requests coalesce, so typing quickly never queues stale frames.
-        """
-        width = self._live_render_width()
-        if width is None:
-            return
-
-        if text is None:
-            text = self.editor.get_text()
-
-        # Kept so the frame that comes back can be matched to the words it
-        # was laid out from; a request that is superseded never arrives, so
-        # whatever does arrive belongs to this text.
-        self._live_render_text = text
-        self.converter.render_slide_async(
-            text, self.documents.base_dir or Path.home(), self.current_slide,
-            width, self._on_live_frame,
-        )
-
-    def _on_live_frame(self, frame, error) -> None:
-        """Receive a rendered slide on the main thread and hand it to the strip."""
-        if error is not None:
-            # Nothing is shown for this: a slide that will not render leaves
-            # its row marked out of date, which is true and is already
-            # visible, and a banner raised on every keystroke while a slide
-            # is halfway typed would be noise.  A real fault in the document
-            # is reported by the build, which is where it can be acted on.
-            log.debug("Live slide render failed", exc_info=error)
-            return
-
-        # Bring the strip up to the text this frame was rendered from before
-        # handing the picture over.  The strip's text update is debounced
-        # twice — the editor settles, then the window does — so it reliably
-        # lands after a render, and a picture applied before it would be
-        # marked out of date again by the words catching up behind it.  This
-        # also lines the row indices up with the slides the frame counted.
-        if self._sidebar_update_source is not None:
-            GLib.source_remove(self._sidebar_update_source)
-        self._flush_sidebar_update(self._live_render_text)
-        # This slide was laid out by the same engine the build uses, so its
-        # fold is as authoritative as the build's — and it is fresher.  The
-        # strip gets the picture for the same reason: the row being edited
-        # need not wait for a build to stop being out of date.
-        self.sidebar.set_live_slide(frame.index, frame.png, frame.fold_line)
-        self.builds.set_live_fold(frame.index, frame.fold_line)
 
     def _on_thumbnail_size(self, _sidebar, width: int) -> None:
         """
@@ -885,63 +808,12 @@ class MainWindow(Adw.ApplicationWindow):
         self._thumbnail_size = width
         self._apply_sidebar_width()
         self._debounce("_thumb_size_source", 400, self._flush_thumbnail_size)
-        self._debounce("_thumb_render_source", 250, self._flush_thumbnail_render)
+        self.clock.request_render_soon()
 
     def _flush_thumbnail_size(self) -> bool:
         self._thumb_size_source = None
         self._save_window_state()
         return GLib.SOURCE_REMOVE
-
-    def _flush_thumbnail_render(self) -> bool:
-        self._thumb_render_source = None
-        self.refresh_live_slide()
-        return GLib.SOURCE_REMOVE
-
-    def _sync_sidebar_to_cursor(self) -> bool:
-        """
-        Poll the editor cursor position every 300 ms and highlight the
-        matching slide in the sidebar (#28).
-
-        Caches the parsed slide-offset list so we only re-parse the document
-        when the text has actually changed — avoids calling split_slides()
-        3× per second on every keystroke.
-
-        The same position drives the live render, so the strip's row for the
-        slide the cursor is in is the one kept current.
-        """
-        try:
-            from .slides.utils import compute_slide_offsets
-            text   = self.editor.get_text()
-            offset = self.editor.get_cursor_offset()
-
-            # Re-parse only when text changed since last poll
-            if (self._cursor_sync_cache is None
-                    or self._cursor_sync_cache[0] != text):
-                slide_offsets = compute_slide_offsets(text)
-                self._cursor_sync_cache = (text, slide_offsets)
-            else:
-                slide_offsets = self._cursor_sync_cache[1]
-
-            # Find which slide the cursor is in
-            current = 0
-            for i, start in enumerate(slide_offsets):
-                if offset >= start:
-                    current = i
-                else:
-                    break
-
-            # No longer gated on a build: the strip is read out of the text,
-            # so it has rows to select from the first keystroke.
-            self.sidebar.scroll_to_index(current)
-
-            # Follow the cursor across slide boundaries.  Edits within one
-            # slide are handled by the live-changed signal instead.
-            if current != self.current_slide:
-                self.current_slide = current
-                self.refresh_live_slide(text)
-        except Exception:
-            log.debug("Cursor sync error", exc_info=True)
-        return GLib.SOURCE_CONTINUE
 
     def _on_undo_state_changed(self, can_undo: bool, can_redo: bool) -> None:
         # The buttons are gone; the menu items grey out via their actions.
@@ -954,8 +826,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.editor.scroll_to_slide(index)
         # Re-render now rather than waiting for the cursor poll — a click
         # should land on the slide immediately.
-        self.current_slide = index
-        self.refresh_live_slide()
+        self.clock.go_to_slide(index)
 
     def _on_slide_insert_after(self, sidebar: Sidebar, after_index: int) -> None:
         """
@@ -979,11 +850,8 @@ class MainWindow(Adw.ApplicationWindow):
         new_text = (fm + "\n\n" + new_body) if fm else new_body
 
         self.editor.set_text_as_user_action(new_text)
-        self._mark_modified()
-        self.sidebar.update_from_text(new_text)
-        self.current_slide = insert_at
-        self.refresh_live_slide(new_text)
-        self.builds.update_chip()
+        self.mark_modified()
+        self.clock.document_replaced(new_text, insert_at)
         # Scroll editor to the newly inserted slide.  Spelled out rather than
         # a lambda returning a tuple: that returned (None, False), and it only
         # stopped repeating because PyGObject cannot make a gboolean out of a
@@ -1011,10 +879,8 @@ class MainWindow(Adw.ApplicationWindow):
 
         # Use set_text_as_user_action so the reorder is one undo step (#56)
         self.editor.set_text_as_user_action(new_text)
-        self._mark_modified()
-        self.sidebar.update_from_text(new_text)
-        self.refresh_live_slide(new_text)
-        self.builds.update_chip()
+        self.mark_modified()
+        self.clock.document_replaced(new_text)
 
     def _on_present_clicked(self, *_) -> None:
         """Build if the deck has moved on, then open presenter mode."""
@@ -1184,17 +1050,15 @@ class MainWindow(Adw.ApplicationWindow):
         new_text = new_block + text[len(block):]
 
         self.editor.set_text_as_user_action(new_text)
-        self._mark_modified()
-        self.sidebar.update_from_text(new_text)
-        self.refresh_live_slide(new_text)
-        self.builds.update_chip()
+        self.mark_modified()
+        self.clock.document_replaced(new_text)
 
     def _on_theme_panel_rebuild(self, panel) -> None:
         """ThemePanel emitted rebuild-needed — restyle the strip, rebuild the PDF."""
         # Theme files may have been edited in place, so drop the cached CSS
         # rather than relying on the cache key alone.
         self.converter.invalidate_render_cache()
-        self.refresh_live_slide()
+        self.clock.refresh()
         self.builds.trigger()
 
     # ── Menu action handlers ──────────────────────────────────────────────────
@@ -1204,11 +1068,10 @@ class MainWindow(Adw.ApplicationWindow):
             win = MainWindow(application=self.get_application())
             # Populate the new window with the starter template (#24)
             win.editor.set_text(_STARTER_TEMPLATE)
-            win.sidebar.update_from_text(_STARTER_TEMPLATE)
             win.documents.modified = False   # template is not a user edit
             win.present()
             # After present(), so the strip has an allocation to scale into.
-            win.refresh_live_slide(_STARTER_TEMPLATE)
+            win.clock.document_replaced(_STARTER_TEMPLATE)
         self.documents.check_unsaved(_open_new)
 
     def show_open_dialog(self) -> None:
@@ -1389,7 +1252,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.set_title(f"{name} — Presence")
         self._title_label.set_title(name)
 
-    def _mark_modified(self) -> None:
+    def mark_modified(self) -> None:
         """Note that the buffer has moved on from disk, and say so in the title."""
         self.documents.modified = True
         self.set_document_title(self.documents.display_name + " •")
