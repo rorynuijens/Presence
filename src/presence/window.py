@@ -182,9 +182,9 @@ class MainWindow(Adw.ApplicationWindow):
             ratio=prefs.get("ratio", "16:9"),
             logo_path=Path(prefs["logo"]) if prefs.get("logo") else None,
         )
-        self.converter.connect("conversion-started",  self._on_conversion_started)
-        self.converter.connect("conversion-complete", self._on_conversion_complete)
-        self.converter.connect("conversion-failed",   self._on_conversion_failed)
+        self.converter.connect("conversion-started",  self.builds.on_started)
+        self.converter.connect("conversion-complete", self.builds.on_complete)
+        self.converter.connect("conversion-failed",   self.builds.on_failed)
 
         # Presentation preferences — must be set before _build_ui() so that
         # ThemePanel.attach() → _sync_controls() can read _timer_minutes.
@@ -228,7 +228,7 @@ class MainWindow(Adw.ApplicationWindow):
         # window: the app should open the way it was left.
         self._set_focus_mode(prefs.get("focus_mode", False), persist=False)
 
-        self._autosave_source: int | None = GLib.timeout_add_seconds(30, self._autosave)
+        self._autosave_source: int | None = GLib.timeout_add_seconds(30, self.documents.autosave)
 
         # Poll cursor position every 300 ms to keep sidebar in sync (#28)
         self._cursor_sync_source = GLib.timeout_add(300, self._sync_sidebar_to_cursor)
@@ -239,7 +239,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.connect("close-request",          self._on_close_request)
         self.connect("destroy",                self._on_destroy)
 
-        self._update_build_chip()
+        self.builds.update_chip()
 
     # ── What application.py reads ─────────────────────────────────────────────
     #
@@ -415,7 +415,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._share_btn.add_css_class("flat")
         self._share_btn.set_popover(self._build_share_popover())
         # Enabled from the start.  Every format routes through
-        # _with_current_build(), which builds first when the deck has moved
+        # builds.with_current_build(), which builds first when the deck has
         # on, so there is nothing left for a greyed-out button to protect
         # against — only a control that looked broken until a build happened.
         self.export_busy = _BusyIndicator(
@@ -503,13 +503,13 @@ class MainWindow(Adw.ApplicationWindow):
             listbox.append(row)
 
         _row("document-save-symbolic", "PDF…",
-             "The deck as a PDF file", self._on_export)
+             "The deck as a PDF file", self.exports.export_pdf)
         _row("text-x-generic-symbolic", "HTML…",
-             "A self-contained web page", self._on_export_html)
+             "A self-contained web page", self.exports.export_html)
         _row("image-x-generic-symbolic", "Images…",
-             "One PNG per slide, into a folder", self._on_export_images)
+             "One PNG per slide, into a folder", self.exports.export_images)
         _row("view-paged-symbolic", "Handout…",
-             "Your slides and script, to read or print", self._on_export_handout)
+             "Your slides and script, to read or print", self.exports.export_handout)
 
         popover.set_child(listbox)
         return popover
@@ -608,7 +608,7 @@ class MainWindow(Adw.ApplicationWindow):
             ("save",     self._on_save,            ["<primary>s"]),
             ("save-as",  self._on_save_as,         ["<primary><shift>s"]),
             # Ctrl+Return still triggers a manual rebuild for power users
-            ("convert",  self._trigger_convert,    ["<primary>Return"]),
+            ("convert",  self.builds.trigger,      ["<primary>Return"]),
             ("undo",         lambda *_: self.editor.undo(),              ["<primary>z"]),
             ("redo",         lambda *_: self.editor.redo(),              ["<primary><shift>z"]),
             ("find",         lambda *_: self.editor.show_find(),         ["<primary>f"]),
@@ -617,10 +617,10 @@ class MainWindow(Adw.ApplicationWindow):
             # exactly what Export PDF writes; it used to open the presenter,
             # which left the nearest thing to Print on Ctrl+Shift+E alone.
             # That binding is kept — it is what this app taught.
-            ("export",       self._on_export,          ["<primary>p", "<primary><shift>e"]),
-            ("export-html",   self._on_export_html,                       None),
-            ("export-images", self._on_export_images,                     None),
-            ("export-handout", self._on_export_handout,                    None),
+            ("export",       self.exports.export_pdf,          ["<primary>p", "<primary><shift>e"]),
+            ("export-html",   self.exports.export_html,                       None),
+            ("export-images", self.exports.export_images,                     None),
+            ("export-handout", self.exports.export_handout,                    None),
             ("open-pdf",      self._on_open_pdf_clicked,                  None),
             ("show-output",   self._on_show_in_file_manager,              None),
             ("copy-pdf-path", self._on_copy_pdf_path,                     None),
@@ -675,7 +675,7 @@ class MainWindow(Adw.ApplicationWindow):
             # Disable the action if the file no longer exists (#55) so the
             # greyed-out menu item is non-interactive, matching HIG guidance.
             action.set_enabled(path.exists())
-            action.connect("activate", lambda *_, p=path: self._check_unsaved(lambda: self.open_file(p)))
+            action.connect("activate", lambda *_, p=path: self.documents.check_unsaved(lambda: self.open_file(p)))
             self.add_action(action)
 
     def refresh_recent_actions(self) -> None:
@@ -719,30 +719,17 @@ class MainWindow(Adw.ApplicationWindow):
         # Always clean up temp files, regardless of modified state (#44)
         self.builds.cleanup_scratch()
 
-    def _check_unsaved(self, action) -> None:
-        self.documents.check_unsaved(action)
-
     # ── File operations ───────────────────────────────────────────────────────
+
+    # Public, and named what application.py calls them.  That file is mode
+    # 444, so these two names are fixed; everything else the window used to
+    # forward to a controller is now bound straight to the controller.
 
     def open_file(self, path: Path) -> None:
         self.documents.open_file(path)
 
     def restore_autosave(self, text: str) -> None:
         self.documents.restore_autosave(text)
-
-    def _save(self, on_done=None) -> bool:
-        return self.documents.save(on_done=on_done)
-
-    def _write_document(self, on_done=None) -> bool:
-        return self.documents.write_document(on_done=on_done)
-
-    def _save_as_dialog(self, on_done=None) -> bool:
-        return self.documents.save_as_dialog(on_done=on_done)
-
-    # ── Conversion ────────────────────────────────────────────────────────────
-
-    def _trigger_convert(self, *_) -> None:
-        self.builds.trigger()
 
     # ── .pres bundle support ──────────────────────────────────────────────────
     #
@@ -761,7 +748,7 @@ class MainWindow(Adw.ApplicationWindow):
         # we do not parse the full document on every character (#37).
         self._debounce("_sidebar_update_source", 200, self._flush_sidebar_update, text)
         self.update_word_count(text)
-        self._update_build_chip()
+        self.builds.update_chip()
 
     def _flush_sidebar_update(self, text: str) -> bool:
         self._sidebar_update_source = None
@@ -804,10 +791,6 @@ class MainWindow(Adw.ApplicationWindow):
     def _on_editor_live_changed(self, editor: Editor, text: str) -> None:
         """Editor settled for 150 ms — re-render the slide under the cursor."""
         self.refresh_live_slide(text)
-
-    def _document_base_dir(self) -> Path:
-        """Directory relative image paths in the document resolve against."""
-        return self.documents.base_dir or Path.home()
 
     def _apply_sidebar_width(self) -> None:
         """
@@ -857,7 +840,7 @@ class MainWindow(Adw.ApplicationWindow):
         # whatever does arrive belongs to this text.
         self._live_render_text = text
         self.converter.render_slide_async(
-            text, self._document_base_dir(), self.current_slide,
+            text, self.documents.base_dir or Path.home(), self.current_slide,
             width, self._on_live_frame,
         )
 
@@ -886,13 +869,7 @@ class MainWindow(Adw.ApplicationWindow):
         # strip gets the picture for the same reason: the row being edited
         # need not wait for a build to stop being out of date.
         self.sidebar.set_live_slide(frame.index, frame.png, frame.fold_line)
-        self._set_live_fold(frame.index, frame.fold_line)
-
-    def _set_build_folds(self, folds: list) -> None:
-        self.builds.set_build_folds(folds)
-
-    def _set_live_fold(self, index: int, fold_line) -> None:
-        self.builds.set_live_fold(index, fold_line)
+        self.builds.set_live_fold(frame.index, frame.fold_line)
 
     def _on_thumbnail_size(self, _sidebar, width: int) -> None:
         """
@@ -1006,7 +983,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.sidebar.update_from_text(new_text)
         self.current_slide = insert_at
         self.refresh_live_slide(new_text)
-        self._update_build_chip()
+        self.builds.update_chip()
         # Scroll editor to the newly inserted slide.  Spelled out rather than
         # a lambda returning a tuple: that returned (None, False), and it only
         # stopped repeating because PyGObject cannot make a gboolean out of a
@@ -1037,17 +1014,15 @@ class MainWindow(Adw.ApplicationWindow):
         self._mark_modified()
         self.sidebar.update_from_text(new_text)
         self.refresh_live_slide(new_text)
-        self._update_build_chip()
-
-    def _with_current_build(self, action, on_wait=None) -> None:
-        self.builds.with_current_build(action, on_wait)
+        self.builds.update_chip()
 
     def _on_present_clicked(self, *_) -> None:
         """Build if the deck has moved on, then open presenter mode."""
-        self._with_current_build(self._on_presenter, on_wait=self._present_busy)
+        self.builds.with_current_build(self._on_presenter,
+                                       on_wait=self._present_busy)
 
     def _on_open_pdf_clicked(self, *_) -> None:
-        self._with_current_build(self._open_built_pdf)
+        self.builds.with_current_build(self._open_built_pdf)
 
     def _open_built_pdf(self) -> None:
         if not (self.documents.output_path and self.documents.output_path.exists()):
@@ -1119,29 +1094,6 @@ class MainWindow(Adw.ApplicationWindow):
             self.show_toast("PDF path copied to clipboard", timeout=2)
 
     # ── Build status ──────────────────────────────────────────────────────────
-
-    # ── Build state ───────────────────────────────────────────────────────────
-    #
-    # BuildCoordinator owns all of this; the window keeps the names the
-    # actions and converter signals are wired to.
-
-    def _build_state(self) -> str:
-        return self.builds.state()
-
-    def _update_build_chip(self) -> None:
-        self.builds.update_chip()
-
-    def _on_conversion_started(self, converter: Converter) -> None:
-        self.builds.on_started(converter)
-
-    def _on_conversion_complete(self, converter: Converter, n_slides: int,
-                                duration: float, pdf_path: str,
-                                html_uri: str) -> None:
-        self.builds.on_complete(converter, n_slides, duration,
-                                 pdf_path, html_uri)
-
-    def _on_conversion_failed(self, converter: Converter, message: str) -> None:
-        self.builds.on_failed(converter, message)
 
     # ── Panel toggles ─────────────────────────────────────────────────────────
 
@@ -1235,7 +1187,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._mark_modified()
         self.sidebar.update_from_text(new_text)
         self.refresh_live_slide(new_text)
-        self._update_build_chip()
+        self.builds.update_chip()
 
     def _on_theme_panel_rebuild(self, panel) -> None:
         """ThemePanel emitted rebuild-needed — restyle the strip, rebuild the PDF."""
@@ -1243,7 +1195,7 @@ class MainWindow(Adw.ApplicationWindow):
         # rather than relying on the cache key alone.
         self.converter.invalidate_render_cache()
         self.refresh_live_slide()
-        self._trigger_convert()
+        self.builds.trigger()
 
     # ── Menu action handlers ──────────────────────────────────────────────────
 
@@ -1257,13 +1209,14 @@ class MainWindow(Adw.ApplicationWindow):
             win.present()
             # After present(), so the strip has an allocation to scale into.
             win.refresh_live_slide(_STARTER_TEMPLATE)
-        self._check_unsaved(_open_new)
+        self.documents.check_unsaved(_open_new)
 
     def show_open_dialog(self) -> None:
+        """Public: application.py opens a chooser in a fresh window."""
         self._show_open_dialog()
 
     def _on_open(self, *_) -> None:
-        self._check_unsaved(self._show_open_dialog)
+        self.documents.check_unsaved(self._show_open_dialog)
 
     def _show_open_dialog(self) -> None:
         dialog = Gtk.FileDialog()
@@ -1287,11 +1240,19 @@ class MainWindow(Adw.ApplicationWindow):
             return
         self.open_file(Path(path_str))
 
+    # These two look like delegates that could be deleted, and cannot be.
+    # A Gio.SimpleAction calls its handler with (action, parameter), and
+    # save(on_done=None) would take the action object as its continuation and
+    # call it once the file landed.  The *_ is the whole point.  Where the
+    # controller's own method already absorbs those arguments — trigger(),
+    # export_pdf() and the rest are all `(self, *_)` — the action is bound
+    # straight to it and there is no method here at all.
+
     def _on_save(self, *_) -> None:
-        self._save()
+        self.documents.save()
 
     def _on_save_as(self, *_) -> None:
-        self._save_as_dialog()
+        self.documents.save_as_dialog()
 
     def _on_settings(self, *_) -> None:
         # The window used to hold a reference to the open dialog so that
@@ -1363,18 +1324,6 @@ class MainWindow(Adw.ApplicationWindow):
     # The four flows live in ExportController; the window keeps only the names
     # the actions are wired to.
 
-    def _on_export(self, *_) -> None:
-        self.exports.export_pdf()
-
-    def _on_export_html(self, *_) -> None:
-        self.exports.export_html()
-
-    def _on_export_images(self, *_) -> None:
-        self.exports.export_images()
-
-    def _on_export_handout(self, *_) -> None:
-        self.exports.export_handout()
-
     def _on_show_in_file_manager(self, *_) -> None:
         """Open the output folder in the system file manager."""
         if self.documents.pres_path:
@@ -1408,11 +1357,6 @@ class MainWindow(Adw.ApplicationWindow):
             "theme_panel_visible": self._theme_panel_btn.get_active(),
             "thumbnail_size":      self._thumbnail_size,
         })
-
-    # ── Autosave ──────────────────────────────────────────────────────────────
-
-    def _autosave(self) -> bool:
-        return self.documents.autosave()
 
     # ── Word count ────────────────────────────────────────────────────────────
 

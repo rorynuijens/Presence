@@ -28,6 +28,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gtk  # noqa: E402
 
 from presence.window import MainWindow  # noqa: E402
+from presence.export_controller import ExportController  # noqa: E402
 
 
 @pytest.fixture
@@ -129,7 +130,9 @@ def test_activating_a_row_runs_its_export_and_closes_the_popover(window,
                                                                  monkeypatch):
     _app, win = window
     called = []
-    monkeypatch.setattr(MainWindow, "_on_export_handout",
+    # Patched on the controller that owns the export: the row is bound
+    # straight to it now, with no window method in between.
+    monkeypatch.setattr(ExportController, "export_handout",
                         lambda self, *a: called.append("handout"))
     # The popover is rebuilt so the row closes over the patched method.
     popover = win._build_share_popover()
