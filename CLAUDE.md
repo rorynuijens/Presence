@@ -35,13 +35,31 @@ pytest tests/test_slides.py                 # single file
 pytest tests/test_slides.py::test_split_basic  # single test
 ```
 
-`tests/conftest.py` pins `GDK_BACKEND=offscreen`, which GTK 4 no longer has:
-`Gtk.init_check()` still returns True but constructing any **widget** then
-segfaults. Non-widget GObjects are fine — `Converter`, `Gtk.FileDialog`,
-`GtkTextBuffer` — so the controller tests drive the real class against a
-stand-in window rather than building one. Three test files are mode `444`
-(`test_slides.py`, `test_css.py`, `test_session.py`), so new tests go in new
-files.
+**Widget tests work.** They did not for a long time, because `conftest.py`
+pinned `GDK_BACKEND=offscreen` — a backend GTK 4 removed. `Gtk.init_check()`
+still returned True and the first widget constructed then segfaulted, which
+read as a GTK 4 limitation and was in fact the pin's doing. The pin is gone.
+
+Anything that builds a widget takes the `gtk` fixture, which skips when there
+is no display rather than failing inside a constructor; without one, run a
+headless compositor (`broadwayd`, `mutter --headless`) and point
+`WAYLAND_DISPLAY` or `DISPLAY` at it. What the pin was there for — a test run
+must never throw a window onto the desktop — holds because **nothing presents
+a window**: a GTK widget, toplevels included, is neither mapped nor visible
+until something calls `present()`. A class that presents one of its own from
+`__init__` is tested with that collaborator replaced, which is how
+`test_presenter.py` builds `PresenterWindow` without fullscreening a slideshow
+onto the developer's screen.
+
+The older controller tests still drive the real class against a stand-in
+window (`test_build_status.py` established that pattern, and
+`test_document_controller.py`, `test_export_controller.py` and
+`test_build_coordinator.py` follow it). That is still the right shape for
+logic that only needs the window's few attributes — it is faster and needs no
+display — but it is no longer the only option.
+
+Three test files are mode `444` (`test_slides.py`, `test_css.py`,
+`test_session.py`), so new tests go in new files.
 
 ## Installing
 
