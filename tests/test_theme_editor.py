@@ -114,6 +114,28 @@ def test_an_unparseable_colour_falls_back_to_grey():
     assert _rgba_to_hex(_hex_to_rgba("not a colour")) == "#808080"
 
 
+def test_every_preset_clears_the_bar_the_editor_holds_it_to(gtk):
+    """
+    A palette the editor offers must not be one the editor then marks red.
+
+    Classic and Parchment were at 3.2:1 and 3.8:1, so a new theme opened on
+    a failing accent.  The bar is 4.5:1 because the accent is not only
+    heading colour — css.py gives `strong` and `a` to it at body size.
+    """
+    failing = [
+        (label, accent, bg, round(_contrast_ratio(accent, bg), 2))
+        for label, bg, _fg, accent, _tbg, _tfg in _PRESETS
+        if _contrast_ratio(accent, bg) < 4.5
+    ]
+    assert failing == []
+
+
+def test_every_preset_is_readable_in_its_own_body_and_cover(gtk):
+    for label, bg, fg, _accent, tbg, tfg in _PRESETS:
+        assert _contrast_ratio(fg, bg) >= 4.5, label
+        assert _contrast_ratio(tfg, tbg) >= 4.5, label
+
+
 # ── Slugs ─────────────────────────────────────────────────────────────────────
 
 def test_auto_slug_makes_a_filesystem_safe_identifier():

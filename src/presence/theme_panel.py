@@ -152,15 +152,24 @@ class ThemePanel(Gtk.Box):
         slide_group.add(self._ratio_row)
         body.append(slide_group)
 
-        # ── Logo — HIG-compliant boxed-list ActionRow ─────────────────────────
-        # GNOME HIG pattern: Adw.ActionRow in a boxed-list with a thumbnail
-        # prefix showing the current logo (or a placeholder icon) and
-        # Choose / Clear suffix buttons.  Drag-and-drop onto the row is
-        # supported as a secondary affordance, not the primary one.
-        # Logo rows — added to slide_group alongside the ratio row.
-        # No prefix icon: the 300px panel is too narrow for icon + title + subtitle + two buttons.
-        self._logo_row = Adw.ActionRow(title="Select or drop logo")
+        # ── Logo ──────────────────────────────────────────────────────────────
+        # Adw.ActionRow in the boxed list: what it is in the title, which
+        # file in the subtitle, the two actions as suffixes.
+        #
+        # The title was "Select or drop logo" beside a "Choose…" and a
+        # "Clear" button, which left it about eighty pixels of a 300px panel
+        # to wrap an instruction across four lines.  A row's title names the
+        # thing; the instruction was teaching the drag-and-drop, which is a
+        # secondary affordance and belongs in the tooltip.  Clear is an icon
+        # now — the label was the wider half of the pair and said the least.
+        self._logo_row = Adw.ActionRow(title="Logo")
         self._logo_row.set_subtitle("None")
+        # One line each, ellipsized.  A row this narrow cannot wrap a file
+        # name without pushing the buttons around; the whole name goes in
+        # the tooltip, which is where the row already explains itself.
+        for setter, lines in (("set_title_lines", 1), ("set_subtitle_lines", 1)):
+            if hasattr(self._logo_row, setter):
+                getattr(self._logo_row, setter)(lines)
 
         logo_btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         logo_btn_box.set_valign(Gtk.Align.CENTER)
@@ -170,12 +179,20 @@ class ThemePanel(Gtk.Box):
         choose_btn.connect("clicked", self._on_choose_logo)
         logo_btn_box.append(choose_btn)
 
-        self._logo_clear_btn = Gtk.Button(label="Clear")
+        self._logo_clear_btn = Gtk.Button()
+        self._logo_clear_btn.set_child(
+            Gtk.Image.new_from_icon_name("edit-clear-symbolic")
+        )
+        self._logo_clear_btn.set_tooltip_text("Remove the logo")
+        self._logo_clear_btn.update_property(
+            [Gtk.AccessibleProperty.LABEL], ["Remove the logo"]
+        )
         self._logo_clear_btn.add_css_class("flat")
         self._logo_clear_btn.set_sensitive(False)
         self._logo_clear_btn.connect("clicked", self._on_clear_logo)
         logo_btn_box.append(self._logo_clear_btn)
         self._logo_row.add_suffix(logo_btn_box)
+        self._logo_row.set_activatable_widget(choose_btn)
         slide_group.add(self._logo_row)
 
         # Size slider row — hidden until a logo is chosen
@@ -524,10 +541,17 @@ class ThemePanel(Gtk.Box):
         self.emit("rebuild-needed")
 
 
+    _LOGO_HINT = "Choose a picture, or drop one on this row"
+
     def _update_logo_ui(self, path) -> None:
-        """Update the logo row subtitle and size row visibility."""
+        """Update the logo row subtitle, tooltip and size row visibility."""
         has_logo = path is not None
         self._logo_row.set_subtitle(path.name if has_logo else "None")
+        # The subtitle is ellipsized to one line, so the tooltip carries the
+        # name in full — and the drop hint when there is nothing to name.
+        self._logo_row.set_tooltip_text(
+            f"{path}\n\n{self._LOGO_HINT}" if has_logo else self._LOGO_HINT
+        )
         self._logo_clear_btn.set_sensitive(has_logo)
         self._logo_size_row.set_visible(has_logo)
 

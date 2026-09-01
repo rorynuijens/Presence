@@ -239,6 +239,40 @@ def test_choosing_a_ratio_changes_the_deck_and_asks_for_a_build(panel):
 
 # ── The logo ──────────────────────────────────────────────────────────────────
 
+def test_the_logo_row_names_the_thing_rather_than_instructing(panel):
+    """
+    The title was "Select or drop logo" beside two labelled buttons, which
+    left it about eighty pixels of a 300px panel and wrapped it over four
+    lines.  A row's title names the thing; the instruction is the tooltip's.
+    """
+    p = panel()
+    assert p._logo_row.get_title() == "Logo"
+    assert "drop" in p._logo_row.get_tooltip_text().lower()
+    # Neither line may wrap: a long file name would otherwise push the
+    # buttons around in a 300px panel.
+    if hasattr(p._logo_row, "get_subtitle_lines"):
+        assert p._logo_row.get_title_lines() == 1
+        assert p._logo_row.get_subtitle_lines() == 1
+
+
+def test_a_long_logo_name_is_named_in_full_by_the_tooltip(panel, tmp_path):
+    # The subtitle is one ellipsized line, so the tooltip is where the whole
+    # path has to be.
+    p = panel()
+    logo = tmp_path / "a-rather-long-organisation-logo-name.svg"
+    logo.write_text("<svg/>")
+    p._update_logo_ui(logo)
+    assert p._logo_row.get_subtitle() == logo.name
+    assert str(logo) in p._logo_row.get_tooltip_text()
+
+
+def test_the_icon_only_clear_button_still_says_what_it_is(panel):
+    # It lost its "Clear" label to fit; a screen reader must not lose it too.
+    p = panel()
+    assert p._logo_clear_btn.get_label() is None
+    assert p._logo_clear_btn.get_tooltip_text() == "Remove the logo"
+
+
 def test_no_logo_hides_the_size_slider_and_greys_the_clear_button(panel):
     p = panel()
     p._update_logo_ui(None)

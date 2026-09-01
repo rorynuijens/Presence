@@ -145,12 +145,19 @@ Body text with **bold** and *italic* words.
 _CALLOUT_KINDS = ("tip", "info", "warning", "danger")
 
 # Palette presets — each entry is (label, bg, fg, accent, title_bg, title_fg)
+#
+# Every accent clears 4.5:1 against its background, which is the bar the
+# contrast strip holds them to and the one that matters: the accent is not
+# only heading colour, it is also `strong` and `a` at body size (css.py).
+# Classic and Parchment did not — 3.2:1 and 3.8:1 — so a new theme started
+# on a palette the editor then marked as failing.  Both were darkened along
+# their own hue by the least that clears the bar.
 _PRESETS: list[tuple[str, str, str, str, str, str]] = [
-    ("Classic",   "#ffffff", "#1a1a2e", "#E17000", "#1a1a2e", "#ffffff"),
+    ("Classic",   "#ffffff", "#1a1a2e", "#ba5d00", "#1a1a2e", "#ffffff"),
     ("Midnight",  "#1a1a2e", "#e8e8f0", "#5b8dee", "#0d0d1a", "#ffffff"),
     ("Sage",      "#f5f0e8", "#1c2b1e", "#2d6a4f", "#1c2b1e", "#f5f0e8"),
     ("Carbon",    "#111111", "#f0f0f0", "#ff6b6b", "#000000", "#f0f0f0"),
-    ("Parchment", "#fefae0", "#3a2a1a", "#bc6c25", "#3a2a1a", "#fefae0"),
+    ("Parchment", "#fefae0", "#3a2a1a", "#a96121", "#3a2a1a", "#fefae0"),
     ("Arctic",    "#e8f4f8", "#0d2b3e", "#185fa5", "#0d2b3e", "#e8f4f8"),
     ("Violet",    "#f5f0ff", "#1e0a3c", "#7c3aed", "#1e0a3c", "#f5f0ff"),
     ("Dusk",      "#2d1b3d", "#f0e8ff", "#c084fc", "#1a0d2e", "#f0e8ff"),
