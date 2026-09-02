@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import re
 import shutil
 from pathlib import Path
@@ -1233,6 +1234,47 @@ class Editor(Gtk.Box):
         stem = Editor._UNSAFE_IN_SRC.sub("-", src.stem).strip("-")
         return (stem or "image") + src.suffix
 
+    # A document-portal handout: one directory per file, holding that file
+    # and nothing else.  It is what a file chooser returns when the app
+    # cannot reach the real folder, and mkdir() inside it is EPERM however
+    # often it is retried.  Worth recognising by sight, because the failure
+    # it causes has nothing to do with the picture being added.
+    _PORTAL_DIR_RE = re.compile(r'^/run/(?:flatpak/doc|user/\d+/doc)/')
+
+    @classmethod
+    def _is_portal_path(cls, path: Path) -> bool:
+        return bool(cls._PORTAL_DIR_RE.match(str(path)))
+
+    def _why_copy_failed(self, src: Path) -> str:
+        """
+        Which half of the copy is impossible: reading it, or writing it.
+
+        Worth asking separately because the two have opposite remedies and
+        the wrong one wastes the writer's time.  The message used to blame
+        the picture's folder for every failure, including the common one
+        where the picture is perfectly readable and the *document* sits
+        somewhere the assets folder cannot be created.
+        """
+        if not self._base_path:
+            return "unsaved"
+        parent = self._base_path.parent
+        if self._is_portal_path(parent) or not os.access(parent, os.W_OK):
+            return "document"
+        try:
+            if not src.exists():
+                return "source"
+        except OSError:
+            return "source"
+        return "source" if not os.access(src, os.R_OK) else "unknown"
+
+    def _cannot_write_beside_document(self) -> str:
+        """What to say when assets/ cannot be made next to the document."""
+        name = self._base_path.name if self._base_path else "this presentation"
+        return (f"Presence could not create an 'assets' folder next to "
+                f"'{name}', so it has nowhere to put the picture. Move the "
+                f"presentation into Documents, Pictures, Downloads or "
+                f"Desktop, or use Save as to put it there.")
+
     def _copy_into_assets(self, src: Path) -> "str | None":
         """
         Copy *src* next to the document and return the path to write.
@@ -1268,18 +1310,38 @@ class Editor(Gtk.Box):
             copied = self._copy_into_assets(src_path)
             if copied is not None:
                 rel_path = copied
-            elif self._UNSAFE_IN_SRC.search(rel_path):
-                # The path cannot be written into a slide as it stands and
-                # there is nowhere to put a copy.  A tag that renders nothing
-                # is worse than saying why.
-                self.emit(
-                    "notify-user",
-                    f"'{src_path.name}' cannot be linked from an unsaved "
-                    f"presentation because of the spaces or brackets in its "
-                    f"name. Save the presentation first and Presence will "
-                    f"copy the picture next to it."
-                )
-                return
+            else:
+                reason = self._why_copy_failed(src_path)
+                if reason == "document":
+                    self.emit("notify-user",
+                              self._cannot_write_beside_document())
+                    return
+                if self._is_portal_path(src_path):
+                    # The chooser handed back a document-portal path, which
+                    # is this run's alone: writing it into the document
+                    # produces a tag that works until the app is closed and
+                    # is broken by the time the deck is opened again.
+                    self.emit(
+                        "notify-user",
+                        f"Presence could not copy '{src_path.name}' next to "
+                        f"the presentation, and the picture's own location "
+                        f"is temporary, so a link to it would not survive. "
+                        f"Save the presentation into Documents, Pictures, "
+                        f"Downloads or Desktop and add the picture again."
+                    )
+                    return
+                if self._UNSAFE_IN_SRC.search(rel_path):
+                    # The path cannot be written into a slide as it stands
+                    # and there is nowhere to put a copy.  A tag that renders
+                    # nothing is worse than saying why.
+                    self.emit(
+                        "notify-user",
+                        f"'{src_path.name}' cannot be linked from an unsaved "
+                        f"presentation because of the spaces or brackets in "
+                        f"its name. Save the presentation first and Presence "
+                        f"will copy the picture next to it."
+                    )
+                    return
         self._replace_selection(f"![{alt}]({rel_path})")
         self._view.grab_focus()
 
@@ -1425,6 +1487,7 @@ class Editor(Gtk.Box):
         inserted   = []
         unreadable = []
         unsafe     = []
+        nowhere    = False
         for gfile in files:
             path_str = gfile.get_path()
             if not path_str:
@@ -1436,11 +1499,16 @@ class Editor(Gtk.Box):
             if self._base_path:
                 rel = self._copy_into_assets(src)
                 if rel is None:
-                    # Under Flatpak this is normally the sandbox: the drop
-                    # carries a real path the app is not permitted to read.
-                    # Inserting it anyway produces a tag that silently
-                    # renders nothing, which is worse than saying so.
-                    unreadable.append(src.name)
+                    # Two different failures used to be reported as one, and
+                    # the one it named was the rarer.  Under Flatpak the
+                    # usual cause is not the picture at all: it is that the
+                    # document sits somewhere an assets folder cannot be
+                    # created, so every picture fails and the message sends
+                    # the writer to look at the wrong folder.
+                    if self._why_copy_failed(src) == "document":
+                        nowhere = True
+                    else:
+                        unreadable.append(src.name)
                     continue
             elif self._UNSAFE_IN_SRC.search(str(src)):
                 # Nowhere to copy to, and the path cannot be written into a
@@ -1452,6 +1520,8 @@ class Editor(Gtk.Box):
             alt = src.stem.replace("-", " ").replace("_", " ")
             inserted.append(f"![{alt}]({rel})")
 
+        if nowhere:
+            self.emit("notify-user", self._cannot_write_beside_document())
         if unreadable:
             names = ", ".join(unreadable[:3])
             more  = f" and {len(unreadable) - 3} more" if len(unreadable) > 3 else ""

@@ -48,17 +48,36 @@ def test_images_can_be_dropped_from_the_usual_places(finish_args, location):
     )
 
 
-def test_documents_stays_writable(finish_args):
-    """A dropped image is copied into assets/ beside the .md, so the
-    document's own directory has to be writable."""
-    assert _filesystems(finish_args).get("xdg-documents") == "rw"
+def test_nothing_outside_the_usual_places_is_granted(finish_args):
+    """
+    The four user folders, and no more. Widening was considered and declined:
+    a deck in ~/Projects still cannot have assets written beside it, which is
+    the accepted cost of leaving dotfiles and everything else out of reach.
+    """
+    granted = set(_filesystems(finish_args))
+    allowed = {"xdg-documents", "xdg-pictures", "xdg-download", "xdg-desktop",
+               "xdg-data/presence", "xdg-data/fonts", "~/.local/share/fonts"}
+    assert granted <= allowed, f"unexpected grants: {granted - allowed}"
 
 
-def test_the_read_only_grants_really_are_read_only(finish_args):
-    """Reading is all that is needed to copy a picture out of them."""
-    granted = _filesystems(finish_args)
-    for location in ("xdg-pictures", "xdg-download", "xdg-desktop"):
-        assert granted.get(location) == "ro"
+@pytest.mark.parametrize("location", ["xdg-documents", "xdg-pictures",
+                                     "xdg-download", "xdg-desktop"])
+def test_a_deck_can_be_kept_in_any_of_the_usual_places(finish_args, location):
+    """
+    Read access is not enough, and assuming it was is what broke adding a
+    picture at all.
+
+    Presence copies the picture into assets/ *beside the document*, so it
+    needs to write the document's own folder — and when it cannot, the file
+    chooser portal does not even hand over the real path. It hands back a
+    /run/flatpak/doc/ entry holding that one file, where mkdir("assets") is
+    EPERM and always will be. A deck in Downloads therefore could not take a
+    picture from anywhere, including from Downloads.
+    """
+    assert _filesystems(finish_args).get(location) == "rw", (
+        f"{location} is read-only, so a deck kept there cannot have an "
+        f"assets/ folder written beside it."
+    )
 
 
 def test_the_sandbox_does_not_reach_all_of_home(finish_args):

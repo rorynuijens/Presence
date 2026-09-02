@@ -84,8 +84,12 @@ class FakeEditor:
     """Editor's copy step, without a widget."""
 
     _UNSAFE_IN_SRC = Editor._UNSAFE_IN_SRC
+    _PORTAL_DIR_RE = Editor._PORTAL_DIR_RE
     _asset_name = staticmethod(Editor._asset_name)
     _copy_into_assets = Editor._copy_into_assets
+    _is_portal_path = classmethod(Editor.__dict__["_is_portal_path"].__func__)
+    _why_copy_failed = Editor._why_copy_failed
+    _cannot_write_beside_document = Editor._cannot_write_beside_document
 
     def __init__(self, base_path=None):
         self._base_path = base_path
@@ -394,3 +398,93 @@ def test_a_click_re_reports_the_picture_already_showing():
     ed.check_cursor_for_image()
     ed.check_cursor_for_image(force=True)
     assert len(seen) == 2
+
+
+# ── Saying which half of the copy was impossible ─────────────────────────────
+#
+# The picture and the document are two different folders, and a failure in
+# either produced the same sentence — the one naming the picture's. Under
+# Flatpak the document's is the usual culprit: a deck opened from a folder the
+# sandbox cannot write comes back as a /run/flatpak/doc/ handout holding that
+# one file, where mkdir("assets") is EPERM. Every picture then fails, and the
+# writer is sent to inspect the folder that was fine.
+
+def test_a_read_only_document_folder_is_named_as_the_problem(tmp_path):
+    doc_dir = tmp_path / "readonly"
+    doc_dir.mkdir()
+    doc = doc_dir / "talk.md"
+    doc.write_text("# Talk")
+    src = tmp_path / "photo.png"
+    src.write_bytes(b"PNGDATA")
+    doc_dir.chmod(0o500)                     # readable, not writable
+    try:
+        ed = FakeEditor(doc)
+        assert ed._copy_into_assets(src) is None
+        assert ed._why_copy_failed(src) == "document"
+    finally:
+        doc_dir.chmod(0o700)
+
+
+def test_an_unreadable_picture_is_still_blamed_on_the_picture(tmp_path):
+    doc = tmp_path / "talk.md"
+    doc.write_text("# Talk")
+    ed = FakeEditor(doc)
+    assert ed._why_copy_failed(tmp_path / "not-there.png") == "source"
+
+
+def test_a_portal_document_folder_is_recognised_without_touching_disk():
+    """It cannot be probed by writing to it — the answer has to be by sight."""
+    assert Editor._is_portal_path(Path("/run/flatpak/doc/_LhB_5jx/talk.md"))
+    assert Editor._is_portal_path(Path("/run/user/1000/doc/qgg0JHJ/talk.md"))
+    assert not Editor._is_portal_path(Path("/var/home/me/Documents/talk.md"))
+    assert not Editor._is_portal_path(Path("/run/media/usb/talk.md"))
+
+
+def test_the_message_names_the_document_not_the_picture(tmp_path):
+    doc = tmp_path / "presentation_TEN.md"
+    doc.write_text("# Talk")
+    message = FakeEditor(doc)._cannot_write_beside_document()
+    assert "presentation_TEN.md" in message
+    assert "assets" in message
+    # The remedy is to move the deck, not to go looking at the picture.
+    assert "Documents" in message
+
+
+def test_a_temporary_picture_path_is_never_written_into_the_document(tmp_path):
+    """
+    A document-portal path belongs to this run of the app. Writing one into a
+    slide gives a tag that works until the window closes and is broken by the
+    time the deck is opened again — worse than refusing, because it fails
+    later and somewhere else.
+    """
+    inserted, notices = [], []
+
+    class Stub(FakeEditor):
+        _on_layout_insert = Editor._on_layout_insert
+
+        def _replace_selection(self, text):
+            inserted.append(text)
+
+        def emit(self, _signal, message):
+            notices.append(message)
+
+        @property
+        def _view(self):
+            class _V:
+                grab_focus = staticmethod(lambda: None)
+            return _V()
+
+    doc = tmp_path / "talk.md"
+    doc.write_text("# Talk")
+    # A portal path that exists: the file is real, its folder is the handout.
+    portal = tmp_path / "photo.png"
+    portal.write_bytes(b"PNGDATA")
+
+    stub = Stub(doc)
+    # Force the copy to fail the way an unwritable document folder does.
+    stub._copy_into_assets = lambda _src: None
+    stub._why_copy_failed = lambda _src: "document"
+    stub._on_layout_insert("photo", str(portal))
+
+    assert inserted == [], "a failed copy must not insert a tag anyway"
+    assert notices and "assets" in notices[0]
