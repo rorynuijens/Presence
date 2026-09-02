@@ -546,8 +546,13 @@ def _render_image_slide(
     zoom      = layout.get("zoom", 100)
 
     fit_attr   = f' data-img-fit="{_html.escape(fit)}"' if fit != "cover" else ""
+    # Alignment applies under both fits, and the `fit == "cover"` this used to
+    # carry was the bug behind "alignment does nothing": under `contain` the
+    # attribute was dropped, so every direction was silently ignored in the
+    # one mode where all four of them always work.  Cropping anchors the crop;
+    # letterboxing puts the picture against that edge of its box.
     focal_attr = (f' data-img-focal="{_html.escape(focal)}"'
-                  if focal != "focal-center" and fit == "cover" else "")
+                  if focal != "focal-center" else "")
 
     # A panel at full width is a full-bleed picture however it was asked for,
     # and the markup now says which arrangement it is rather than leaving the
@@ -697,7 +702,7 @@ def _render_gallery_slide(
         fit = pinned_fit or cell_fit(aspect, this_w / row_h if row_h else 0)
         focal = cell_layout.get("focal", "focal-center")
         focal_attr = (f' data-img-focal="{_html.escape(focal)}"'
-                      if focal != "focal-center" and fit == "cover" else "")
+                      if focal != "focal-center" else "")
         # Opacity is a measurement here too, so a cell the writer faded is
         # faded by the stylesheet rather than by an inline declaration no
         # theme could reach.
@@ -821,7 +826,7 @@ def _render_two_image_slide(
     # a lone picture, so a theme keys off the same names in both layouts.
     def _panel_attrs(fit: str, focal: str) -> str:
         attrs = f' data-img-fit="{_html.escape(fit)}"' if fit != "cover" else ""
-        if focal != "focal-center" and fit == "cover":
+        if focal != "focal-center":
             attrs += f' data-img-focal="{_html.escape(focal)}"'
         return attrs
 

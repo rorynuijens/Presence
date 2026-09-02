@@ -64,6 +64,46 @@ def test_a_pinned_arrangement_reaches_the_slide_div(pictures, block, attr, value
     assert f'{attr}="{value}"' in _slide_tag(html)
 
 
+@pytest.mark.parametrize("block", [
+    "{contain align-top}",
+    "{contain align-bottom}",
+    "{contain align-left}",
+    "{contain align-right}",
+])
+def test_alignment_survives_contain(pictures, block):
+    """
+    Alignment used to be dropped whenever the fit was not cover, which is the
+    one mode where all four directions always do something: a letterboxed
+    picture has bars to sit against, while a cropped one can only move along
+    the axis it actually overflows. So "alignment does nothing" was true, and
+    truest exactly where the writer had most reason to expect it to work.
+    """
+    html = _render([f"## Heading\n\nWords.\n\n![a](wide.png){block}"],
+                   base_url=pictures)
+    assert "data-img-focal" in _slide_tag(html)
+
+
+def test_a_gallery_cell_keeps_its_alignment_under_contain(pictures):
+    html = _render(["## Gallery\n\n![a](wide.png){contain align-top}\n\n"
+                    "![b](wide.png)\n\n![c](wide.png)"], base_url=pictures)
+    cells = re.findall(r'<div class="gallery-cell[^>]*>', html)
+    assert 'data-img-focal="focal-top"' in cells[0]
+
+
+def test_the_pair_keeps_its_alignment_under_contain(pictures):
+    html = _render(["## Pair\n\nWords between them.\n\n"
+                    "![a](tall.png){contain align-top}\n\n![b](tall.png)"],
+                   base_url=pictures)
+    assert 'data-img-focal="focal-top"' in html
+
+
+def test_centre_is_the_default_and_says_nothing(pictures):
+    """It is what the stylesheet already does, so writing it would be noise."""
+    html = _render(["## Heading\n\nWords.\n\n![a](wide.png){align-center}"],
+                   base_url=pictures)
+    assert "data-img-focal" not in _slide_tag(html)
+
+
 def test_opacity_arrives_as_a_measurement_not_a_declaration(pictures):
     html = _render(["## Heading\n\nWords.\n\n![a](wide.png){opacity40}"],
                    base_url=pictures)

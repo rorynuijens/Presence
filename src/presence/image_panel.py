@@ -137,6 +137,16 @@ class ImagePanel(Gtk.Box):
         body.append(self._desc)
 
         place_group = Adw.PreferencesGroup(title="Placement")
+        # Said once, here, rather than as a subtitle on each row: in a 300px
+        # panel a two-line title squeezes the value into "Autom…", which is
+        # the half the writer is reading.  It earns the space because
+        # alignment is the control most likely to look broken — under Cover
+        # a picture can only move along the edge it actually overflows, so
+        # Top and Bottom do nothing to a wide picture in a tall frame.
+        place_group.set_description(
+            "Cover crops to fill the frame; Contain fits the whole picture. "
+            "Alignment sets which part is kept, or which edge it rests "
+            "against.")
         place_group.set_margin_start(12)
         place_group.set_margin_end(12)
         place_group.set_margin_top(8)

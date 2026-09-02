@@ -343,6 +343,17 @@ them — the slide becomes the picture and its text is not rendered at all,
 rather than being covered over. Filter is exclusive: one named effect per
 picture, optionally tinted.
 
+**Alignment applies under both fits, and that is not a detail.** It reads as
+"alignment does nothing" the moment it does not. Under `contain` it sets
+which edge the letterboxed picture rests against, and all four directions
+always do something. Under `cover` it anchors the crop, so a picture can only
+move along the axis it actually *overflows* — a wide picture in the tall
+half-slide panel crops horizontally, and `align-top` is therefore inert on
+it, correctly. `html.py` used to emit `data-img-focal` only when the fit was
+`cover`, which silently dropped alignment in the one mode where every
+direction works; `test_image_treatments.py` pins the contain case in all
+three layouts.
+
 **Colour is baked into the pixels; arrangement is not.** WeasyPrint 68 drops
 CSS `filter` and every blend mode at parse time (measured, and recorded in
 THEME-CONTRACT.md), so there is no stylesheet answer to greyscale, sepia,
