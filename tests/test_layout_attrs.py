@@ -227,6 +227,7 @@ def test_what_is_written_inline_is_only_a_measurement(pictures):
 @pytest.mark.parametrize("var, consumer", [
     ("--p-img-size",        ".slide.has-image[data-img-pos=\"right\"] .slide-image"),
     ("--p-img-pad",         ".slide.has-image[data-img-pos=\"right\"] .slide-text"),
+    ("--p-img-opacity",     ".slide.has-image .slide-image img"),
     ("--p-gallery-columns", ".slide.has-gallery .gallery"),
     ("--p-gallery-row",     ".slide.has-gallery .gallery"),
     ("--p-progress",        ".progress-bar-fill"),

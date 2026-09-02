@@ -277,10 +277,15 @@ class ThemePanel(Gtk.Box):
             ("Numbered",        "1. item",      "Ordered list item"),
             ("Quote",           "> text",       "Blockquote"),
             ("Code block",      "```\ncode\n```", "Fenced code block"),
-            # Images
-            ("Image (right)",   "![|right|50](path)", "Image on right, 50% width"),
-            ("Image (left)",    "![|left|50](path)",  "Image on left, 50% width"),
-            ("Background",      "![|background](path)","Full-bleed background image"),
+            # Images.  These named the retired alt-text tokens for a long
+            # time after they stopped doing anything, so the panel was
+            # documenting a syntax the renderer ignored.
+            ("Image",           "![description](path)",
+             "The slide decides where it goes"),
+            ("Place it",        "![…](path){left}",
+             "left, right, top, bottom, background, full"),
+            ("Treat it",        "![…](path){sepia}",
+             "bw, greyscale, sepia, blur, lighten, darken, tint-navy"),
             # Callouts
             ("Tip callout",     "> [!tip]\n> text",    "Green tip callout box"),
             ("Info callout",    "> [!info]\n> text",   "Blue info callout box"),

@@ -71,6 +71,7 @@ _TAG_COLOURS = {
     "presence-img-punct": ("#888888", "#8f8f8f"),
     "presence-img-desc":  ("#555577", "#b3b3d4"),
     "presence-img-src":   ("#777777", "#9a9a9a"),
+    "presence-img-attrs": ("#7a6a2f", "#c8b86a"),
     # Focus mode's wash over the slides you are not writing.
     "presence-unfocused": ("#b6b6b6", "#5f5f5f"),
 }
@@ -112,6 +113,8 @@ _IMAGE_RE = re.compile(
 # thumbnail never disagree about what a slide is called.
 from .slides.splitter import _strip_inline_markdown
 from .slides.reveal import STEP_MARKER
+from .slides.image_attrs import (IMAGE_WITH_ATTRS_RE, IMAGE_ATTRS_GROUP,
+                                 parse_attrs as parse_image_attrs)
 
 
 def _same_file(a: Path, b: Path) -> bool:
@@ -305,11 +308,12 @@ class Editor(Gtk.Box):
         self._base_path:        Path | None = None
         self._insert_image_cb = None
         self._active_file_dialog = None
-        # The toolbar insert-image button — used as popover anchor
         self._img_toolbar_btn:  Gtk.Button | None = None
-        # Set by the window: (layout, description, edit_cb) -> bool.  Returns
-        # True when the inspector took the image, in which case no popover
-        # opens.  Falls back to the popover whenever the panel is closed.
+        # Set by the window: (attrs, description, line) -> None when the
+        # writer clicks a picture, and (None, "", -1) when they click off
+        # one.  The window decides what to do with it; the editor only
+        # reports what was clicked.
+        self._image_context_cb = None
         # Text marks at the lines where slides run out of room.  Marks rather
         # than line numbers so the rules stay attached to the content they
         # describe while the writer edits above them.
@@ -337,10 +341,9 @@ class Editor(Gtk.Box):
         self._focus_range: tuple[int, int] | None = None
         self._slide_ranges:  list[tuple[int,int]] = []  # (first, last) per slide
 
-        # Image-edit popover state
-        # Last line number that had an image tag — avoids re-scanning if
-        # the cursor stays on the same line.
-        # The full match (src, alt) of the currently-tracked image tag
+        # The line the last reported picture was on, so moving about within
+        # one image tag does not re-report it, and -1 for "not on a picture".
+        self._last_img_line: int = -1
 
         if _GTKSOURCE_AVAILABLE:
             self._init_source_view()
@@ -442,6 +445,17 @@ class Editor(Gtk.Box):
         self._drop_target.connect("motion", self._on_drop_motion)
         # "leave" signal not connected — no visual feedback needed on drag leave
         self._view.add_controller(self._drop_target)
+
+        # Clicking a picture opens its settings.  On "released" rather than
+        # "pressed", because by then GTK has moved the insertion mark to
+        # where the click landed and the handler can simply read the cursor's
+        # line — no hit-testing, and it agrees with what an arrow key would
+        # have selected.  The two overlays are set_can_target(False), so
+        # neither swallows this.
+        img_click = Gtk.GestureClick()
+        img_click.set_button(1)
+        img_click.connect("released", self._on_view_click_for_image)
+        self._view.add_controller(img_click)
 
     def _on_root_changed(self, *_) -> None:
         """Let go of the style manager once this editor has no window."""
@@ -1268,6 +1282,126 @@ class Editor(Gtk.Box):
                 return
         self._replace_selection(f"![{alt}]({rel_path})")
         self._view.grab_focus()
+
+    # ── The picture under the cursor ──────────────────────────────────────
+
+    def set_image_context_callback(self, cb) -> None:
+        """
+        Tell the window which picture the writer is on.
+
+        Called with (attrs, description, line) when the cursor is inside an
+        image tag, and (None, "", -1) when it leaves one.
+        """
+        self._image_context_cb = cb
+
+    def _image_on_line(self, line_no: int):
+        """
+        The image tag on *line_no*, or None.
+
+        Returns the regex match against the line's own text, so the caller
+        gets the alt text, the source, any attribute block, and the offsets
+        of each within the line — which is what the write-back needs to
+        replace exactly the tag and nothing around it.
+        """
+        ok, line_start = self._buffer.get_iter_at_line(line_no)
+        if not ok:
+            return None
+        line_end = line_start.copy()
+        line_end.forward_to_line_end()
+        line_text = self._buffer.get_text(line_start, line_end, True)
+        return IMAGE_WITH_ATTRS_RE.search(line_text)
+
+    def _on_view_click_for_image(self, _gesture, n_press, _x, _y) -> None:
+        if n_press != 1:
+            return          # a double-click is a word selection, not this
+        self.check_cursor_for_image(force=True)
+
+    def check_cursor_for_image(self, force: bool = False) -> None:
+        """
+        Report the picture the cursor is in, if that has changed.
+
+        Cheap enough for the cursor poll to call on every tick: it reads one
+        line and only reports when the answer moved, which is the same shape
+        as _update_current_slide_tint(). *force* reports even when the line
+        has not changed, which is what a click wants — clicking the picture
+        you are already on should still open its settings.
+        """
+        if self._image_context_cb is None:
+            return
+
+        cursor  = self._buffer.get_iter_at_mark(self._buffer.get_insert())
+        line_no = cursor.get_line()
+        m = self._image_on_line(line_no)
+
+        if m is None:
+            if self._last_img_line != -1:
+                self._last_img_line = -1
+                self._image_context_cb(None, "", -1)
+            return
+
+        if line_no == self._last_img_line and not force:
+            return
+        self._last_img_line = line_no
+
+        block = m.group(IMAGE_ATTRS_GROUP)
+        self._image_context_cb(parse_image_attrs(block or ""),
+                               m.group(1).strip(), line_no)
+
+    def set_image_attrs(self, line_no: int, block: str) -> None:
+        """
+        Write *block* onto the image tag on *line_no*.
+
+        The one place the attribute syntax is written into a document. An
+        empty *block* removes it, which is how a picture is handed back to
+        the automatic layout rather than being pinned to the values that
+        layout happens to have chosen today.
+
+        A ranged edit, not a whole-buffer replace: the panel writes on every
+        slider step, and replacing the buffer would throw away the cursor and
+        the scroll position each time. One user action, so one slider move is
+        one undo.
+        """
+        m = self._image_on_line(line_no)
+        if m is None:
+            return
+
+        tag = m.group(0)
+        # Everything up to the opening brace, when there was one.
+        start_of_block = m.start(IMAGE_ATTRS_GROUP)
+        bare = (tag if m.group(IMAGE_ATTRS_GROUP) is None
+                else tag[:start_of_block - m.start() - 1])
+        new_tag = f"{bare}{{{block}}}" if block else bare
+        if new_tag == tag:
+            return
+
+        ok, line_start = self._buffer.get_iter_at_line(line_no)
+        if not ok:
+            return
+
+        # The buffer's own change handler stays blocked and `changed` is
+        # emitted by hand below: SettleClock owns the timing of what a
+        # keystroke becomes, and this is one write, not a keystroke.
+        self._buffer.handler_block_by_func(self._on_buffer_changed)
+        try:
+            self._buffer.begin_user_action()
+            try:
+                tag_start = line_start.copy()
+                tag_start.forward_chars(m.start())
+                tag_end = line_start.copy()
+                tag_end.forward_chars(m.end())
+                self._buffer.delete(tag_start, tag_end)
+                # Every TextIter is invalidated by the delete, so the
+                # insertion point is fetched again rather than reused.
+                ok2, again = self._buffer.get_iter_at_line(line_no)
+                if ok2:
+                    again.forward_chars(m.start())
+                    self._buffer.insert(again, new_tag)
+            finally:
+                self._buffer.end_user_action()
+        finally:
+            self._buffer.handler_unblock_by_func(self._on_buffer_changed)
+
+        self.emit("changed", self.get_text())
 
     # ── Drag and drop ─────────────────────────────────────────────────────────
 
@@ -2106,26 +2240,33 @@ class Editor(Gtk.Box):
 
     # Matches the full Markdown image tag so we can colour sub-spans:
     #   group 1 — "!["          punctuation
-    #   group 2 — alt text      (may contain layout tokens separated by |)
+    #   group 2 — alt text      the description, and only ever that
     #   group 3 — "]("          punctuation
     #   group 4 — src path      (file path or URL)
     #   group 5 — ")"           punctuation
+    #   group 6 — {…}           the attribute block, where there is one
     _IMAGE_HIGHLIGHT_RE = re.compile(
         r'(!\[)'          # group 1: opening punctuation
-        r'([^\]]*)'       # group 2: alt text (layout tokens live here)
+        r'([^\]]*)'       # group 2: alt text — a description
         r'(\]\()'         # group 3: middle punctuation
         r'([^)\s"\']+)'   # group 4: src path
-        r'(\))',          # group 5: closing punctuation
+        r'(\))'           # group 5: closing punctuation
+        r'(\{[^}\n]*\})?', # group 6: what this picture was told
     )
 
     def _apply_image_tag(self) -> None:
         """
         Create TextTags for Presence image-layout syntax and wire them up.
 
-        Three visual layers are applied to every ![alt](src) tag:
+        Four visual layers are applied to every ![alt](src) tag:
           • presence-img-punct  — muted colour for ![ ]( ) delimiters
           • presence-img-desc   — dim colour for the description
           • presence-img-src    — dim italic for the file path / URL
+          • presence-img-attrs  — the {…} block, where the picture has one
+
+        The block colours as its own layer rather than as more punctuation
+        because it is the one part of the tag that is a decision: everything
+        else names the picture, and that names what was done to it.
 
         These are GtkTextBuffer tags, not GtkSource language rules, so they are
         the buffer's to colour rather than the scheme's — which means they have
@@ -2156,8 +2297,13 @@ class Editor(Gtk.Box):
                 style=2,                # Pango.Style.ITALIC
             )
 
+        # The attribute block: {left sepia}. Its own colour, and not italic —
+        # it is a value the writer set, not a reference to somewhere else.
+        if tag_table.lookup("presence-img-attrs") is None:
+            self._buffer.create_tag("presence-img-attrs")
+
         for name in ("presence-img-punct", "presence-img-desc",
-                     "presence-img-src"):
+                     "presence-img-src", "presence-img-attrs"):
             tag_table.lookup(name).set_property(
                 "foreground", self._tag_colour(name)
             )
@@ -2183,7 +2329,8 @@ class Editor(Gtk.Box):
         punct_tag = tag_table.lookup("presence-img-punct")
         desc_tag  = tag_table.lookup("presence-img-desc")
         src_tag   = tag_table.lookup("presence-img-src")
-        if not all((punct_tag, desc_tag, src_tag)):
+        attrs_tag = tag_table.lookup("presence-img-attrs")
+        if not all((punct_tag, desc_tag, src_tag, attrs_tag)):
             return
 
         buf_start = self._buffer.get_start_iter()
@@ -2191,7 +2338,7 @@ class Editor(Gtk.Box):
 
         # Clear all three tags from the entire buffer before reapplying.
         # This is simpler and safer than trying to diff old vs new ranges.
-        for tag in (punct_tag, desc_tag, src_tag):
+        for tag in (punct_tag, desc_tag, src_tag, attrs_tag):
             self._buffer.remove_tag(tag, buf_start, buf_end)
 
         full_text = self._buffer.get_text(buf_start, buf_end, False)
@@ -2220,10 +2367,15 @@ class Editor(Gtk.Box):
             # Colour the src path
             self._buffer.apply_tag(src_tag, _iter(src_start), _iter(src_end))
 
-            # The alt text is a plain description now, so it colours as one
-            # span — there are no layout tokens left to tell apart from it.
+            # The alt text is a plain description, so it colours as one
+            # span — what this picture was told is in the block after the
+            # tag, and colours as its own thing so the two never read as one.
             if full_text[alt_start:alt_end].strip():
                 self._buffer.apply_tag(desc_tag, _iter(alt_start), _iter(alt_end))
+
+            if m.group(6):
+                self._buffer.apply_tag(attrs_tag,
+                                       _iter(m.start(6)), _iter(m.end(6)))
 
     # ── Reporting a change ────────────────────────────────────────────────────
 

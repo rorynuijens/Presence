@@ -7,15 +7,22 @@ back to "first image only", so a slide with three pictures silently showed
 one. This module decides instead, and the decision is a pure function of the
 slide's content so it can be tested without rendering anything.
 
-The rule that governs everything here: **the slide decides.** There is no
-longer any way for a writer to place an image by hand, so there is no
-explicit choice to defer to and no need to work out whether one was made.
-Alt text is a description, and nothing but a description.
+The rule that governs everything here: **the slide decides, unless it was
+told.** Placement is automatic by default — every picture with nothing
+pinned on it is arranged from the slide's own content, which is what makes a
+deck of them look like one deck. A writer who wants a particular picture
+somewhere particular says so in an attribute block after the tag, and that
+one decision is deferred to; see ``image_attrs.py`` for the syntax.
 
-``parse_image_layout()`` in splitter.py still parses the old tokens — that
-file is read-only — so a document written against the old syntax keeps
-opening. Its tokens simply never reach the renderer: everything an image
-looks like now comes from AUTO_IMAGE_LAYOUT and the plan chosen here.
+What is deferred to is the block, never the alt text. ``parse_image_layout()``
+in splitter.py still parses the retired token string — that file is read-only
+— and nothing reads its answer, here or downstream. So a document written
+against the old syntax still opens, still reads its alt text as a
+description, and still lays itself out automatically.
+
+AUTO_IMAGE_LAYOUT remains the answer for everything nobody pinned. An
+override is a layer over it, never a replacement for it, so a picture that
+pins only its filter is still placed by the rules below.
 """
 from __future__ import annotations
 
@@ -60,8 +67,10 @@ TEXT_LONG_WORDS = 40
 # the picture is shown at full strength — which is what the gallery has
 # always done, since it never read this value at all.
 #
-# This dict is the single owner of the answer. Nothing else in the renderer
-# may read a treatment value off a parsed image.
+# This dict is the single owner of the *default* answer, and the base every
+# override is layered over. Nothing in the renderer may invent a treatment
+# value of its own: what it reads is this dict updated by the picture's own
+# attribute block, resolved once in image_attrs.extract_images_with_attrs().
 AUTO_IMAGE_LAYOUT: dict = {
     "position":  "right",
     "size":      "50",
@@ -101,6 +110,16 @@ class LayoutPlan:
     text:     str = "none"     # "none" | "short" | "long"
     images:   int = 0
     shapes:   tuple = field(default_factory=tuple)  # per image, see shape_of()
+
+    # What the writer pinned on each picture, in image order — one dict per
+    # image, empty where nothing was pinned. Carried on the plan rather than
+    # looked up again downstream so that the arrangement and the appearance
+    # are decided from the same reading of the document.
+    treatments: tuple = field(default_factory=tuple)
+
+    # True when the slide is the picture: `full` was pinned, so the text is
+    # not rendered rather than being covered over by it.
+    text_dropped: bool = False
 
 
 def single_side(ordinal: int) -> str:
@@ -228,6 +247,14 @@ def choose_layout(cleaned_md: str, images: list,
     the shapes cannot be measured the answer falls back to the gallery, which
     shows everything.
 
+    An image may pin its own placement in an attribute block, which is read
+    from each image's "attrs" — what the writer asked for — and never from
+    its "layout", which always carries a placement because the automatic
+    answer is one. A pinned placement is honoured for a lone picture; on a
+    slide of several, arrangement is the grid's and only the treatments are
+    the writer's, because "put this one on the left" has no answer that keeps
+    the others somewhere sensible.
+
     Kinds: "text", "bleed", "single", "pair", "gallery".
     """
     count = len(images)
@@ -236,14 +263,40 @@ def choose_layout(cleaned_md: str, images: list,
     def aspect(i: int) -> "float | None":
         return aspects[i] if i < len(aspects) else None
 
+    def pinned(i: int) -> dict:
+        img = images[i]
+        return img.get("attrs") or {} if isinstance(img, dict) else {}
+
+    treatments = tuple(pinned(i) for i in range(count))
+
     # The facts every plan carries, whatever it decides.
     facts = dict(text=text_weight(cleaned_md), images=count,
-                 shapes=tuple(shape_of(aspect(i)) for i in range(count)))
+                 shapes=tuple(shape_of(aspect(i)) for i in range(count)),
+                 treatments=treatments)
 
     if count == 0:
         return LayoutPlan("text", **facts)
 
     if count == 1:
+        position = treatments[0].get("position")
+
+        # The slide *is* the picture: the words are not rendered, so there is
+        # nothing for it to sit beside whatever the slide says.
+        if position == "full":
+            return LayoutPlan("bleed", text_dropped=True, **facts)
+
+        # Behind the words rather than beside them — the one arrangement the
+        # automatic rules will not choose, because it is a decision about
+        # legibility that only the writer can make.
+        if position == "background":
+            return LayoutPlan("bleed", **facts)
+
+        if position in ("left", "right", "top", "bottom"):
+            return LayoutPlan("single",
+                              size=auto_size(len(cleaned_md.split())),
+                              position=position,
+                              **facts)
+
         # Nothing to set the picture beside, so it takes the slide. Anything
         # else would be a half-empty slide.
         if not cleaned_md.strip():

@@ -20,6 +20,7 @@ from .editor     import Editor
 from .sidebar    import Sidebar, sidebar_width
 from .theme_panel    import ThemePanel
 from .inspector      import Inspector
+from .image_panel    import ImagePanel
 from .settings_dialog import SettingsDialog
 from .app_utils        import png_bytes_to_texture, make_file_filter, make_filter_store
 
@@ -170,6 +171,10 @@ class MainWindow(Adw.ApplicationWindow):
         # changes neither does not restart its thumbnail render.
         self._panel_shown_theme: str = ""
         self._panel_shown_ratio: str = ""
+        # Which line the inspector's image context was opened on, so the
+        # panel writes back to the picture it is showing rather than to
+        # whichever one the cursor has since wandered onto.
+        self._image_line: int = -1
 
         # Built before the UI, because the header bar wires its chip and its
         # buttons straight to them.
@@ -289,7 +294,8 @@ class MainWindow(Adw.ApplicationWindow):
         self.sidebar     = Sidebar()
         self.editor      = Editor()
         self._theme_panel = ThemePanel()
-        self._inspector = Inspector(self._theme_panel)
+        self._image_panel = ImagePanel()
+        self._inspector = Inspector(self._theme_panel, self._image_panel)
 
         self.sidebar.connect("slide-selected",       self._on_slide_selected)
         self.sidebar.connect("slide-insert-after",   self._on_slide_insert_after)
@@ -302,6 +308,8 @@ class MainWindow(Adw.ApplicationWindow):
         self._theme_panel.connect("rebuild-needed",   self._on_theme_panel_rebuild)
         self._theme_panel.connect("theme-changed",    self._on_panel_theme_changed)
         self._theme_panel.connect("ratio-changed",    self._on_panel_ratio_changed)
+        self._image_panel.connect("attrs-changed",    self._on_image_attrs_changed)
+        self.editor.set_image_context_callback(self._on_image_context)
 
         # Right sidebar: theme panel shown inline via a Revealer.
         # Using a Revealer (not a nested OverlaySplitView) avoids the overlay
@@ -1084,6 +1092,35 @@ class MainWindow(Adw.ApplicationWindow):
     def _on_panel_ratio_changed(self, panel, ratio: str) -> None:
         self._panel_shown_ratio = ratio
         self._sync_frontmatter_key("ratio", ratio)
+
+    def _on_image_context(self, attrs, description: str, line: int) -> None:
+        """
+        The writer clicked a picture, or clicked off one.
+
+        Clicking a picture opens the inspector on it — the panel is where a
+        picture's settings live, so a click that did nothing while the panel
+        happened to be closed would leave the writer with no way to find out
+        that they exist.  Moving *off* a picture only ever switches an
+        already-open panel back to the deck: typing must never make a panel
+        appear.
+        """
+        if attrs is None:
+            self._image_line = -1
+            if self._theme_panel_btn.get_active():
+                self._inspector.show_slide_context()
+            return
+
+        self._image_line = line
+        if not self._theme_panel_btn.get_active():
+            self._theme_panel_btn.set_active(True)
+        self._inspector.show_image_context(attrs, description)
+
+    def _on_image_attrs_changed(self, _panel, block: str) -> None:
+        """Write what the panel now says onto the picture it was opened on."""
+        if self._image_line < 0:
+            return
+        self.editor.set_image_attrs(self._image_line, block)
+        self.mark_modified()
 
     def _sync_frontmatter_key(self, key: str, value: str) -> None:
         """

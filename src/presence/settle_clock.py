@@ -292,6 +292,11 @@ class SettleClock:
             # this is for the cursor crossing into another one.
             if current != self.current_slide:
                 self.go_to_slide(current)
+
+            # Which picture the writer is on, for an inspector already
+            # showing one.  The editor reports only when the answer moves,
+            # and opening the panel is a click's business, not a poll's.
+            win.editor.check_cursor_for_image()
         except Exception:
             log.debug("Cursor sync error", exc_info=True)
         return GLib.SOURCE_CONTINUE

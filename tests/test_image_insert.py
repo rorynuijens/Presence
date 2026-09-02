@@ -256,3 +256,141 @@ def _insert_without_a_widget(base_path, src: Path):
 
     Stub(base_path)._on_layout_insert(src.stem, str(src))
     return inserted, notices
+
+
+# ── Writing a picture's settings back into the document ──────────────────────
+#
+# The panel writes on every slider step, so this is a ranged edit rather than
+# a whole-buffer replace: replacing the buffer would throw away the cursor and
+# the scroll position on every move. A real Gtk.TextBuffer is not a widget, so
+# these need no display — the same trick test_editor_selection.py uses.
+
+import pytest
+
+gi = pytest.importorskip("gi")
+gi.require_version("Gtk", "4.0")
+from gi.repository import Gtk  # noqa: E402
+
+
+class BufferOnly:
+    """Editor's image write-back, without a widget."""
+
+    _image_on_line   = Editor._image_on_line
+    set_image_attrs  = Editor.set_image_attrs
+    check_cursor_for_image = Editor.check_cursor_for_image
+
+    def __init__(self, text: str = "") -> None:
+        self._buffer = Gtk.TextBuffer()
+        self._buffer.set_text(text)
+        # Connected so the real method's block/unblock has something to act on.
+        self._buffer.connect("changed", self._on_buffer_changed)
+        self._image_context_cb = None
+        self._last_img_line = -1
+        self.emitted: list = []
+
+    def _on_buffer_changed(self, *_a) -> None:
+        pass
+
+    def get_text(self) -> str:
+        return self._buffer.get_text(self._buffer.get_start_iter(),
+                                     self._buffer.get_end_iter(), True)
+
+    def emit(self, signal, text) -> None:
+        self.emitted.append((signal, text))
+
+    def put_cursor_on_line(self, line_no: int) -> None:
+        ok, it = self._buffer.get_iter_at_line(line_no)
+        assert ok
+        self._buffer.place_cursor(it)
+
+
+def test_a_block_is_written_onto_a_bare_tag():
+    ed = BufferOnly("## Heading\n\n![a red barn](barn.jpg)\n")
+    ed.set_image_attrs(2, "left sepia")
+    assert "![a red barn](barn.jpg){left sepia}" in ed.get_text()
+
+
+def test_an_existing_block_is_replaced_not_appended():
+    ed = BufferOnly("![a](a.png){left sepia}\n")
+    ed.set_image_attrs(0, "background darken")
+    assert ed.get_text().startswith("![a](a.png){background darken}")
+    assert "sepia" not in ed.get_text()
+
+
+def test_an_empty_block_hands_the_picture_back():
+    ed = BufferOnly("![a](a.png){left sepia}\n")
+    ed.set_image_attrs(0, "")
+    assert ed.get_text().startswith("![a](a.png)\n")
+    assert "{" not in ed.get_text()
+
+
+def test_only_the_tag_is_touched():
+    """Text either side of the picture must survive the replacement."""
+    ed = BufferOnly("before ![a](a.png){left} after\n")
+    ed.set_image_attrs(0, "right")
+    assert ed.get_text().startswith("before ![a](a.png){right} after")
+
+
+def test_writing_the_same_block_changes_nothing():
+    """The panel re-emits freely; an unchanged write must not stack undo
+    steps or start a build."""
+    ed = BufferOnly("![a](a.png){left}\n")
+    ed.set_image_attrs(0, "left")
+    assert ed.emitted == []
+
+
+def test_a_write_announces_itself():
+    """set_text blocks the buffer's own handler, so the change is emitted by
+    hand — SettleClock owns what happens next."""
+    ed = BufferOnly("![a](a.png)\n")
+    ed.set_image_attrs(0, "left")
+    assert [s for s, _ in ed.emitted] == ["changed"]
+
+
+def test_a_line_with_no_picture_is_left_alone():
+    ed = BufferOnly("just some prose\n")
+    ed.set_image_attrs(0, "left")
+    assert ed.get_text() == "just some prose\n"
+    assert ed.emitted == []
+
+
+def test_the_cursor_landing_on_a_picture_reports_what_it_pins():
+    seen = []
+    ed = BufferOnly("## Heading\n\n![a red barn](barn.jpg){left sepia}\n")
+    ed._image_context_cb = lambda attrs, desc, line: seen.append((attrs, desc, line))
+    ed.put_cursor_on_line(2)
+    ed.check_cursor_for_image()
+    assert seen == [({"position": "left", "filter": "sepia"}, "a red barn", 2)]
+
+
+def test_moving_off_a_picture_is_reported_once():
+    seen = []
+    ed = BufferOnly("![a](a.png)\n\nprose\n")
+    ed._image_context_cb = lambda attrs, desc, line: seen.append(attrs)
+    ed.put_cursor_on_line(0)
+    ed.check_cursor_for_image()
+    ed.put_cursor_on_line(2)
+    ed.check_cursor_for_image()
+    ed.check_cursor_for_image()          # still off it; must not repeat
+    assert seen == [{}, None]
+
+
+def test_staying_on_one_picture_does_not_re_report_it():
+    seen = []
+    ed = BufferOnly("![a](a.png){left}\n")
+    ed._image_context_cb = lambda attrs, desc, line: seen.append(attrs)
+    ed.put_cursor_on_line(0)
+    ed.check_cursor_for_image()
+    ed.check_cursor_for_image()
+    assert len(seen) == 1
+
+
+def test_a_click_re_reports_the_picture_already_showing():
+    """Clicking the picture you are on must still open its settings."""
+    seen = []
+    ed = BufferOnly("![a](a.png){left}\n")
+    ed._image_context_cb = lambda attrs, desc, line: seen.append(attrs)
+    ed.put_cursor_on_line(0)
+    ed.check_cursor_for_image()
+    ed.check_cursor_for_image(force=True)
+    assert len(seen) == 2

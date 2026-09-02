@@ -137,7 +137,8 @@ def read_slides(markdown_text: str, wpm: int = 110) -> "list[_SlideFacts]":
     presenter view and the handout will time too.
     """
     from .slides.splitter import (split_slides, infer_slide_title,
-                                  extract_speaker_notes, extract_images)
+                                  extract_speaker_notes)
+    from .slides.image_attrs import extract_images_with_attrs
     from .slides.frontmatter import (parse_frontmatter, extract_slide_directives,
                                      strip_slide_directives)
     from .slides import reveal
@@ -147,7 +148,7 @@ def read_slides(markdown_text: str, wpm: int = 110) -> "list[_SlideFacts]":
     facts: list[_SlideFacts] = []
     for i, slide_md in enumerate(split_slides(body)):
         slide_body, notes = extract_speaker_notes(slide_md)
-        cleaned, _images  = extract_images(slide_body)
+        cleaned, _images  = extract_images_with_attrs(slide_body)
         # Read the way the build reads it: the step markers and the
         # directives are instructions to the engine, and counting either as
         # words of the talk would put them in the estimate and the title.

@@ -10,15 +10,28 @@ questions — do not propose work that reverses them.
 1. **No AI features.** Presence converts Markdown to slides. It does not
    generate images, infographics, or slides from documents, and it stores no
    API keys.
-2. **Image layout is automatic only.** Alt text is a description, not a
-   token string: `![a red barn](assets/barn.jpg)`. `slides/layout.py` decides
-   placement, size and fit from the slide's own content. There are no manual
-   position, size, fit, focal, gradient, opacity, fade, grayscale, blur,
-   tint, flip or zoom controls.
+2. **Image layout is automatic by default, and overridable per picture.**
+   Alt text is a description, never a token string. `slides/layout.py`
+   decides placement, size and fit from the slide's own content, and that is
+   what a picture gets unless the writer says otherwise in an attribute
+   block after the tag:
+
+       ![a red barn](assets/barn.jpg){background contain opacity70 sepia}
+
+   `slides/image_attrs.py` owns that vocabulary and is the only code that
+   writes it. An override is a *layer over* `AUTO_IMAGE_LAYOUT`, never a
+   replacement for it, so a picture that pins only its filter is still
+   placed by the automatic rules — and a picture with no block resolves to
+   exactly `AUTO_IMAGE_LAYOUT`, which is why decks written before any of
+   this render identically.
 
 Note that `splitter.py::parse_image_layout()` is mode `444` and still parses
-the old tokens; they are simply not honoured downstream, so documents written
-against the old syntax keep opening and lay themselves out.
+the *retired alt-text tokens* — a different syntax from the block above.
+Nothing reads its answer, here or downstream, so documents written against
+the old syntax keep opening, keep reading their alt text as a description,
+and lay themselves out automatically. The two syntaxes do not meet;
+`test_layout_render.py` proves the old one is inert by asserting a tokened
+slide renders byte-identically to an untokened one.
 
 ## Running the app
 
@@ -305,10 +318,48 @@ A buffer replaced wholesale is not an edit and is not debounced: `Editor.set_tex
 | `^^^` on its own line | Speaker notes separator |
 | `+++` on its own line | Reveal step; the rest of the slide waits |
 | `![description](src)` | Image; the slide decides where it goes |
+| `![description](src){tokens}` | …unless the block overrules it |
 
 `reveal: lists` — in the frontmatter for the deck, or `<!-- reveal: lists -->`
 for one slide — steps every top-level list item instead. A slide may opt out
 of a deck-wide setting with `<!-- reveal: none -->`.
+
+**The image attribute block.** Space-separated, order-insensitive, on the
+image's own line — a fold is a line number, so the pre-pass that strips the
+block may never change the line count. Unknown tokens are ignored, so a typo
+costs the treatment rather than the picture.
+
+| Group | Tokens |
+|---|---|
+| Placement | `left` `right` `top` `bottom` `background` `full` |
+| Fit | `cover` `contain` |
+| Alignment | `align-left` `align-right` `align-center` `align-top` `align-bottom` |
+| Opacity | `opacity0` … `opacity100` |
+| Tint | `tint-navy`, `tint-#0a3d62` |
+| Filter | `bw` `greyscale` `sepia` `blur` (or `blur12`) `lighten` `darken` |
+
+`background` fills the slide behind the words; `full` fills it *instead of*
+them — the slide becomes the picture and its text is not rendered at all,
+rather than being covered over. Filter is exclusive: one named effect per
+picture, optionally tinted.
+
+**Colour is baked into the pixels; arrangement is not.** WeasyPrint 68 drops
+CSS `filter` and every blend mode at parse time (measured, and recorded in
+THEME-CONTRACT.md), so there is no stylesheet answer to greyscale, sepia,
+blur, lighten, darken or tint. `html._apply_img_effects()` re-encodes the
+file with Pillow and returns a data URI, cached on the file's mtime *and the
+treatment* — the live render lays out the slide under the cursor on every
+pause in typing, and would otherwise re-encode a photograph once a keystroke.
+Everything a theme could reasonably disagree with goes the other way: fit and
+alignment as `data-*` attributes, opacity as `--p-img-opacity`, because an
+inline declaration outranks every selector. `test_image_treatments.py` pins
+both halves, including that no CSS `filter:` is ever emitted.
+
+Treatments apply in every layout, not just the lone picture: the flanking
+pair and each gallery cell carry their own. That was a real gap — the pair
+had no fit, alignment or tint and the gallery passed the constants — and
+per-picture controls that worked in one arrangement of five would have been
+worse than none.
 
 ## Theme system
 

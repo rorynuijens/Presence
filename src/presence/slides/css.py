@@ -454,17 +454,7 @@ a {{
     object-fit: cover;
     object-position: center;
     display: block;
-}}
-
-/* ── Image tint overlay — sits above img inside .slide-image ── */
-/* background-color set via inline style; opacity is hardcoded 0.4. */
-
-.slide-image-tint {{
-    position: absolute;
-    top: 0; left: 0;
-    width: 100%; height: 100%;
-    opacity: 0.4;
-    pointer-events: none;
+    opacity: var(--p-img-opacity, 1);
 }}
 
 /* ── Fit mode: contain — image letterboxes instead of cropping ── */
@@ -473,10 +463,33 @@ a {{
     object-fit: contain;
 }}
 
-/* ── Focal point — shifts object-position for cover mode ── */
+/* ── Alignment — which part of a cropped picture survives the crop.
+ *
+ * Spelled `align-*` in the document and stored as `focal-*`, because that
+ * is the attribute these rules have always been keyed on.  Only cover mode
+ * has anything to shift: a letterboxed picture is entirely visible.
+ */
 
 .slide.has-image[data-img-focal="focal-top"]    .slide-image img {{ object-position: top; }}
 .slide.has-image[data-img-focal="focal-bottom"] .slide-image img {{ object-position: bottom; }}
+.slide.has-image[data-img-focal="focal-left"]   .slide-image img {{ object-position: left; }}
+.slide.has-image[data-img-focal="focal-right"]  .slide-image img {{ object-position: right; }}
+.slide.has-image[data-img-focal="focal-center"] .slide-image img {{ object-position: center; }}
+
+/* The same two questions on the flanking pair and on a gallery cell, keyed
+ * on the same names so a theme writes one rule rather than three.
+ */
+
+.slide.has-two-images [data-img-fit="contain"] img {{ object-fit: contain; }}
+.slide.has-two-images [data-img-focal="focal-top"]    img {{ object-position: top; }}
+.slide.has-two-images [data-img-focal="focal-bottom"] img {{ object-position: bottom; }}
+.slide.has-two-images [data-img-focal="focal-left"]   img {{ object-position: left; }}
+.slide.has-two-images [data-img-focal="focal-right"]  img {{ object-position: right; }}
+
+.slide.has-gallery .gallery-cell[data-img-focal="focal-top"]    img {{ object-position: top; }}
+.slide.has-gallery .gallery-cell[data-img-focal="focal-bottom"] img {{ object-position: bottom; }}
+.slide.has-gallery .gallery-cell[data-img-focal="focal-left"]   img {{ object-position: left; }}
+.slide.has-gallery .gallery-cell[data-img-focal="focal-right"]  img {{ object-position: right; }}
 
 /* ── Text container ── */
 
@@ -672,6 +685,7 @@ a {{
     object-fit: cover;
     object-position: center;
     display: block;
+    opacity: var(--p-img-opacity, 1);
 }}
 
 .slide.has-two-images .slide-text {{
@@ -717,6 +731,7 @@ a {{
     height: 100%;
     object-fit: cover;
     display: block;
+    opacity: var(--p-img-opacity, 1);
 }}
 
 /* A picture whose shape disagrees badly with its cell keeps its bars rather

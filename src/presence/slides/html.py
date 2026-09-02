@@ -5,6 +5,7 @@ html.py — Assemble the full HTML document from rendered slide fragments.
 import base64 as _base64
 import html as _html
 from dataclasses import replace as _replace
+from functools import lru_cache
 import re as _re
 from io import BytesIO as _BytesIO
 from pathlib import Path as _Path
@@ -26,31 +27,61 @@ def _safe_bg(colour: str) -> str:
     return colour if _CSS_COLOUR_RE.match(colour) else "#ffffff"
 
 
-def _apply_img_effects(
-    src: str,
-    base_url: "str | None",
-    grayscale: int,
-    blur: int,
-) -> str:
-    """
-    Apply grayscale and/or blur to an image with Pillow and return a data URI.
+# The filters that have to be baked into the pixels. WeasyPrint drops CSS
+# `filter` at parse time — measured against 68.1, and recorded in
+# THEME-CONTRACT.md — so there is no stylesheet answer to any of these. The
+# same is true of `mix-blend-mode`, which is why tint is a blend done here
+# rather than an overlay div: an overlay only ever covered the single-image
+# layout, and washing a colour over the picture is the same operation
+# whether the picture is alone, one of a pair, or a cell in a gallery.
+_PIXEL_FILTERS = ("bw", "greyscale", "sepia", "blur", "lighten", "darken")
 
-    Falls back to the original *src* string if Pillow is not installed, the
-    file cannot be resolved/opened, or *src* is already a data URI or remote URL.
-    This ensures WeasyPrint (which ignores CSS filter) also shows the effects.
+# What each named filter does, in the amount the name implies. A writer picks
+# an effect, not a number — the one exception is blur, whose right strength
+# depends on the picture, and which therefore carries its own token argument.
+_SEPIA_DARK  = "#2b1a08"
+_SEPIA_LIGHT = "#ffe8c0"
+_BRIGHTEN    = 1.35
+_DARKEN      = 0.62
+_TINT_BLEND  = 0.38
+
+
+def _treatment_key(layout: dict) -> tuple:
     """
-    if not (grayscale > 0 or blur > 0):
+    The part of *layout* that changes the picture's pixels, as a cache key.
+
+    Placement, fit and opacity are not in here: those are the stylesheet's to
+    apply and a theme's to argue with, so the same file baked once serves
+    every arrangement it appears in.
+    """
+    filt = layout.get("filter")
+    return (filt if filt in _PIXEL_FILTERS else None,
+            int(layout.get("blur", 0) or 0),
+            layout.get("tint") or None)
+
+
+def _apply_img_effects(src: str, base_url: "str | None",
+                       layout: dict) -> str:
+    """
+    Bake this picture's colour treatment into its pixels; return a data URI.
+
+    Falls back to *src* unchanged when there is nothing to do, when Pillow is
+    missing, when the file cannot be opened, or when the source is remote or
+    already inline — a network round trip mid-render is not worth a filter,
+    and a data URI carries bytes this cannot second-guess.
+
+    This is the only place a treatment becomes visible, so it is also the
+    only place that needs to know a filter is exclusive: one named effect,
+    optionally tinted, per picture.
+    """
+    key = _treatment_key(layout)
+    if key == (None, 0, None):
         return src
     if src.startswith("data:"):
         return src
 
     parsed = _urlparse(src)
     if parsed.scheme in ("http", "https"):
-        return src
-
-    try:
-        from PIL import Image, ImageEnhance, ImageFilter  # type: ignore[import]
-    except ImportError:
         return src
 
     try:
@@ -62,36 +93,81 @@ def _apply_img_effects(
             img_path = (_Path(base_url) / src).resolve()
         else:
             img_path = _Path(src)
+        stat = img_path.stat()
+    except OSError:
+        return src
 
-        if not img_path.exists():
-            return src
+    return _baked(str(img_path), stat.st_mtime, stat.st_size, *key) or src
 
-        img = Image.open(img_path)
 
-        # Preserve transparency channel when present
+@lru_cache(maxsize=256)
+def _baked(path: str, mtime: float, nbytes: int,
+           filt: "str | None", blur: int, tint: "str | None") -> "str | None":
+    """
+    The cached bake. Keyed on the file's mtime and size as well as its name,
+    so editing a picture in place is picked up, and on the treatment, so the
+    live render — which re-renders the slide under the cursor on every pause
+    in typing — re-encodes a photograph once rather than once a keystroke.
+    """
+    try:
+        from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+    except ImportError:
+        return None
+
+    try:
+        img = Image.open(path)
         has_alpha = img.mode in ("RGBA", "LA", "PA")
         img = img.convert("RGBA" if has_alpha else "RGB")
 
-        if grayscale > 0:
-            img = ImageEnhance.Color(img).enhance(1.0 - grayscale / 100.0)
+        # Alpha does not survive the grade operations below, so it is set
+        # aside and put back afterwards rather than being flattened onto a
+        # background this function cannot know the colour of.
+        alpha = img.getchannel("A") if has_alpha else None
+        rgb   = img.convert("RGB")
 
-        if blur > 0:
-            img = img.filter(ImageFilter.GaussianBlur(radius=blur))
+        if filt == "greyscale":
+            rgb = ImageOps.grayscale(rgb).convert("RGB")
+        elif filt == "bw":
+            rgb = (ImageOps.grayscale(rgb)
+                   .point(lambda px: 255 if px > 127 else 0)
+                   .convert("RGB"))
+        elif filt == "sepia":
+            rgb = ImageOps.colorize(ImageOps.grayscale(rgb),
+                                    _SEPIA_DARK, _SEPIA_LIGHT).convert("RGB")
+        elif filt == "lighten":
+            rgb = ImageEnhance.Brightness(rgb).enhance(_BRIGHTEN)
+        elif filt == "darken":
+            rgb = ImageEnhance.Brightness(rgb).enhance(_DARKEN)
+        elif filt == "blur" and blur > 0:
+            rgb = rgb.filter(ImageFilter.GaussianBlur(radius=blur))
+
+        if tint:
+            try:
+                wash = Image.new("RGB", rgb.size, tint)
+            except (ValueError, OSError):
+                wash = None          # a colour Pillow does not know
+            if wash is not None:
+                rgb = Image.blend(rgb, wash, _TINT_BLEND)
+
+        if alpha is not None:
+            rgb = rgb.convert("RGBA")
+            rgb.putalpha(alpha)
 
         buf = _BytesIO()
-        fmt = "PNG" if has_alpha else "JPEG"
+        fmt = "PNG" if alpha is not None else "JPEG"
         save_kw = {} if fmt == "PNG" else {"quality": 85, "optimize": True}
-        img.save(buf, format=fmt, **save_kw)
+        rgb.save(buf, format=fmt, **save_kw)
         b64 = _base64.b64encode(buf.getvalue()).decode()
         mime = "image/png" if fmt == "PNG" else "image/jpeg"
         return f"data:{mime};base64,{b64}"
 
     except Exception:
-        return src
+        return None
 
 
 from .splitter import (is_title_slide, extract_speaker_notes,
-                          extract_images, infer_slide_title, split_two_columns)
+                          infer_slide_title, split_two_columns)
+from .image_attrs import extract_images_with_attrs
 from .renderer    import render_slide_content
 from .layout      import (AUTO_IMAGE_LAYOUT, PAIR_SIZE, choose_layout,
                           cell_fit, shape_of)
@@ -207,7 +283,7 @@ def md_to_html_slides(
 
     for i, slide_md in enumerate(slides):
         slide_body, notes = extract_speaker_notes(slide_md)
-        cleaned_md, images = extract_images(slide_body)
+        cleaned_md, images = extract_images_with_attrs(slide_body)
         title_slide = is_title_slide(slide_body, i)
 
         # Extract per-slide directives (e.g. <!-- theme: dark -->)
@@ -281,10 +357,11 @@ def md_to_html_slides(
                     base_url=base_url, line_offset=line_offset,
                 )
             elif plan.kind == "pair":
-                # The flanking positions are the plan's, not the document's.
-                layout_a = {**AUTO_IMAGE_LAYOUT, "position": "left",
+                # The flanking positions are the plan's, not the document's —
+                # but each picture's own treatment is still its own.
+                layout_a = {**images[0]["layout"], "position": "left",
                             "size": PAIR_SIZE}
-                layout_b = {**AUTO_IMAGE_LAYOUT, "position": "right",
+                layout_b = {**images[1]["layout"], "position": "right",
                             "size": PAIR_SIZE}
                 html_frag = _render_two_image_slide(
                     cleaned_md, images[0]["src"], layout_a,
@@ -294,10 +371,11 @@ def md_to_html_slides(
                     line_offset=line_offset,
                 )
             else:
-                # Never read the parsed tokens: what the picture looks like
-                # is AUTO_IMAGE_LAYOUT's business, and where it goes is the
-                # plan's.
-                layout = dict(AUTO_IMAGE_LAYOUT)
+                # What the picture looks like was resolved once, in
+                # image_attrs: AUTO_IMAGE_LAYOUT under whatever the writer
+                # pinned. Where it goes is still the plan's answer, which has
+                # already taken any pinned placement into account.
+                layout = dict(images[0]["layout"])
                 if plan.size is not None:
                     layout["size"] = plan.size
                 if plan.position is not None:
@@ -305,8 +383,12 @@ def md_to_html_slides(
                 if plan.kind == "bleed":
                     # An image with nothing to sit beside fills the slide.
                     layout.update(position="background", size="100")
+                # `full` means the slide *is* the picture. The words are not
+                # rendered rather than being hidden behind it, so nothing is
+                # left to select, to read out of the PDF, or to overflow.
+                body = "" if plan.text_dropped else cleaned_md
                 html_frag = _render_image_slide(
-                    cleaned_md, images[0]["src"], layout,
+                    body, images[0]["src"], layout,
                     page_num, total_numbered, logo_b64, theme_override,
                     height=height, base_url=base_url,
                     line_offset=line_offset,
@@ -434,35 +516,31 @@ def _render_image_slide(
     """
     Render a slide that contains an image with flexible layout.
 
-    Geometry (position/size) is expressed via inline styles so any integer
-    size 1-100 works.  data-img-fit and data-img-focal drive
-    object-fit/object-position in CSS.
+    Placement and size arrive as the ``--p-img-*`` measurements css.py reads;
+    ``data-img-fit`` and ``data-img-focal`` drive object-fit and
+    object-position there. Nothing an arrangement depends on is written
+    inline — see _image_geometry() for why that matters.
+
+    Colour treatment is not here at all: it is baked into the picture's own
+    pixels by _apply_img_effects(), because WeasyPrint has no CSS filter and
+    no blend modes to do it with.
     """
     content   = render_slide_content(slide_md, line_offset)
     t_attr    = _theme_attr(theme_override)
 
     pos       = layout.get("position", "right")
     size      = int(layout.get("size", "50"))
-    opacity   = layout.get("opacity", 75)
+    opacity   = layout.get("opacity", 100)
     fit       = layout.get("fit", "cover")
     focal     = layout.get("focal", "focal-center")
-    grayscale = layout.get("grayscale", 0)
-    blur      = layout.get("blur", 0)
 
     # Reject javascript: / vbscript: URIs unconditionally before any processing.
     if _urlparse(img_src).scheme.lower() in _UNSAFE_IMG_SCHEMES:
         img_src = ""
 
-    # Bake grayscale/blur into the image with PIL so WeasyPrint (which does
-    # not support CSS filter) shows the effect in the PDF and thumbnails.
-    # Falls back to the original path if PIL is unavailable or src is remote.
-    effective_src = _apply_img_effects(img_src, base_url, grayscale, blur)
-    # Only emit CSS filter for effects that weren't successfully pre-processed
-    # (i.e. PIL fallback path — WeasyPrint applies the filter itself).
-    css_grayscale = 0 if effective_src != img_src else grayscale
-    css_blur      = 0 if effective_src != img_src else blur
+    effective_src = _apply_img_effects(img_src, base_url, layout)
     escaped_src   = _html.escape(_urlquote(effective_src, safe="+/=:;,"))
-    tint      = layout.get("tint")
+
     flip_h    = layout.get("flip_h", False)
     flip_v    = layout.get("flip_v", False)
     zoom      = layout.get("zoom", 100)
@@ -479,11 +557,13 @@ def _render_image_slide(
 
     img_style, text_pad = _image_geometry(pos, size, height)
 
-    # Build img inline style (opacity + transforms only — filter handled below)
-    # Every automatically placed picture is shown at full strength, so the
-    # declaration is omitted rather than written out as a no-op that a theme
-    # could not override.
-    img_css_parts = [] if opacity >= 100 else [f"opacity:{opacity / 100:.2f}"]
+    # Opacity is published as a measurement, not applied as a declaration.
+    # Written inline it would outrank every selector, which is the one thing
+    # a theme must be able to disagree with — and it is on the reserved list
+    # test_layout_attrs.py enforces.
+    if opacity < 100:
+        img_style += f"--p-img-opacity:{opacity / 100:.2f};"
+
     transforms = []
     if zoom != 100:
         transforms.append(f"scale({zoom / 100:.2f})")
@@ -491,46 +571,17 @@ def _render_image_slide(
         transforms.append("scaleX(-1)")
     if flip_v:
         transforms.append("scaleY(-1)")
+    img_inline = ""
     if transforms:
         focal_origin = {
             "focal-top":    "center top",
             "focal-bottom": "center bottom",
         }.get(focal, "center center")
-        img_css_parts.append(f"transform:{' '.join(transforms)}")
-        img_css_parts.append(f"transform-origin:{focal_origin}")
-    img_inline = ";".join(img_css_parts)
+        img_inline = (f"transform:{' '.join(transforms)};"
+                      f"transform-origin:{focal_origin}")
 
-    # CSS filter fallback (PIL unavailable / remote src): blur needs a
-    # negative-inset wrapper so overflow:hidden on .slide-image doesn't clip
-    # blurred edges. Grayscale-only goes directly on the img.
-    if css_blur > 0:
-        wrap_filters = []
-        if css_grayscale > 0:
-            wrap_filters.append(f"grayscale({css_grayscale}%)")
-        wrap_filters.append(f"blur({css_blur}px)")
-        n = css_blur
-        wrap_style = (
-            f"position:absolute;top:-{n}px;left:-{n}px;"
-            f"right:-{n}px;bottom:-{n}px;"
-            f"filter:{' '.join(wrap_filters)}"
-        )
-        img_el = (
-            f'<div style="{wrap_style}">'
-            f'<img src="{escaped_src}" style="{img_inline}" alt="">'
-            f'</div>'
-        )
-    else:
-        if css_grayscale > 0:
-            img_inline = f"{img_inline};" if img_inline else img_inline
-            img_inline += f"filter:grayscale({css_grayscale}%)"
-        img_style_attr = f' style="{img_inline}"' if img_inline else ""
-        img_el = f'<img src="{escaped_src}"{img_style_attr} alt="">'
-
-    tint_div = ""
-    if tint:
-        tint_div = (f'<div class="slide-image-tint"'
-                    f' style="background:{_html.escape(tint)};"'
-                    f' aria-hidden="true"></div>')
+    img_style_attr = f' style="{img_inline}"' if img_inline else ""
+    img_el = f'<img src="{escaped_src}"{img_style_attr} alt="">'
 
     text_style = _style_attr(text_pad)
 
@@ -539,7 +590,6 @@ def _render_image_slide(
         f' data-img-pos="{_html.escape(pos)}"{fit_attr}{focal_attr}{t_attr}>'
         f'  <div class="slide-image"{_style_attr(img_style)}>'
         f'    {img_el}'
-        f'    {tint_div}'
         f'  </div>'
         f'  <div class="slide-text"{text_style}>'
         f'    {content}'
@@ -633,22 +683,35 @@ def _render_gallery_slide(
         raw_src = image.get("src", "")
         if _urlparse(raw_src).scheme.lower() in _UNSAFE_IMG_SCHEMES:
             raw_src = ""
-        effective = _apply_img_effects(raw_src, base_url,
-                                       AUTO_IMAGE_LAYOUT["grayscale"],
-                                       AUTO_IMAGE_LAYOUT["blur"])
+        cell_layout = image.get("layout") or AUTO_IMAGE_LAYOUT
+        effective = _apply_img_effects(raw_src, base_url, cell_layout)
         src = _html.escape(_urlquote(effective, safe="+/=:;,"))
         spans_two = (index + 1) in plan.spans
         span = ' data-span="2"' if spans_two else ""
         this_w = cell_w * 2 + gap if spans_two else cell_w
         aspect = image_aspect(raw_src, base_url)
-        fit = cell_fit(aspect, this_w / row_h if row_h else 0)
+        # The grid measures a fit for every cell, and a picture that pinned
+        # one says so instead: the writer is answering the same question the
+        # measurement answers, about the one cell they were looking at.
+        pinned_fit = (image.get("attrs") or {}).get("fit")
+        fit = pinned_fit or cell_fit(aspect, this_w / row_h if row_h else 0)
+        focal = cell_layout.get("focal", "focal-center")
+        focal_attr = (f' data-img-focal="{_html.escape(focal)}"'
+                      if focal != "focal-center" and fit == "cover" else "")
+        # Opacity is a measurement here too, so a cell the writer faded is
+        # faded by the stylesheet rather than by an inline declaration no
+        # theme could reach.
+        opacity = cell_layout.get("opacity", 100)
+        cell_style = (f' style="--p-img-opacity:{opacity / 100:.2f};"'
+                      if opacity < 100 else "")
         # Both are the cell's own facts: what shape the picture is, and
         # whether that shape fits its cell closely enough to be cropped. The
         # slide's data-shapes cannot address one cell, so each carries its
         # own; object-fit itself is set from data-fit in css.py.
         cells.append(
             f'<div class="gallery-cell"{span}'
-            f' data-shape="{shape_of(aspect)}" data-fit="{fit}">'
+            f' data-shape="{shape_of(aspect)}" data-fit="{fit}"'
+            f'{focal_attr}{cell_style}>'
             f'<img src="{src}" alt="">'
             f'</div>'
         )
@@ -692,8 +755,9 @@ def _render_two_image_slide(
     Render a slide with two images flanking the text between them.
 
     *layout_a* and *layout_b* come from the caller, which built them from
-    AUTO_IMAGE_LAYOUT — nothing here reads a value off the document. Their
-    positions give the split:
+    each picture's own resolved appearance and then overruled the positions —
+    the flanking arrangement is the plan's answer, the treatments are each
+    picture's own. Their positions give the split:
       left + right  → horizontal: [img] [text] [img]
       top  + bottom → vertical:   [img] / [text] / [img]
 
@@ -708,10 +772,10 @@ def _render_two_image_slide(
     size_b    = int(layout_b["size"])
     opacity_a = layout_a["opacity"]
     opacity_b = layout_b["opacity"]
-    grayscale_a = layout_a["grayscale"]
-    blur_a      = layout_a["blur"]
-    grayscale_b = layout_b["grayscale"]
-    blur_b      = layout_b["blur"]
+    fit_a     = layout_a.get("fit", "cover")
+    fit_b     = layout_b.get("fit", "cover")
+    focal_a   = layout_a.get("focal", "focal-center")
+    focal_b   = layout_b.get("focal", "focal-center")
     raw_src_a   = src_a
     raw_src_b   = src_b
     # Reject javascript: / vbscript: URIs unconditionally.
@@ -719,14 +783,10 @@ def _render_two_image_slide(
         raw_src_a = ""
     if _urlparse(raw_src_b).scheme.lower() in _UNSAFE_IMG_SCHEMES:
         raw_src_b = ""
-    eff_src_a   = _apply_img_effects(raw_src_a, base_url, grayscale_a, blur_a)
-    eff_src_b   = _apply_img_effects(raw_src_b, base_url, grayscale_b, blur_b)
-    css_gs_a    = 0 if eff_src_a != raw_src_a else grayscale_a
-    css_blur_a  = 0 if eff_src_a != raw_src_a else blur_a
-    css_gs_b    = 0 if eff_src_b != raw_src_b else grayscale_b
-    css_blur_b  = 0 if eff_src_b != raw_src_b else blur_b
-    src_a  = _html.escape(_urlquote(eff_src_a, safe="+/=:;,"))
-    src_b  = _html.escape(_urlquote(eff_src_b, safe="+/=:;,"))
+    src_a = _html.escape(_urlquote(
+        _apply_img_effects(raw_src_a, base_url, layout_a), safe="+/=:;,"))
+    src_b = _html.escape(_urlquote(
+        _apply_img_effects(raw_src_b, base_url, layout_b), safe="+/=:;,"))
 
     horizontal = {pos_a, pos_b} == {"left", "right"}
     vertical   = {pos_a, pos_b} == {"top",  "bottom"}
@@ -747,39 +807,33 @@ def _render_two_image_slide(
     # carried separately from the size.
     img_a_style = f"--p-img-size:{size_a}%;"
     img_b_style = f"--p-img-size:{size_b}%;"
+    if opacity_a < 100:
+        img_a_style += f"--p-img-opacity:{opacity_a / 100:.2f};"
+    if opacity_b < 100:
+        img_b_style += f"--p-img-opacity:{opacity_b / 100:.2f};"
     if horizontal:
         text_style = f"--p-img-pad-a:{size_a}%;--p-img-pad-b:{size_b}%;"
     else:
         text_style = (f"--p-img-pad-a:{int(height * size_a / 100)}px;"
                       f"--p-img-pad-b:{int(height * size_b / 100)}px;")
 
-    # CSS filter fallback for two-image slides (PIL unavailable / remote src)
-    def _two_img_el(src: str, opacity: float, css_gs: int, css_bl: int) -> str:
-        style = "" if opacity >= 1 else f"opacity:{opacity:.2f}"
-        if css_bl > 0:
-            fparts = []
-            if css_gs > 0:
-                fparts.append(f"grayscale({css_gs}%)")
-            fparts.append(f"blur({css_bl}px)")
-            n = css_bl
-            wrap = (
-                f'<div style="position:absolute;top:-{n}px;left:-{n}px;'
-                f'right:-{n}px;bottom:-{n}px;filter:{" ".join(fparts)}">'
-                f'<img src="{src}" style="{style}" alt=""></div>'
-            )
-            return wrap
-        if css_gs > 0:
-            style = f"{style};" if style else style
-            style += f"filter:grayscale({css_gs}%)"
-        return f'<img src="{src}"{_style_attr(style)} alt="">'
+    # Fit and alignment reach the panel as attributes, exactly as they do on
+    # a lone picture, so a theme keys off the same names in both layouts.
+    def _panel_attrs(fit: str, focal: str) -> str:
+        attrs = f' data-img-fit="{_html.escape(fit)}"' if fit != "cover" else ""
+        if focal != "focal-center" and fit == "cover":
+            attrs += f' data-img-focal="{_html.escape(focal)}"'
+        return attrs
 
     return (
         f'<div class="slide has-two-images" data-split="{axis}"{t_attr}>'
-        f'  <div class="slide-image-a" style="{img_a_style}">'
-        f'    {_two_img_el(src_a, opacity_a / 100, css_gs_a, css_blur_a)}'
+        f'  <div class="slide-image-a"{_panel_attrs(fit_a, focal_a)}'
+        f' style="{img_a_style}">'
+        f'    <img src="{src_a}" alt="">'
         f'  </div>'
-        f'  <div class="slide-image-b" style="{img_b_style}">'
-        f'    {_two_img_el(src_b, opacity_b / 100, css_gs_b, css_blur_b)}'
+        f'  <div class="slide-image-b"{_panel_attrs(fit_b, focal_b)}'
+        f' style="{img_b_style}">'
+        f'    <img src="{src_b}" alt="">'
         f'  </div>'
         f'  <div class="slide-text" style="{text_style}">'
         f'    {content}'

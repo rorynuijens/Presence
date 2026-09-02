@@ -278,8 +278,8 @@ and `px em rem % ch ex`.
 | | |
 |---|---|
 | `box-shadow`, `text-shadow` | no shadows of any kind |
-| `filter`, `backdrop-filter` | no blur, no saturate |
-| `mix-blend-mode`, `mask-image`, `clip-path` | no compositing |
+| `filter`, `backdrop-filter` | no blur, no saturate — see below |
+| `mix-blend-mode`, `mask-image`, `clip-path` | no compositing — see below |
 | `aspect-ratio` | set a height, or a padding-box ratio |
 | `vw`, `vh` | use `%`, or px against the known slide size |
 | `writing-mode`, `text-wrap: balance` | |
@@ -295,6 +295,33 @@ and `px em rem % ch ex`.
 The two rows to read twice are `@supports` and feature-query `@media`: a rule
 guarded by either never applies, so a stylesheet that wraps a fallback in
 `@supports` ships only the fallback's absence.
+
+### Why a picture's colour is not yours to restyle
+
+`filter` and `mix-blend-mode` being dropped is not a cosmetic gap — it is why
+a writer's per-image treatments (`bw`, `greyscale`, `sepia`, `blur`,
+`lighten`, `darken`, `tint-*`; see the image attribute block in CLAUDE.md)
+are **baked into the picture's own pixels** by `html._apply_img_effects()`
+before the file reaches the engine. By the time a stylesheet sees it, the
+picture is already sepia and there is nothing left to override.
+
+That is a deliberate trade, and it is the only mechanism that works: it works
+in the PDF, and therefore in the thumbnails and the slideshow, which are
+pictures of the PDF. A theme that wants a different look for a treated
+picture cannot have one.
+
+Everything about a picture a theme *can* reasonably disagree with was kept
+out of the pixels for exactly that reason, and arrives the usual way:
+
+| What | How it arrives |
+|---|---|
+| Which panel the picture takes | `data-img-pos` on the slide div |
+| Crop or letterbox | `data-img-fit` on the slide div, the pair's panel, or the gallery cell |
+| Which part survives a crop | `data-img-focal`, in the same three places |
+| How faded it is | `--p-img-opacity`, consumed in `css.py` |
+
+So `object-fit`, `object-position` and `opacity` are yours. The colour grade
+is not.
 
 ---
 
