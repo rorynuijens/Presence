@@ -4,10 +4,7 @@ window.py — Main application window.
 from __future__ import annotations
 
 import logging
-import os
 import re
-import shutil
-import subprocess
 import threading
 from pathlib import Path
 
@@ -735,8 +732,10 @@ class MainWindow(Adw.ApplicationWindow):
                 GLib.source_remove(src)
                 setattr(self, attr, None)
         self.documents.shut_down()
-        # Always clean up temp files, regardless of modified state (#44)
+        # Delete the files the builds wrote along the way: the draft's PDF
+        # and the HTML every build writes to the cache folder.
         self.builds.cleanup_scratch()
+        self.converter.discard_html_output()
 
     # ── File operations ───────────────────────────────────────────────────────
 
@@ -962,52 +961,22 @@ class MainWindow(Adw.ApplicationWindow):
         self.builds.with_current_build(self._open_built_pdf)
 
     def _open_built_pdf(self) -> None:
-        if not (self.documents.output_path and self.documents.output_path.exists()):
-            return
+        """
+        Open the built PDF in the writer's PDF viewer.
+
+        Gtk.FileLauncher asks the desktop to open the file.  Inside Flatpak
+        it goes through the OpenURI portal, which hands the viewer the file
+        itself, so a PDF in the sandbox's private /tmp opens too.  If no
+        viewer answers, the folder holding the PDF is opened instead.
+
+        Nothing here runs a program outside the sandbox, so the app needs no
+        permission to do that (test_sandbox_escape.py checks it stays so).
+        """
         pdf_path = self.documents.output_path
-        if os.environ.get("FLATPAK_ID"):
-            # /tmp inside the Flatpak sandbox is a private tmpfs — the host
-            # sees a different /tmp.  Use the XDG cache dir instead: its path
-            # (~/.var/app/<id>/cache/) is identical inside the sandbox and on
-            # the host, so flatpak-spawn --host xdg-open can reach the file.
-            cache_dir = Path(GLib.get_user_cache_dir())
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            host_pdf = cache_dir / "presentation-preview.pdf"
-            try:
-                shutil.copy2(pdf_path, host_pdf)
-                os.chmod(host_pdf, 0o644)
-                pdf_path = host_pdf
-            except OSError:
-                pass
-            # Run xdg-open on the HOST via flatpak-spawn, bypassing the portal.
-            # The OpenURI portal (used by Gtk.FileLauncher) is unreliable on
-            # some GNOME installations and returns "application launch failed".
-            try:
-                subprocess.Popen(
-                    ["flatpak-spawn", "--host", "xdg-open", str(pdf_path)]
-                )
-                return
-            except OSError:
-                pass
-            # flatpak-spawn unavailable — copy to Documents as last resort.
-            self._copy_pdf_to_documents(pdf_path)
+        if not (pdf_path and pdf_path.exists()):
             return
         launcher = Gtk.FileLauncher.new(Gio.File.new_for_path(str(pdf_path)))
         launcher.launch(self, None, self._on_pdf_launch_finish)
-
-    def _copy_pdf_to_documents(self, src: Path) -> None:
-        docs = Path(GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_DOCUMENTS))
-        dest = docs / "presentation.pdf"
-        try:
-            shutil.copy2(src, dest)
-            self.show_toast(
-                "PDF viewer unavailable — PDF saved to Documents/presentation.pdf",
-                timeout=8,
-            )
-        except OSError:
-            self.show_error(
-                f"Could not open a PDF viewer.\n\nThe PDF is at:\n{self.documents.output_path}"
-            )
 
     def _on_pdf_launch_finish(self, launcher, result) -> None:
         try:
@@ -1020,7 +989,8 @@ class MainWindow(Adw.ApplicationWindow):
         try:
             launcher.open_containing_folder_finish(result)
         except GLib.Error as e:
-            self.show_error(f"Could not open PDF: {e.message}")
+            self.show_error(f"Could not open the PDF: {e.message}. "
+                            f"It is at {self.documents.output_path}")
 
     def _on_copy_pdf_path(self, *_) -> None:
         """Copy the output PDF path to the clipboard (#72)."""

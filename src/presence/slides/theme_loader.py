@@ -55,6 +55,17 @@ def _flatpak_host_themes_dir() -> Path | None:
     return host_themes if host_themes.is_dir() else None
 
 
+def theme_roots(extra_dir: Path | None = None) -> list[Path]:
+    """
+    Every folder installed themes live in.
+
+    A theme's fonts are loaded straight from its folder, so these folders
+    are on the list of places a deck may read from (see sources.py).
+    """
+    roots = [user_themes_dir(), _flatpak_host_themes_dir(), extra_dir]
+    return [r for r in roots if r is not None]
+
+
 # ── Theme cache (#39) ─────────────────────────────────────────────────────────
 # Cache the result of load_all_themes() keyed by (extra_dir, user_dir_mtime).
 # Invalidated automatically when the user themes directory is modified (e.g.

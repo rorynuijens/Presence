@@ -48,7 +48,6 @@ not wait for it.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from gi.repository import GLib
@@ -225,7 +224,7 @@ class SettleClock:
         text = self._pending_text
         self._frame_text = text
         self._win.converter.render_slide_async(
-            text, self._win.documents.base_dir or Path.home(),
+            text, self._win.documents.base_dir,       # None for a draft
             self.current_slide, width, self._on_frame,
         )
 

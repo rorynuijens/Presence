@@ -14,7 +14,8 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 from .themes       import ASPECT_RATIOS
-from .theme_loader import load_all_themes
+from .theme_loader import load_all_themes, theme_roots
+from .sources      import SourcePolicy, wants_remote_images
 from .frontmatter  import parse_frontmatter
 from .css          import build_css
 from .splitter import split_slides, is_title_slide
@@ -138,6 +139,12 @@ def convert(
         if slides and is_title_slide(slides[0], 0):
             log.info("Slide 1 detected as title slide")
 
+        # What this deck may read: its own folder, the theme folders, and
+        # the web only if it asks.  The same rules the window uses.
+        sources = SourcePolicy(input_path.parent,
+                               extra_roots=theme_roots(theme_dir),
+                               allow_remote=wants_remote_images(meta))
+
         html, slide_info = md_to_html_slides(
             slides, css, logo_b64, meta,
             width=width, height=height, theme_bg=theme.bg,
@@ -151,14 +158,12 @@ def convert(
             # exported images are materials *about* the talk and take each
             # slide complete; both read page_index, which is the last step.
             reveal=True,
+            sources=sources,
         )
 
-        # ── 7. Write HTML ──────────────────────────────────────────────────────
-        html_path = output_path.with_suffix(".html")
-        html_path.write_text(html, encoding="utf-8")
-        log.debug("Intermediate HTML: %s", html_path)
-
-        # ── 8. Write PDF ───────────────────────────────────────────────────────
+        # ── 7. Write PDF ───────────────────────────────────────────────────────
+        # Only the PDF is written.  Nothing else goes next to it, because a
+        # file there with the same name belongs to the writer.
         try:
             import weasyprint
         except ImportError:
@@ -167,7 +172,8 @@ def convert(
                 "(or pip install weasyprint)"
             )
         document = weasyprint.HTML(
-            string=html, base_url=str(input_path.parent)
+            string=html, base_url=str(input_path.parent),
+            url_fetcher=sources.fetcher(),
         ).render()
 
         n_slides = len(slides)
@@ -195,7 +201,7 @@ def convert(
         for warning in build_warnings(slide_info, theme_warning):
             log.warning("%s", warning)
 
-        # ── 9. Thumbnail index ─────────────────────────────────────────────────
+        # ── 8. Thumbnail index ─────────────────────────────────────────────────
         if thumbnails:
             index_path = build_thumbnail_index(
                 slide_info, output_path, theme, meta

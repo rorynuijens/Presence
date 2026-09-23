@@ -1,16 +1,20 @@
 """
 diagnostics.py — What a finished build has to tell the writer.
 
-Three things can go wrong in a way the rendered slide will not show: text
-that runs past the bottom of the box, a picture whose path does not resolve,
-and a theme named in the frontmatter that is not installed.  Each of them
-produces a slide that looks deliberate — a short slide, a low heading, the
-wrong palette — so each has to be said out loud.
+Some problems don't show on the slide itself. The slide just looks a bit
+off, and nobody can tell why:
 
-The sentences are built here rather than in either frontend so the CLI's
-stderr and the window's banner say the same thing about the same deck.
+* the text runs past the bottom of the slide,
+* a picture's file isn't there,
+* a picture is somewhere the deck isn't allowed to read, or on the web,
+* the theme named in the frontmatter isn't installed.
+
+So the build says each one in words. The sentences are written here, once,
+so the command line and the window say exactly the same thing.
 """
 from __future__ import annotations
+
+from pathlib import PurePath
 
 
 def _join(names: list[str], limit: int = 4) -> str:
@@ -60,6 +64,41 @@ def missing_image_warning(slide_info: list[dict]) -> str | None:
     return f"{len(missing)} pictures not found: {_join(missing)}."
 
 
+def _where(slide_info: list[dict], key: str) -> list[str]:
+    """Every address under *key*, each followed by the slide it is on."""
+    return [f"{src} (slide {i + 1})"
+            for i, info in enumerate(slide_info)
+            for src in info.get(key) or ()]
+
+
+def blocked_image_warning(slide_info: list[dict]) -> str | None:
+    """
+    One sentence naming the pictures the deck was not allowed to load.
+
+    A deck may read files from its own folder, and the web only when it
+    asks to (see sources.py).  A picture outside those places is left off
+    the slide, so the writer has to be told why, and what to do about it.
+    """
+    # Just the file's name: the slide number says where to look, and a full
+    # path would push the rest of the banner out of sight.
+    outside = [f"{PurePath(src).name} (slide {i + 1})"
+               for i, info in enumerate(slide_info)
+               for src in info.get("outside_images") or ()]
+    remote  = _where(slide_info, "remote_images")
+    parts = []
+    if outside:
+        parts.append(
+            f"Not loaded because it is outside the presentation's folder: "
+            f"{_join(outside)}. Move it into the folder to use it."
+        )
+    if remote:
+        parts.append(
+            f"Web picture not loaded: {_join(remote)}. Add "
+            f"\"remote_images: true\" to the frontmatter to allow it."
+        )
+    return " ".join(parts) or None
+
+
 def build_warnings(slide_info: list[dict],
                    theme_warning: str | None = None) -> list[str]:
     """
@@ -70,4 +109,5 @@ def build_warnings(slide_info: list[dict],
     """
     return [w for w in (theme_warning,
                         overflow_warning(slide_info),
-                        missing_image_warning(slide_info)) if w]
+                        missing_image_warning(slide_info),
+                        blocked_image_warning(slide_info)) if w]

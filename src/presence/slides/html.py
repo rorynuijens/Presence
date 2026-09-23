@@ -171,7 +171,9 @@ from .image_attrs import extract_images_with_attrs
 from .renderer    import render_slide_content
 from .layout      import (AUTO_IMAGE_LAYOUT, PAIR_SIZE, choose_layout,
                           cell_fit, shape_of)
-from .utils       import image_aspect, image_is_missing
+from .utils       import image_aspect
+from .sources     import (SourcePolicy, wants_remote_images,
+                          INLINE, LOCAL, REMOTE, REMOTE_OFF, UNSAFE)
 from .frontmatter import extract_slide_directives, strip_slide_directives
 from .            import reveal as _reveal
 from .utils       import logo_img_tag, progress_bar_html
@@ -244,32 +246,33 @@ def md_to_html_slides(
     only_index: "int | None" = None,
     line_offsets: "list[int] | None" = None,
     reveal: bool = False,
+    sources: "SourcePolicy | None" = None,
 ) -> tuple[str, list[dict]]:
     """
-    Render all slides to a complete HTML string.
+    Turn a deck's slides into one HTML page.
 
-    Returns (html, slide_info) where slide_info is a list of
-    {'title': str, 'notes': str} dicts used by the thumbnail index.
+    Returns the page and a list with one dict per slide: its title, its
+    notes, and anything the build has to warn about (missing pictures, or
+    pictures the deck is not allowed to load).
 
-    When *only_index* is given, the returned document contains just that one
-    slide's markup — slide numbering and title-slide detection still consider
-    the whole deck, so the fragment is identical to the one the full document
-    would contain.  Used by the live render, which only ever draws one slide
-    and should not pay for markup it will not display.  *slide_info* always
-    covers every slide.
+    The options:
 
-    *line_offsets* gives each slide's starting line in the source document.
-    When present, blocks carry ``data-src-line``, so a layout measurement of
-    the rendered page can name the line that overflows.
-
-    With *reveal* set, a slide holding step markers is written out once per
-    step — the same fragment each time, with the blocks that have not
-    arrived yet marked — so the paged engine can give the room one page per
-    step.  Off by default, and off for anything unpaged: the live render and
-    the exported HTML show each slide complete, and a deck that reveals
-    nothing produces byte-identical markup either way.  Steps need
-    *line_offsets*, which is what the blocks are marked by.
+    * *only_index* — lay out just this one slide.  The live render uses it
+      to redraw the slide being typed.  The rest of the deck is still read,
+      so slide numbers and picture sides come out the same as in the build.
+    * *line_offsets* — the line each slide starts on in the document.  With
+      it, every block remembers its line, so the fold can point at the line
+      that does not fit.
+    * *reveal* — write a slide that reveals in steps once per step, with
+      the parts not shown yet hidden.  Only the PDF build asks for this.
+      It needs *line_offsets*, because steps are found by line.
+    * *sources* — which pictures the deck may load (see sources.py).  If
+      it is not given, the deck may read its own folder, and the web only
+      when its frontmatter says ``remote_images: true``.
     """
+    if sources is None:
+        sources = SourcePolicy(base_url,
+                               allow_remote=wants_remote_images(meta))
     slide_htmls = []
     slide_info  = []
     # How many lone pictures have been laid out so far, which is what decides
@@ -285,6 +288,7 @@ def md_to_html_slides(
         slide_body, notes = extract_speaker_notes(slide_md)
         cleaned_md, images = extract_images_with_attrs(slide_body)
         title_slide = is_title_slide(slide_body, i)
+        missing, outside, remote = _screen_images(images, sources)
 
         # Extract per-slide directives (e.g. <!-- theme: dark -->)
         directives = extract_slide_directives(slide_body)
@@ -304,9 +308,11 @@ def md_to_html_slides(
             # Recorded for every slide, before the only_index skip below, so
             # a single-slide render still reports the whole deck's broken
             # picture paths rather than only the one under the cursor.
-            "missing_images": [src for src in
-                               (img.get("src", "") for img in images)
-                               if image_is_missing(src, base_url)],
+            "missing_images": missing,
+            # Pictures the deck is not allowed to load, which the build has
+            # to say out loud: see sources.py and diagnostics.py.
+            "outside_images": outside,
+            "remote_images":  remote,
         })
 
         page_num = i if first_is_title else i + 1
@@ -369,6 +375,7 @@ def md_to_html_slides(
                     page_num, total_numbered, logo_b64, theme_override,
                     height=height, theme_bg=bg, base_url=base_url,
                     line_offset=line_offset,
+                    alts=(_alt(images[0]), _alt(images[1])),
                 )
             else:
                 # What the picture looks like was resolved once, in
@@ -391,7 +398,7 @@ def md_to_html_slides(
                     body, images[0]["src"], layout,
                     page_num, total_numbered, logo_b64, theme_override,
                     height=height, base_url=base_url,
-                    line_offset=line_offset,
+                    line_offset=line_offset, alt=_alt(images[0]),
                 )
         else:
             html_frag = _render_normal_slide(cleaned_md, page_num,
@@ -422,6 +429,7 @@ def md_to_html_slides(
 <html lang="{lang}">
 <head>
 <meta charset="UTF-8">
+{_document_metadata(meta)}
 <meta http-equiv="Content-Security-Policy"
       content="default-src 'self' data:; style-src 'unsafe-inline'; script-src 'none';">
 <style>{css}</style>
@@ -432,6 +440,55 @@ def md_to_html_slides(
 </html>"""
 
     return document, slide_info
+
+
+def _screen_images(images: list, sources: SourcePolicy) -> tuple:
+    """
+    Check every picture against *sources*, and take out the ones not allowed.
+
+    A picture the deck may not load gets an empty address, so nothing
+    downstream can read it: not WeasyPrint, not Pillow, not the size check.
+    Returns three lists of addresses, for the build's warning: pictures that
+    are allowed but not there, local files outside the deck's folder, and
+    web pictures the deck did not opt in to.
+    """
+    missing, outside, remote = [], [], []
+    for img in images:
+        src = img.get("src", "")
+        verdict, path = sources.check(src)
+        if verdict == LOCAL:
+            if path is not None and path.is_absolute() and not path.is_file():
+                missing.append(src)
+        elif verdict == REMOTE_OFF:
+            remote.append(src)
+            img["src"] = ""
+        elif verdict not in (INLINE, REMOTE):
+            if verdict != UNSAFE:
+                outside.append(src)
+            img["src"] = ""
+    return missing, outside, remote
+
+
+def _document_metadata(meta: dict) -> str:
+    """
+    The deck's title and author, as the document's own metadata.
+
+    WeasyPrint copies these into the PDF, where a screen reader, a file
+    manager and a PDF viewer's title bar all look for them.
+    """
+    parts = []
+    title = str(meta.get("title") or "").strip()
+    if title:
+        parts.append(f"<title>{_html.escape(title)}</title>")
+    author = str(meta.get("author") or "").strip()
+    if author:
+        parts.append(f'<meta name="author" content="{_html.escape(author)}">')
+    return "\n".join(parts)
+
+
+def _alt(image: dict) -> str:
+    """The picture's description, ready to go inside alt="…"."""
+    return _html.escape(image.get("alt") or "", quote=True)
 
 
 # ── Geometry helpers ─────────────────────────────────────────────────────────
@@ -512,6 +569,7 @@ def _render_image_slide(
     height:         int = 720,
     base_url:       "str | None" = None,
     line_offset:    int | None = None,
+    alt:            str = "",
 ) -> str:
     """
     Render a slide that contains an image with flexible layout.
@@ -586,7 +644,7 @@ def _render_image_slide(
                       f"transform-origin:{focal_origin}")
 
     img_style_attr = f' style="{img_inline}"' if img_inline else ""
-    img_el = f'<img src="{escaped_src}"{img_style_attr} alt="">'
+    img_el = f'<img src="{escaped_src}"{img_style_attr} alt="{alt}">'
 
     text_style = _style_attr(text_pad)
 
@@ -717,7 +775,7 @@ def _render_gallery_slide(
             f'<div class="gallery-cell"{span}'
             f' data-shape="{shape_of(aspect)}" data-fit="{fit}"'
             f'{focal_attr}{cell_style}>'
-            f'<img src="{src}" alt="">'
+            f'<img src="{src}" alt="{_alt(image)}">'
             f'</div>'
         )
 
@@ -755,6 +813,7 @@ def _render_two_image_slide(
     theme_bg:       str = "#ffffff",
     base_url:       "str | None" = None,
     line_offset:    int | None = None,
+    alts:           tuple = ("", ""),
 ) -> str:
     """
     Render a slide with two images flanking the text between them.
@@ -802,7 +861,7 @@ def _render_two_image_slide(
         return _render_image_slide(
             slide_md, raw_src_a, layout_a,
             page_num, total, logo_b64, theme_override,
-            height=height, base_url=base_url,
+            height=height, base_url=base_url, alt=alts[0],
         )
 
     axis = "h" if horizontal else "v"
@@ -834,11 +893,11 @@ def _render_two_image_slide(
         f'<div class="slide has-two-images" data-split="{axis}"{t_attr}>'
         f'  <div class="slide-image-a"{_panel_attrs(fit_a, focal_a)}'
         f' style="{img_a_style}">'
-        f'    <img src="{src_a}" alt="">'
+        f'    <img src="{src_a}" alt="{alts[0]}">'
         f'  </div>'
         f'  <div class="slide-image-b"{_panel_attrs(fit_b, focal_b)}'
         f' style="{img_b_style}">'
-        f'    <img src="{src_b}" alt="">'
+        f'    <img src="{src_b}" alt="{alts[1]}">'
         f'  </div>'
         f'  <div class="slide-text" style="{text_style}">'
         f'    {content}'

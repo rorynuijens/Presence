@@ -64,9 +64,12 @@ or `mono_font`.
 
 Colour values are validated against a CSS colour allowlist before they are
 interpolated (`css.py::_safe_colour`); a value that is not a colour literal is
-replaced with black and logged. Your `theme.css` is not validated this way —
-only `@import` is stripped from it, to stop a stylesheet making network
-requests.
+replaced with black and logged. Your `theme.css` is not validated this way,
+but what it can load is limited. `@import` is stripped, and every `url()` goes
+through the same check a picture does (`slides/sources.py`): a file inside an
+installed theme folder or the deck's own folder loads, and anything else,
+including any web address, is refused unless the deck's frontmatter says
+`remote_images: true`. Bundle a theme's fonts and images inside its folder.
 
 ### Contrast
 

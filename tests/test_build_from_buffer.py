@@ -39,7 +39,8 @@ class RecordingConverter:
         self.ratio = "16:9"
 
     def convert(self, text, base_dir, output_path) -> None:
-        self.calls.append((text, Path(base_dir), Path(output_path)))
+        self.calls.append((text, Path(base_dir) if base_dir else None,
+                           Path(output_path)))
 
 
 class ExplodingDocuments:
@@ -171,7 +172,9 @@ def test_an_unsaved_deck_builds_to_a_scratch_pdf(tmp_path):
 
     _text, base, out = win.converter.calls[0]
     assert out.suffix == ".pdf"
-    assert base == out.parent
+    # No folder: that is how the converter knows this is a draft, whose
+    # pictures may come from anywhere on this machine (see sources.py).
+    assert base is None
     assert coord.temp_pdf == out
 
 

@@ -1345,6 +1345,44 @@ class Editor(Gtk.Box):
         self._replace_selection(f"![{alt}]({rel_path})")
         self._view.grab_focus()
 
+    def adopt_outside_pictures(self) -> int:
+        """
+        Copy pictures from elsewhere on disk into the deck's assets/ folder.
+
+        An unsaved draft points at its pictures with full paths, because it
+        has no folder to copy them into yet.  A saved deck may only read its
+        own folder (see slides/sources.py), so when a draft is saved for
+        the first time its pictures are copied next to it and the tags are
+        changed to point at the copies.  One undo step.  Returns how many
+        pictures were copied.
+        """
+        if not self._base_path:
+            return 0
+        folder = self._base_path.parent.resolve()
+        text = self.get_text()
+
+        changes = []
+        for m in IMAGE_WITH_ATTRS_RE.finditer(text):
+            src = Path(m.group(2))
+            if not src.is_absolute():
+                continue
+            try:
+                src = src.resolve()
+            except (OSError, RuntimeError):
+                continue
+            if src.is_relative_to(folder) or not src.is_file():
+                continue
+            copied = self._copy_into_assets(src)
+            if copied is not None:
+                changes.append((m.start(2), m.end(2), copied))
+
+        # Last first, so the positions of the earlier ones stay right.
+        for start, end, copied in reversed(changes):
+            text = text[:start] + copied + text[end:]
+        if changes:
+            self.set_text_as_user_action(text)
+        return len(changes)
+
     # ── The picture under the cursor ──────────────────────────────────────
 
     def set_image_context_callback(self, cb) -> None:

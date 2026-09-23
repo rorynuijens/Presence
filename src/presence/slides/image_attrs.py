@@ -44,6 +44,7 @@ __all__ = ["IMAGE_PLACEMENTS", "IMAGE_FITS", "IMAGE_ALIGNMENTS",
            "IMAGE_FILTERS", "DEFAULT_BLUR",
            "IMAGE_WITH_ATTRS_RE", "IMAGE_ATTRS_GROUP",
            "parse_attrs", "format_attrs", "take_image_attrs",
+           "description_of",
            "extract_images_with_attrs"]
 
 
@@ -174,6 +175,40 @@ def format_attrs(attrs: dict) -> str:
     return " ".join(parts)
 
 
+def description_of(alt: str) -> str:
+    """
+    The words of an image's alt text, with any retired layout tokens left out.
+
+    Old decks wrote layout into the alt text: ``![a barn|left|30](barn.jpg)``.
+    Those tokens do nothing now, and they are not something a screen reader
+    should read out, so only the parts that are not tokens are kept.
+    """
+    words = [part.strip() for part in (alt or "").split("|")]
+    return " ".join(w for w in words if w and not _is_retired_token(w)).strip()
+
+
+def _is_retired_token(part: str) -> bool:
+    """True when *part* is one of the old alt-text layout tokens."""
+    from .splitter import (IMAGE_POSITIONS, IMAGE_FADE_DIRS, IMAGE_FIT,
+                           IMAGE_FOCAL)
+    token = part.lower()
+    if token in IMAGE_POSITIONS or token in IMAGE_FIT or token in IMAGE_FOCAL:
+        return True
+    if token in ("gradient", "nogradient", "flip-h", "flip-v"):
+        return True
+    if token.startswith("fade-") and token[5:] in IMAGE_FADE_DIRS:
+        return True
+    return bool(_RETIRED_TOKEN_RE.match(token))
+
+
+# The old tokens that carried a number or a colour: 30, opacity70,
+# grayscale100, blur4, zoom150, tint-navy.
+_RETIRED_TOKEN_RE = re.compile(
+    r'^(?:\d{1,3}|opacity\d{1,3}|grayscale\d{1,3}|blur\d{1,2}|zoom\d{1,3}'
+    r'|tint-(?:#[0-9a-f]{3,8}|[a-z]{2,30}))$'
+)
+
+
 def take_image_attrs(slide_md: str) -> "tuple[str, list[dict]]":
     """
     Strip every attribute block out of *slide_md*, in document order.
@@ -204,32 +239,34 @@ def take_image_attrs(slide_md: str) -> "tuple[str, list[dict]]":
 
 def extract_images_with_attrs(slide_md: str) -> "tuple[str, list[dict]]":
     """
-    ``splitter.extract_images()``, with each picture's overrides applied.
+    Take a slide's pictures out of its text, and say how each should look.
 
-    The one door to an image's appearance. Every caller that needs a slide's
-    pictures — the renderer, the thumbnail strip's reader, the script's word
-    count — goes through here, because a caller that used the splitter
-    directly would leave the attribute block in the text and count its tokens
-    as words the speaker has to say.
+    Every caller that needs a slide's pictures comes through here, so the
+    ``{…}`` block after a picture is never mistaken for words on the slide.
 
-    Each image comes back as ``{"src": …, "layout": …, "attrs": …}``.
-    "layout" is the resolved appearance — AUTO_IMAGE_LAYOUT updated by
-    whatever the block pinned, so no block means that dict unchanged.
+    Each picture comes back as a dict with four keys:
 
-    "attrs" is the separate half, and the separation is the point: it holds
-    only what the writer actually pinned. ``choose_layout()`` is decided from
-    that and never from "layout", because "layout" always has a position in
-    it — the automatic one — and a plan that read it could not tell a picture
-    placed on the right by the deck's own alternation from one a writer sent
-    there on purpose.
+    * ``src`` — where the picture is.
+    * ``alt`` — what it shows, in words, for anyone who cannot see it.
+    * ``attrs`` — only what the writer pinned in the ``{…}`` block.
+    * ``layout`` — the automatic look with ``attrs`` laid on top.
+
+    The layout is decided from ``attrs``, never from ``layout``.  ``layout``
+    always has a position in it, even when nobody chose one, so reading it
+    would treat every picture as if the writer had placed it.
     """
     from .splitter import extract_images   # local: keeps the 444 file's import cheap
 
     stripped, overrides = take_image_attrs(slide_md)
     cleaned, images = extract_images(stripped)
+    # The alt text of each picture, in the same order the splitter found
+    # them — its pattern is the one this module's pattern is built from.
+    alts = [m.group(1) for m in _IMAGE_RE.finditer(stripped)]
 
     for i, img in enumerate(images):
         override = overrides[i] if i < len(overrides) else {}
+        # What the picture shows, in words, for anyone who cannot see it.
+        img["alt"]    = description_of(alts[i] if i < len(alts) else "")
         img["attrs"]  = dict(override)
         img["layout"] = {**AUTO_IMAGE_LAYOUT, "filter": None, **override}
 

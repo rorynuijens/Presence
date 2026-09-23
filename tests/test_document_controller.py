@@ -38,6 +38,10 @@ class FakeEditor:
     def set_base_path(self, path) -> None:
         self.base_path = path
 
+    def adopt_outside_pictures(self) -> int:
+        """A first save copies outside pictures in; this draft has none."""
+        return 0
+
 
 class FakeClock:
     """The settle clock, as far as the document controller can see it.

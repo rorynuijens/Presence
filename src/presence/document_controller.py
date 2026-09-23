@@ -533,6 +533,7 @@ class DocumentController:
         assets are copied out before the bundle is let go.
         """
         win = self._win
+        was_draft = self.file_path is None
         if self.pres_path and self.file_path:
             old_assets = self.file_path.parent / "assets"
             if old_assets.is_dir():
@@ -548,9 +549,22 @@ class DocumentController:
         self.file_path     = path
         self.output_path   = path.with_suffix(".pdf")
         win.editor.set_base_path(path)
+        if was_draft:
+            self._adopt_draft_pictures()
         self.save(on_done=on_done)
         if old_pres_temp and old_pres_temp.exists():
             shutil.rmtree(old_pres_temp, ignore_errors=True)
+
+    def _adopt_draft_pictures(self) -> None:
+        """
+        Bring a first-time-saved draft's pictures into its new folder.
+
+        A saved deck may only read its own folder, so pictures a draft
+        pointed at elsewhere on disk are copied into assets/ first.
+        """
+        win = self._win
+        if win.editor.adopt_outside_pictures():
+            win.clock.document_replaced(win.editor.get_text())
 
     # ── .pres bundles ─────────────────────────────────────────────────────────
 
@@ -623,6 +637,7 @@ class DocumentController:
         win = self._win
         old_file_path = self.file_path
         old_pres_temp = self.pres_temp_dir
+        was_draft     = old_file_path is None
         try:
             tmp_base = "/tmp" if os.environ.get("FLATPAK_ID") else None
             tmp_dir = Path(tempfile.mkdtemp(prefix="presence-", dir=tmp_base))
@@ -642,6 +657,8 @@ class DocumentController:
         self.file_path   = md_path
         self.output_path = tmp_dir / "slides.pdf"
         win.editor.set_base_path(md_path)
+        if was_draft:
+            self._adopt_draft_pictures()
         self.save(on_done=on_done)
         if old_pres_temp and old_pres_temp != tmp_dir and old_pres_temp.exists():
             shutil.rmtree(old_pres_temp, ignore_errors=True)

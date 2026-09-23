@@ -25,13 +25,15 @@ from typing import TYPE_CHECKING, Callable, Protocol
 
 import gi
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gtk, Gio, GLib
+gi.require_version("Adw", "1")
+from gi.repository import Gtk, Adw, Gio, GLib
 
 from .app_utils import make_file_filter, make_filter_store
 from .slides.frontmatter import parse_frontmatter
 
 if TYPE_CHECKING:                       # imported for the annotations only
     from .build_coordinator import BuildCoordinator
+    from .converter import Converter
     from .document_controller import DocumentController
     from .editor import Editor
 
@@ -50,6 +52,7 @@ class ExportHost(Protocol):
     editor:      Editor
     documents:   DocumentController
     builds:      BuildCoordinator
+    converter:   Converter
     export_busy: Callable[[bool], None]   # window._BusyIndicator
 
     def show_toast(self, message: str, timeout: int = ...) -> None: ...
@@ -146,6 +149,46 @@ class ExportController:
     # ── PDF ───────────────────────────────────────────────────────────────────
 
     def export_pdf(self, *_) -> None:
+        """
+        Export the deck as a PDF, asking about reveal steps if it has any.
+
+        A slide that reveals in steps is presented as several pages.  That
+        is right for the talk, but someone reading the PDF later usually
+        wants each slide once.  So when the deck has steps, the writer
+        chooses; when it has none, there is nothing to ask.
+        """
+        if self._deck_has_steps():
+            self._ask_about_steps()
+        else:
+            self._choose_pdf_path(with_steps=True)
+
+    def _deck_has_steps(self) -> bool:
+        """True when any slide in the document reveals in more than one step."""
+        from .sidebar import read_slides
+        return any(f.steps > 1 for f in read_slides(self._win.editor.get_text()))
+
+    def _ask_about_steps(self) -> None:
+        dialog = Adw.AlertDialog(
+            heading="Export reveal steps?",
+            body=("Some slides show their content one piece at a time. The "
+                  "PDF can have a page for every step, the way you will "
+                  "present it, or show each slide once, complete."),
+        )
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("slides", "One page per slide")
+        dialog.add_response("steps",  "Every step")
+        dialog.set_response_appearance("steps", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("steps")
+        dialog.set_close_response("cancel")
+
+        def _on_response(_dlg, response: str) -> None:
+            if response in ("steps", "slides"):
+                self._choose_pdf_path(with_steps=(response == "steps"))
+
+        dialog.connect("response", _on_response)
+        dialog.present(self._win)
+
+    def _choose_pdf_path(self, with_steps: bool) -> None:
         docs = self._win.documents
         self._ask_save_path(
             title="Export PDF",
@@ -155,8 +198,29 @@ class ExportController:
             initial_file=(docs.output_path
                           if not docs.pres_path and docs.output_path else None),
             transient=False,
-            on_chosen=self._write_pdf,
+            on_chosen=self._write_pdf if with_steps else self._write_slides_pdf,
         )
+
+    def _write_slides_pdf(self, path: Path) -> None:
+        """
+        Write each slide once, complete, to *path*.
+
+        This is a separate render, not the build: the build keeps its page
+        for every step, because that is what Present shows.
+        """
+        win = self._win
+        win.export_busy(True)
+
+        def _done(error) -> bool:
+            win.export_busy(False)
+            if error is None:
+                win.show_toast(f"PDF exported → {path.name}")
+            else:
+                win.show_toast(f"Could not export the PDF: {error}")
+            return GLib.SOURCE_REMOVE
+
+        win.converter.export_slides_pdf_async(
+            win.editor.get_text(), win.documents.base_dir, path, _done)
 
     def _write_pdf(self, path: Path) -> None:
         # The PDF is the build's own output, so exporting one is just building
@@ -296,12 +360,18 @@ class ExportController:
             try:
                 from .slides.thumbnails_render import render_slides_hires
                 from .slides.handout import build_handout_html
+                from .slides.sources import SourcePolicy
                 import weasyprint
 
                 pngs = render_slides_hires(pdf_bytes, width_px=HANDOUT_IMAGE_WIDTH,
                                            pages=pages)
                 html = build_handout_html(slide_info, pngs, meta)
-                data = weasyprint.HTML(string=html).write_pdf()
+                # Every picture in a handout is already inside the page as
+                # data, so it has no reason to load anything else.
+                data = weasyprint.HTML(
+                    string=html,
+                    url_fetcher=SourcePolicy.data_only().fetcher(),
+                ).write_pdf(pdf_tags=True)
             except Exception as exc:
                 log.exception("Handout export failed")
                 GLib.idle_add(_failed, str(exc))

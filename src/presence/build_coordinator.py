@@ -113,24 +113,20 @@ class BuildCoordinator:
 
     def trigger(self, *_) -> None:
         """
-        Build the document as it currently stands.
+        Build the document as it is on screen right now.
 
-        **A build does not save.**  The editor's buffer is the document, and
-        that is what goes to the converter — so Present, Ctrl+Return, the
-        chip and the three exports made from the PDF all render what the
-        writer is looking at without writing it anywhere the writer did not
-        ask for.  It used to be the other way round: the converter read from
-        a path, so a build first wrote the buffer over the file on disk, and
-        an untitled document got a temporary copy of itself to be read back.
+        A build never saves.  It hands the editor's text to the converter,
+        so Present, Ctrl+Return and the exports all show what the writer
+        sees, without writing anything to disk they did not ask for.
         """
         win  = self._win
         docs = win.documents
         if docs.file_path is None:
-            # No document directory, so relative image sources have nothing
-            # to resolve against and the PDF has nowhere of its own to go.
-            # One scratch file serves every build until the deck is saved.
+            # An unsaved draft has no folder.  Its PDF goes to one scratch
+            # file, reused until the deck is saved, and base_dir is None,
+            # which tells the converter this is a draft (see sources.py).
             output_path = self._scratch_pdf()
-            base_dir    = output_path.parent
+            base_dir    = None
         else:
             output_path = docs.output_path or docs.file_path.with_suffix(".pdf")
             # The document's own directory, never the output's: Export PDF
@@ -152,13 +148,10 @@ class BuildCoordinator:
         """Delete the scratch deck an unsaved document was built to."""
         if self.temp_pdf is None:
             return
-        # The converter writes the HTML beside the PDF, so it goes too;
-        # the old cleanup took the PDF and left that one behind.
-        for path in (self.temp_pdf, self.temp_pdf.with_suffix(".html")):
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                pass
+        try:
+            self.temp_pdf.unlink(missing_ok=True)
+        except OSError:
+            pass
         self.temp_pdf = None
 
     def with_current_build(self, action, on_wait=None) -> None:

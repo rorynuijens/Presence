@@ -105,7 +105,14 @@ class ThumbCache:
                 f"</div>"
                 f"</body></html>"
             )
-            pdf_bytes  = weasyprint.HTML(string=html).write_pdf()
+            from .slides.sources import SourcePolicy
+            from .slides.theme_loader import theme_roots
+            # A theme's stylesheet may load its own fonts, and nothing else.
+            only_themes = SourcePolicy(None, extra_roots=theme_roots(),
+                                       local_anywhere=False)
+            pdf_bytes  = weasyprint.HTML(
+                string=html, url_fetcher=only_themes.fetcher(),
+            ).write_pdf()
             thumbnails = render_thumbnails(pdf_bytes, 1)
             if thumbnails and thumbnails[0]:
                 png = thumbnails[0]

@@ -133,24 +133,16 @@ def fragmented_slides(document, pages: list[int]) -> list[int]:
 
 def slide_pages_pdf(document, pages: list[int]) -> "tuple[bytes, list[int]]":
     """
-    The PDF of *document* with the continuation pages left out.
+    Write the PDF with one page per slide, leaving out spill-over pages.
 
-    One page per slide, which is what the thumbnail strip, the exported
-    images, the handout and the slideshow have always shown — they index by
-    :func:`slide_page_indices` and skip the fragments.  The exported PDF was
-    the one artifact that did not, so the file a writer mailed to somebody
-    was the only place the half-sliced remainders showed up.
+    When a slide has too much text, WeasyPrint carries the rest onto an
+    extra page.  That page is not a slide, so it is left out.  The slide
+    shows what fits, and the editor already marks where it stops.
 
-    A slide is ``overflow: hidden``: the deck shows what fits, and the editor
-    marks the fold and banners the slide, so nothing is lost here that the
-    slide itself was ever going to show.
-
-    Returns the PDF bytes together with the page each slide sits on *in those
-    bytes* — ``range(n_slides)`` once the fragments are gone.  Callers pass
-    that on to the thumbnails, the handout and the slideshow rather than
-    assuming the trim happened, because it falls back to the whole document
-    if the subset cannot be taken: a deck with a stray page still beats no
-    deck at all, but only if everything downstream is told which it got.
+    Returns the PDF and the page each slide ended up on.  Normally that is
+    simply 0, 1, 2… but if the pages cannot be picked out, the whole
+    document is written instead, and the list says so.  Everything that
+    shows slides uses that list rather than guessing.
     """
     try:
         all_pages = list(document.pages)
@@ -158,12 +150,18 @@ def slide_pages_pdf(document, pages: list[int]) -> "tuple[bytes, list[int]]":
         if len(wanted) == len(pages):
             if len(wanted) < len(all_pages):
                 document = document.copy(wanted)
-            return document.write_pdf(), list(range(len(pages)))
+            return document.write_pdf(**_PDF_OPTIONS), list(range(len(pages)))
     except Exception:
         log.warning("Could not drop continuation pages; exporting every page",
                     exc_info=True)
 
-    return document.write_pdf(), list(pages)
+    return document.write_pdf(**_PDF_OPTIONS), list(pages)
+
+
+# How every deck PDF is written.  pdf_tags adds the reading order and each
+# picture's alt text, so a screen reader can follow the slides.  It is an
+# option of writing the PDF, not of laying it out.
+_PDF_OPTIONS = {"pdf_tags": True}
 
 
 # ── The whole read-back, in one order ────────────────────────────────────────

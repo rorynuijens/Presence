@@ -68,6 +68,18 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="1.1.0" date="2026-09-23">
+      <description>
+        <p>Safe to open. A presentation someone sends you can no longer read your files or reach the internet.</p>
+        <ul>
+          <li>Pictures load only from the presentation's own folder. Web pictures load only when the presentation allows them with remote_images: true, and anything held back is named in the warning banner.</li>
+          <li>Opening the built PDF goes through the desktop portal, so the app no longer needs permission to run programs outside its sandbox.</li>
+          <li>Building no longer writes an HTML file next to your presentation, which could replace a file of the same name.</li>
+          <li>Exported PDFs are tagged for screen readers: each picture's description becomes its alt text, and the title and author are filled in.</li>
+          <li>Export PDF asks whether to include every reveal step or one page per slide.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.0.0" date="2026-04-20">
       <description>
         <p>Initial release.</p>

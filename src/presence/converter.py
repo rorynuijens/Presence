@@ -47,7 +47,8 @@ from .slides.splitter import split_slides
 from .slides.css import build_css
 from .slides.html import md_to_html_slides
 from .slides.themes import ASPECT_RATIOS
-from .slides.theme_loader import load_all_themes
+from .slides.theme_loader import load_all_themes, theme_roots
+from .slides.sources import SourcePolicy, wants_remote_images
 from .slides.utils import (encode_logo, safe_subpath,
                             compute_slide_start_lines)
 from .slides.pagination import measure_folds, page_the_deck
@@ -139,10 +140,16 @@ class Converter(GObject.Object):
         self._frame_serial:  int            = 0
         self._frame_pending: tuple | None   = None
         self._frame_busy:    bool           = False
+        # The HTML each build writes on its way to the PDF.  It lives in the
+        # cache folder, never next to the document, because a file called
+        # talk.html beside talk.md belongs to the writer.  One per
+        # converter, reused by every build.
+        self._html_file: Path | None = None
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def convert(self, text: str, base_dir: Path, output_path: Path) -> None:
+    def convert(self, text: str, base_dir: "Path | None",
+                output_path: Path) -> None:
         """
         Build the whole deck from *text* and write the PDF to *output_path*.
 
@@ -152,7 +159,8 @@ class Converter(GObject.Object):
         build had to write one first, which is how Present and Export came
         to save the writer's document behind their back.
 
-        *base_dir* is what relative image sources resolve against.
+        *base_dir* is the document's folder, which is where its pictures
+        live.  None means an unsaved draft, which has no folder yet.
         """
         with self._lock:
             self._last_text   = text
@@ -246,8 +254,9 @@ class Converter(GObject.Object):
         html, slide_info = md_to_html_slides(
             slides, ctx.css, ctx.logo_b64, meta,
             width=ctx.width, height=ctx.height, theme_bg=ctx.theme_bg,
-            base_url=str(base_dir),
+            base_url=_base_url(base_dir),
             only_index=index,
+            sources=self._sources(meta, base_dir),
         )
         return Preview(
             html=html,
@@ -263,7 +272,7 @@ class Converter(GObject.Object):
     def render_slide_async(
         self,
         text:      str,
-        base_dir:  Path,
+        base_dir:  "Path | None",
         index:     int,
         width_px:  int,
         callback,
@@ -320,7 +329,7 @@ class Converter(GObject.Object):
     def _render_frame(
         self,
         text:     str,
-        base_dir: Path,
+        base_dir: "Path | None",
         index:    int,
         width_px: int,
     ) -> SlideFrame:
@@ -332,6 +341,7 @@ class Converter(GObject.Object):
 
         index = max(0, min(index, len(slides) - 1))
         ctx = self._render_context(meta, base_dir)
+        sources = self._sources(meta, base_dir)
 
         # line_offsets is what stamps data-src-line onto every block, and
         # that is what turns the laid-out box tree back into a line the
@@ -339,15 +349,19 @@ class Converter(GObject.Object):
         html, _info = md_to_html_slides(
             slides, ctx.css, ctx.logo_b64, meta,
             width=ctx.width, height=ctx.height, theme_bg=ctx.theme_bg,
-            base_url=str(base_dir),
+            base_url=_base_url(base_dir),
             only_index=index,
             line_offsets=compute_slide_start_lines(text),
+            sources=sources,
         )
 
         if _weasyprint is None:
             raise ImportError("WeasyPrint is not installed — cannot render.")
 
-        document = _weasyprint.HTML(string=html, base_url=str(base_dir)).render()
+        document = _weasyprint.HTML(
+            string=html, base_url=_base_url(base_dir),
+            url_fetcher=sources.fetcher(),
+        ).render()
         fold = measure_folds(document, 1)[0]
 
         png = render_page_png(document.write_pdf(), 0, width_px)
@@ -387,7 +401,7 @@ class Converter(GObject.Object):
         # Logo from frontmatter: restrict to the document directory to
         # prevent an untrusted .md file from exfiltrating arbitrary files.
         logo_path = self.logo_path
-        if not logo_path and meta.get("logo"):
+        if not logo_path and meta.get("logo") and base_dir is not None:
             safe = safe_subpath(base_dir, meta["logo"])
             if safe:
                 logo_path = safe
@@ -426,7 +440,7 @@ class Converter(GObject.Object):
         # Per-presentation custom CSS — copy theme before mutating to
         # avoid corrupting the cached Theme object (fixes #31).
         tmp_css_path: str | None = None
-        if meta.get("custom_css"):
+        if meta.get("custom_css") and base_dir is not None:
             extra_css = safe_subpath(base_dir, meta["custom_css"])
             if extra_css and extra_css.exists():
                 if theme.custom_css_path:
@@ -472,47 +486,60 @@ class Converter(GObject.Object):
 
     # ── Background thread ─────────────────────────────────────────────────────
 
-    def _run(self, raw_text: str, base_dir: Path, output_path: Path) -> None:
+    def _lay_out(self, raw_text: str, base_dir: "Path | None",
+                 reveal: bool):
+        """
+        Turn the document into a laid-out WeasyPrint document.
+
+        Shared by the build and by the one-page-per-slide export, so both
+        read pictures under the same rules and lay slides out the same way.
+        Returns (render context, slide count, html, slide_info, document).
+        """
+        meta, text = parse_frontmatter(raw_text)
+        ctx = self._render_context(meta, base_dir)
+        sources = self._sources(meta, base_dir)
+
+        slides = split_slides(text)
+        if not slides:
+            raise ValueError("No slides found — separate slides with ---")
+
+        html, slide_info = md_to_html_slides(
+            slides, ctx.css, ctx.logo_b64, meta,
+            width=ctx.width, height=ctx.height, theme_bg=ctx.theme_bg,
+            base_url=_base_url(base_dir),
+            line_offsets=compute_slide_start_lines(raw_text),
+            reveal=reveal,
+            sources=sources,
+        )
+
+        if _weasyprint is None:
+            raise ImportError(
+                "WeasyPrint is not installed — cannot generate PDF."
+            )
+        document = _weasyprint.HTML(
+            string=html, base_url=_base_url(base_dir),
+            url_fetcher=sources.fetcher(),
+        ).render()
+        return ctx, len(slides), html, slide_info, document
+
+    def _run(self, raw_text: str, base_dir: "Path | None",
+             output_path: Path) -> None:
         t0 = time.monotonic()
         try:
-            meta, text = parse_frontmatter(raw_text)
+            # The PDF is the talk as it will be given, so a slide that
+            # reveals in steps gets a page for each step.  The handout and
+            # the exported images take each slide complete: both read
+            # page_index, which is the slide's last step.
+            ctx, n_slides, html, slide_info, wp_doc = self._lay_out(
+                raw_text, base_dir, reveal=True)
 
-            ctx = self._render_context(meta, base_dir)
-
-            slides = split_slides(text)
-            if not slides:
-                raise ValueError("No slides found — separate slides with ---")
-
-            html, slide_info = md_to_html_slides(
-                slides, ctx.css, ctx.logo_b64, meta,
-                width=ctx.width, height=ctx.height, theme_bg=ctx.theme_bg,
-                base_url=str(base_dir),
-                line_offsets=compute_slide_start_lines(raw_text),
-                # The PDF and the HTML deck are the talk as it was given, so
-                # a slide that reveals gets a page per step.  The handout and
-                # the exported images are materials *about* the talk and take
-                # each slide complete; both read page_index, the last step.
-                reveal=True,
-            )
-
-            html_path = output_path.with_suffix(".html")
+            html_path = self._html_output()
             html_path.write_text(html, encoding="utf-8")
 
-            if _weasyprint is None:
-                raise ImportError(
-                    "WeasyPrint is not installed — cannot generate PDF."
-                )
-            wp_doc = _weasyprint.HTML(
-                string=html, base_url=str(base_dir)
-            ).render()
-
-            n_slides = len(slides)
-            # Everything the laid-out document has to be asked, in the one
-            # order that gets right answers; see pagination.page_the_deck.
-            # The PDF it writes is one page per slide, or per reveal step of
-            # one — the continuation pages an overflow leaves behind are not
-            # slides, and the strip, the images, the handout and the
-            # slideshow have always skipped them.
+            # Read the laid-out pages back in the one order that gives right
+            # answers (see pagination.page_the_deck).  The PDF it writes has
+            # one page per slide, or per step of one.  The extra pages a
+            # too-full slide spills onto are not slides, so they are left out.
             paged = page_the_deck(wp_doc, n_slides)
             pdf_bytes = paged.pdf
             pages     = paged.pages
@@ -546,6 +573,58 @@ class Converter(GObject.Object):
             log.exception("Conversion failed: %s", msg)
             GLib.idle_add(self._on_failure, msg)
 
+    # ── One page per slide ────────────────────────────────────────────────────
+
+    def export_slides_pdf_async(self, text: str, base_dir: "Path | None",
+                                dest: Path, callback) -> None:
+        """
+        Write a PDF with each slide once, complete, to *dest*.
+
+        The normal build gives a slide that reveals in steps one page per
+        step, because that is how it is presented.  Someone reading the deck
+        afterwards wants each slide once, so this lays the deck out again
+        without steps.  It runs on its own thread and never touches the
+        build's state.  *callback(error)* runs on the main thread, with None
+        when the file was written.
+        """
+        def _work() -> None:
+            try:
+                _ctx, n_slides, _html, _info, document = self._lay_out(
+                    text, base_dir, reveal=False)
+                dest.write_bytes(page_the_deck(document, n_slides).pdf)
+                GLib.idle_add(callback, None)
+            except Exception as exc:              # reported to the writer
+                log.exception("One-page-per-slide export failed")
+                GLib.idle_add(callback, exc)
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    # ── Where things may be read from, and written to ─────────────────────────
+
+    def _sources(self, meta: dict, base_dir: "Path | None") -> SourcePolicy:
+        """What this document may load: its folder, the themes, maybe the web."""
+        return SourcePolicy(base_dir, extra_roots=theme_roots(),
+                            allow_remote=wants_remote_images(meta))
+
+    def _html_output(self) -> Path:
+        """The cache file each build writes its HTML to (see __init__)."""
+        with self._lock:
+            if self._html_file is None:
+                cache = Path(GLib.get_user_cache_dir()) / "presence"
+                cache.mkdir(parents=True, exist_ok=True)
+                fd, name = tempfile.mkstemp(prefix="build-", suffix=".html",
+                                            dir=cache)
+                os.close(fd)
+                self._html_file = Path(name)
+            return self._html_file
+
+    def discard_html_output(self) -> None:
+        """Delete the build's HTML file.  The window calls this on closing."""
+        with self._lock:
+            path, self._html_file = self._html_file, None
+        if path is not None:
+            path.unlink(missing_ok=True)
+
     # ── Main-thread callbacks ─────────────────────────────────────────────────
 
     def _on_success(self, n_slides: int, duration: float,
@@ -566,7 +645,8 @@ class Converter(GObject.Object):
 
         self.emit("conversion-complete", n_slides, duration, pdf_path, html_uri)
 
-        if pending and pending_text is not None and pending_base and pending_out:
+        # pending_base may be None: that is an unsaved draft, not a mistake.
+        if pending and pending_text is not None and pending_out:
             self.convert(pending_text, pending_base, pending_out)
         return GLib.SOURCE_REMOVE
 
@@ -584,7 +664,8 @@ class Converter(GObject.Object):
 
         # Run the queued conversion even after failure so watch mode recovers
         # automatically on the next save (fixes #76).
-        if pending and pending_text is not None and pending_base and pending_out:
+        # pending_base may be None: that is an unsaved draft, not a mistake.
+        if pending and pending_text is not None and pending_out:
             self.convert(pending_text, pending_base, pending_out)
         return GLib.SOURCE_REMOVE
 
@@ -594,3 +675,14 @@ class Converter(GObject.Object):
             return path.stat().st_mtime
         except FileNotFoundError:
             return 0.0
+
+
+def _base_url(base_dir: "Path | None") -> str:
+    """
+    The folder WeasyPrint reads relative addresses against.
+
+    An unsaved draft has no folder of its own, so it borrows the temp
+    folder.  Its pictures are written with full paths, which work from
+    anywhere, so the choice of folder does not matter to them.
+    """
+    return str(base_dir if base_dir is not None else Path(tempfile.gettempdir()))

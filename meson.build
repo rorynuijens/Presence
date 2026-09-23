@@ -1,4 +1,4 @@
-project('presence', version: '1.0.0')
+project('presence', version: '1.1.0')
 
 install_data('io.gitlab.gtk4_apps1.Presence.svg',
   install_dir: join_paths(get_option('datadir'), 'icons/hicolor/scalable/apps')
