@@ -1,0 +1,71 @@
+# Build the Presence Flatpak on GitHub.
+#
+# Every push to main and every pull request builds the app and keeps the
+# bundle as a downloadable artifact of the run.  A version tag (v1.2.0) does
+# the same and also attaches the bundle to that tag's GitHub Release.  To add
+# a bundle to a release that already exists, run this workflow by hand and
+# give it the tag.
+
+name: Flatpak
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and attach to its release (e.g. v1.1.0)"
+        required: true
+
+concurrency:
+  group: flatpak-${{ github.event.inputs.tag || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      # The cache is keyed on the manifest, so Poppler and the Python
+      # packages are only rebuilt when the manifest changes.
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: Presence.flatpak
+          manifest-path: io.gitlab.gtk4_apps1.Presence.json
+          cache-key: flatpak-builder-${{ hashFiles('io.gitlab.gtk4_apps1.Presence.json') }}
+          upload-artifact: false
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Presence-flatpak
+          path: Presence.flatpak
+          if-no-files-found: error
+
+  release:
+    name: Attach to release
+    needs: build
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Presence-flatpak
+
+      - name: Upload the bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          gh release upload "$TAG" Presence.flatpak \
+            --repo "$GITHUB_REPOSITORY" --clobber
