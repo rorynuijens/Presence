@@ -68,6 +68,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="1.1.1" date="2026-10-07">
+      <description>
+        <p>Presence now updates itself. Install it once from rorynuijens.github.io/Presence and Software keeps it current with every release.</p>
+      </description>
+    </release>
     <release version="1.1.0" date="2026-09-23">
       <description>
         <p>Safe to open. A presentation someone sends you can no longer read your files or reach the internet.</p>
