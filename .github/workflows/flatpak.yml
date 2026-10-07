@@ -5,6 +5,11 @@
 # the same and also attaches the bundle to that tag's GitHub Release.  To add
 # a bundle to a release that already exists, run this workflow by hand and
 # give it the tag.
+#
+# A version tag also publishes the build as a signed Flatpak repository on
+# GitHub Pages, which is what GNOME Software installs from and updates
+# against.  Only tags do: main is never published.  The signing key is the
+# FLATPAK_GPG_KEY secret; build-aux/publish-repo.sh does the work.
 
 name: Flatpak
 
@@ -69,3 +74,43 @@ jobs:
         run: |
           gh release upload "$TAG" Presence.flatpak \
             --repo "$GITHUB_REPOSITORY" --clobber
+
+  repo:
+    name: Build the repository
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install flatpak and ostree
+        run: sudo apt-get update && sudo apt-get install -y flatpak ostree
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: Presence-flatpak
+
+      - name: Import the bundle and sign the repository
+        env:
+          FLATPAK_GPG_KEY: ${{ secrets.FLATPAK_GPG_KEY }}
+        run: |
+          build-aux/publish-repo.sh Presence.flatpak site \
+            "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}"
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  pages:
+    name: Publish to Pages
+    needs: repo
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
