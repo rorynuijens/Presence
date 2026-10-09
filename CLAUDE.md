@@ -44,7 +44,18 @@ presence-cli input.md out.pdf
 The output argument is optional and defaults to the input with a `.pdf`
 suffix. It used to be optional and *undefaulted*, so the documented command
 above dereferenced `None` and died in a traceback on the first line that
-touched it. `cli.py` is mode `444`; that fix is the only thing in it.
+touched it.
+
+**The version is written once, in `pyproject.toml`.** `slides/version.py`'s
+`app_version()` is what the About dialog and `presence-cli --version` show; a
+source checkout reads its own `pyproject.toml`, an installed copy its package
+metadata. Both used to say a hard-coded `1.0.0` through two releases.
+`test_version.py` holds `meson.build` and the newest metainfo `<release>` to
+the same number and fails if a source file writes a version of its own — so a
+release bumps three files: `pyproject.toml`, `meson.build`, the metainfo.
+`application.py` and `cli.py` are writable now (`application.py` was unlocked
+for this); where this file explains a design by either being mode `444`, the
+design stands but the constraint is gone.
 
 ## Running tests
 

@@ -11,6 +11,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib
 
 from .window  import MainWindow
+from .slides.version import app_version
 from .session import load_last_file, save_last_file, recovery_path_for
 
 APP_ID = "io.gitlab.gtk4_apps1.Presence"
@@ -138,7 +139,7 @@ class Application(Adw.Application):
             application_name="Presence",
             application_icon=APP_ID,
             developer_name="Rory",
-            version="1.0.0",
+            version=app_version(),
             comments="Convert Markdown files to PDF slideshows.",
         )
         # GTK_LICENSE_UNKNOWN (0) — replace with e.g. Adw.AboutDialog.GTK_LICENSE_GPL_3_0

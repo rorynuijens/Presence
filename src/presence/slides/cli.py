@@ -11,6 +11,7 @@ from .themes       import ASPECT_RATIOS
 from .theme_loader import load_all_themes, install_theme, user_themes_dir
 from .convert      import convert
 from .utils        import timestamp
+from .version      import app_version
 
 _convert_lock = threading.Lock()
 
@@ -68,7 +69,7 @@ def _parse_args() -> argparse.Namespace:
     )
     # Version flag (#93)
     parser.add_argument(
-        "--version", action="version", version="%(prog)s 1.0.0",
+        "--version", action="version", version=f"%(prog)s {app_version()}",
     )
     parser.add_argument("input",  type=Path, nargs="?",
                         help="Input .md file")
